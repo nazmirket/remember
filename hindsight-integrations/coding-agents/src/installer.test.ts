@@ -619,7 +619,6 @@ describe("local server setup", () => {
     expect(run(["install", harness], ctx)).toBe(0);
     const cfg = readJson(configPath(ctx));
     expect(cfg.serverMode).toBe("daemon");
-    expect(cfg.autoUpdate).toBe(false);
     expect(cfg.embedPackagePath).toContain("hindsight-embed");
     expect(cfg.apiUrl).toBeUndefined();
   });

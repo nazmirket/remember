@@ -57,36 +57,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}bank_aliases DROP COLUMN IF EXISTS is_primary")
 
 
-def _oracle_execute_ignoring(sql: str, *codes: int) -> None:
-    """Run a DDL statement and swallow the given ORA- codes, so a re-run is safe."""
-    checks = " OR ".join(f"SQLCODE = {code}" for code in codes)
-    block = f"BEGIN EXECUTE IMMEDIATE :stmt; EXCEPTION WHEN OTHERS THEN IF {checks} THEN NULL; ELSE RAISE; END IF; END;"
-    op.get_bind().exec_driver_sql(block, {"stmt": sql.strip()})
-
-
-def _oracle_upgrade() -> None:
-    # ORA-01430: column already exists (re-run of a partial migration).
-    _oracle_execute_ignoring(
-        "ALTER TABLE bank_aliases ADD is_primary NUMBER(1) DEFAULT 0 NOT NULL",
-        -1430,
-    )
-    # Oracle has no partial index. A function-based unique index is the
-    # equivalent: rows that are not primary yield NULL, and Oracle does not
-    # index an all-NULL key, so only the primaries take part in the constraint.
-    _oracle_execute_ignoring(
-        "CREATE UNIQUE INDEX idx_bank_aliases_one_primary ON bank_aliases (CASE WHEN is_primary = 1 THEN bank_id END)",
-        -955,
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.execute("DROP INDEX idx_bank_aliases_one_primary")
-    op.execute("ALTER TABLE bank_aliases DROP COLUMN is_primary")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

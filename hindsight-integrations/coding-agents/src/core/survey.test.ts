@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resolveClaudeBin,
   startCodebaseSurvey as startSurvey,
-  SURVEY_AGENT,
-  SURVEY_AGENT_CONFIG,
   SURVEY_MAX_ATTEMPTS,
   SURVEY_PROMPT,
 } from "./survey";
@@ -26,7 +24,7 @@ let lockDir: string;
 beforeEach(() => {
   lockDir = mkdtempSync(join(tmpdir(), "hindsight-survey-test-"));
   vi.mocked(resolveHostConfig).mockReturnValue({
-    cfg: resolveConfig({ apiUrl: "https://api.example.test", apiToken: "test-token" }),
+    cfg: resolveConfig({ apiToken: "test-token" }),
     bankId: "bank-1",
   });
 });
@@ -178,69 +176,6 @@ describe("startCodebaseSurvey", () => {
     expect(options.env.HINDSIGHT_DISABLE_HOOKS).toBe("1");
   });
 
-  // ── Antigravity recipe (plan read-only mode + global MCP config) ───────────────────────────────
-  it("antigravity: spawns `agy -p` in plan mode", async () => {
-    const spawn = fakeSpawn();
-    await startCodebaseSurvey("/repo", {
-      harness: "antigravity-cli",
-      spawn,
-      resolveBin: (b) => (b === "agy" ? b : undefined),
-    });
-    const [bin, argv, options] = launched(spawn);
-    expect(bin).toBe("agy");
-    expect(argv).toEqual(["-p", SURVEY_PROMPT, "--mode=plan"]);
-    expect(options.env.HINDSIGHT_DISABLE_HOOKS).toBe("1");
-  });
-
-  // ── opencode recipe (our own read-only agent; tools from the loaded plugin) ────────────────────
-  it("opencode: spawns `opencode run` under OUR survey agent, never the built-in plan agent", async () => {
-    const spawn = fakeSpawn();
-    await startCodebaseSurvey("/repo", {
-      harness: "opencode",
-      spawn,
-      resolveBin: (b) => (b === "opencode" ? b : undefined),
-      opencodeDefinesAgent: () => true,
-    });
-    const [bin, argv, options] = launched(spawn);
-    expect(bin).toBe("opencode");
-    expect(argv).toEqual(["run", "--agent", SURVEY_AGENT, SURVEY_PROMPT]);
-    // `plan` appends a read-only system-reminder that talks models out of the ingest call the
-    // survey exists to make (#3450) — the whole point is not to run under it.
-    expect(argv).not.toContain("plan");
-    expect(options.env.HINDSIGHT_DISABLE_HOOKS).toBe("1");
-  });
-
-  // #5084: npm @opencode/cli (v2) also installs an `opencode` bin, and v2 cannot define our agent —
-  // `opencode run --agent hindsight-survey` there fails with "agent not found". Skip that runner.
-  it("skips an `opencode` bin that cannot define the survey agent (opencode v2)", async () => {
-    const spawn = fakeSpawn();
-    const ok = await startCodebaseSurvey("/repo", {
-      harness: "opencode2" as never,
-      spawn,
-      resolveBin: (b) => (b === "opencode" ? b : undefined),
-      opencodeDefinesAgent: () => false,
-    });
-    expect(ok).toBe(false);
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  // A host with no survey recipe of its own (pi, opencode2, kilo, …) gets no survey: it must never
-  // run on another installed agent's account. Every installed agent is offered here.
-  it.each(["pi", "opencode2", "kilo"])("%s: no survey, never another agent's CLI", async (h) => {
-    const spawn = fakeSpawn();
-    const ok = await startCodebaseSurvey("/repo", {
-      harness: h as never,
-      spawn,
-      // binOnPath's contract: it throws on no name at all (#6251).
-      resolveBin: (b) => {
-        if (typeof b !== "string") throw new TypeError("no bin name");
-        return `/bin/${b}`;
-      },
-    });
-    expect(ok).toBe(false);
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
   // #6075: terminal managers name the user's pane in env vars and hook the agent's Stop, so a
   // survey inheriting them closed (Orca) or rebound (Herdr) the user's own pane.
   it("does not hand the survey the user's terminal-manager pane identity", async () => {
@@ -259,42 +194,6 @@ describe("startCodebaseSurvey", () => {
     } finally {
       for (const k of Object.keys(vars)) delete process.env[k];
     }
-  });
-
-  it.skipIf(process.platform === "win32").each([
-    ["0.0.0-beta-18743", false],
-    ["2.1.2", false], // stable v2 (#5923)
-    ["1.18.9", true],
-  ])("reads `opencode --version` %s as able to define the agent: %s", async (version, ok) => {
-    const bin = join(lockDir, "opencode");
-    writeFileSync(bin, `#!/bin/sh\necho ${version}\n`, { mode: 0o755 });
-    const spawn = fakeSpawn();
-    process.env.HINDSIGHT_OPENCODE_BIN = bin;
-    try {
-      await startCodebaseSurvey("/repo", {
-        harness: "opencode",
-        spawn,
-        resolveBin: (b) => (b === bin ? b : undefined),
-      });
-    } finally {
-      delete process.env.HINDSIGHT_OPENCODE_BIN;
-    }
-    expect(spawn).toHaveBeenCalledTimes(ok ? 1 : 0);
-  });
-
-  // The recipe above is only safe because the agent it names is read-only. opencode drops denied
-  // tools from the model's tool list entirely, so this ruleset IS the sandbox.
-  it("the survey agent denies everything except reading and the one ingest tool", async () => {
-    expect(SURVEY_AGENT_CONFIG.permission["*"]).toBe("deny");
-    expect(SURVEY_AGENT_CONFIG.permission.hindsight_ingest_document).toBe("allow");
-    const allowed = Object.entries(SURVEY_AGENT_CONFIG.permission)
-      .filter(([, v]) => v === "allow")
-      .map(([k]) => k)
-      .sort();
-    expect(allowed).toEqual(["glob", "grep", "hindsight_ingest_document", "read"]);
-    // No write, no bash, and no `task` — which would reach a subagent that CAN write.
-    for (const escape of ["write", "edit", "bash", "task", "patch"])
-      expect(SURVEY_AGENT_CONFIG.permission).not.toHaveProperty(escape, "allow");
   });
 
   it("codex: escapes Windows paths in the -c overrides as TOML strings (#5710)", async () => {
@@ -334,9 +233,9 @@ describe("startCodebaseSurvey", () => {
 
   it("runs nothing when the harness's own CLI is missing, even with another agent installed", async () => {
     const spawn = fakeSpawn();
-    // Antigravity is the host, only codex is installed → no survey.
+    // Claude is the host, only codex is installed → no survey.
     const ok = await startCodebaseSurvey("/repo", {
-      harness: "antigravity-cli",
+      harness: "claude-code",
       mcpServerPath: "/x/mcp-server.js",
       spawn,
       resolveBin: (b) => (b === "codex" ? b : undefined),
@@ -348,7 +247,7 @@ describe("startCodebaseSurvey", () => {
   it("no capable agent found → no spawn (fail open; the git-log seed still ran)", async () => {
     const spawn = fakeSpawn();
     await startCodebaseSurvey("/repo", {
-      harness: "antigravity-cli",
+      harness: "claude-code",
       spawn,
       resolveBin: () => undefined,
     });
@@ -442,13 +341,13 @@ describe("startCodebaseSurvey", () => {
     await expect(
       startCodebaseSurvey("/repo-b", { harness: "codex", spawn, resolveBin: yes })
     ).resolves.toBe(false);
-    for (const [apiUrl, apiToken, bankId] of [
-      ["https://other.example.test", "test-token", "bank-1"],
-      ["https://api.example.test", "other-token", "bank-1"],
-      ["https://api.example.test", "test-token", "bank-2"],
-    ]) {
+    for (const [apiPort, apiToken, bankId] of [
+      [9078, "test-token", "bank-1"],
+      [9077, "other-token", "bank-1"],
+      [9077, "test-token", "bank-2"],
+    ] as const) {
       vi.mocked(resolveHostConfig).mockReturnValue({
-        cfg: resolveConfig({ apiUrl, apiToken }),
+        cfg: resolveConfig({ apiPort, apiToken }),
         bankId,
       });
       await expect(startCodebaseSurvey("/repo-a", { spawn, resolveBin: yes })).resolves.toBe(true);
@@ -484,10 +383,7 @@ describe("startCodebaseSurvey", () => {
     build("./survey.ts", bundle);
     build("../survey-supervisor.ts", supervisor);
     const config = join(lockDir, "config.json");
-    writeFileSync(
-      config,
-      JSON.stringify({ bankId: "bank-1", apiUrl: "https://api.example.test", apiToken: "t" })
-    );
+    writeFileSync(config, JSON.stringify({ bankId: "bank-1", apiToken: "t" }));
     // The stand-in agent records its pid and its supervisor's, then idles like a long survey.
     const agent = `const fs = require('node:fs'); if (process.env.${SURVEY_SPEC_ENV}) fs.writeFileSync(${JSON.stringify(lockDir)} + '/leaked-spec', ''); fs.writeFileSync(${JSON.stringify(lockDir)} + '/pid-' + process.pid + '-' + process.ppid, ''); setInterval(() => {}, 1000);`;
     const staleMs = 2_000;

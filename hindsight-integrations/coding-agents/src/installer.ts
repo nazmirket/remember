@@ -6,16 +6,8 @@
  * agents exist on this machine (binary on PATH or config dir present) and wires each one's NATIVE
  * integration — hooks + MCP where the host wants them:
  *
- *   opencode     add this package to `plugin` in ~/.config/opencode/opencode.json
- *   claude-code  3 hooks in ~/.claude/settings.json + `claude mcp add` (user scope)
- *   codex        3 hooks in ~/.codex/hooks.json + [features]/[mcp_servers] in config.toml
- *   antigravity-cli PreInvocation + Stop hooks, Hindsight status line + MCP
- *   devin-cli     SessionStart + UserPromptSubmit + Stop hooks in ~/.config/devin/config.json + MCP
- *   cursor-cli   sessionStart + beforeSubmitPrompt + stop hooks in ~/.cursor/hooks.json + ~/.cursor/mcp.json
- *   copilot-cli  sessionStart + userPromptTransformed + agentStop hooks in ~/.copilot/hooks/ + MCP
- *   cline-cli    native in-process plugin + MCP
- *   dcode        native Agent Plugin via `dcode plugin marketplace/install`
- *   dsh          native Cordis plugin row in $DSH_HOME/cordis.patch.yml (DeepSeek Harness)
+ *   claude-code  hooks in ~/.claude/settings.json and MCP configuration
+ *   codex        hooks in ~/.codex/hooks.json and MCP configuration in config.toml
  *
  * IDEMPOTENT: our entries are recognized by the package path in their command ("hindsight-coding-
  * agents"), replaced on re-install (so moving the package just needs `install` again) and removed
@@ -40,7 +32,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOOK_HARNESSES, type HookHarnessName } from "./harness/hook-lifecycle";
 import { importLocalHistory } from "./core/history";
-import { detectLlm, hasForkEmbed, hasRustToolchain, hasUvx, type LlmChoice } from "./core/daemon";
+import { detectLlm, hasForkEmbed, hasUv, type LlmChoice } from "./core/daemon";
 import { resolveSkillDirs } from "./core/skill-dirs";
 import { formatUsageReport, readUsage } from "./core/usage";
 import { createInstallerUi, type SelectOption } from "./install-ui";
@@ -75,9 +67,8 @@ export interface InstallCtx {
    *  explicitly so the suite never blocks on a read. */
   interactive?: boolean;
   /** Daemon prerequisite probes; injectable for tests. */
-  hasUvx?: () => boolean;
+  hasUv?: () => boolean;
   detectLlm?: () => LlmChoice | undefined;
-  hasRust?: () => boolean;
   /** Reads an old per-agent plugin's endpoint; injectable for tests. */
   /** The raw CLI arguments after the command word — harness installers read flags off this
    *  (e.g. traecode's --enable-workspace-mcp) without each one re-parsing argv. */
@@ -147,10 +138,7 @@ const cmdHook = (dist: string, file: string, timeout: number) => ({
   hooks: [{ type: "command", command: `node "${join(dist, file)}"`, timeout }],
 });
 
-/** The command STRING for a host that runs `node <script>`. The path is quoted only when it needs
- *  to be: Antigravity CLI runs these without a shell on Windows, so the quotes reach node as part
- *  of the path, it reads `"C:\…"` as relative and fails with MODULE_NOT_FOUND (#5913). cursor-cli
- *  and copilot-cli share the flat hook branch; they run through a shell, where both forms are equal. */
+/** Quote the script path when it contains spaces. */
 export const nodeCommand = (script: string): string =>
   script.includes(" ") ? `node "${script}"` : `node ${script}`;
 
@@ -450,7 +438,7 @@ function stageRuntime(c: InstallCtx): InstallCtx {
   }
 }
 
-// ── server setup (cloud / self-hosted / local daemon) ───────────────────────────
+// ── local daemon setup ──────────────────────────────────────────────────────────
 
 /** Value of `--name value` or `--name=value`. */
 export function flagValue(args: string[], name: string): string | undefined {
@@ -519,7 +507,6 @@ function configureServer(
     ...existing,
     serverMode: "daemon",
     embedPackagePath,
-    autoUpdate: false,
   };
   delete next.apiUrl;
   delete next.apiToken;
@@ -534,17 +521,10 @@ function configureServer(
  * letting the first session fail quietly with nothing but a diagnostic line.
  */
 function reportDaemonPrereqs(c: InstallCtx): void {
-  if (!(c.hasUvx ?? hasUvx)()) {
+  if (!(c.hasUv ?? hasUv)()) {
     c.log?.(
-      `⚠️  \`uv\` is not on PATH. The daemon is fetched and run with it, so memory stays inert\n` +
+      `⚠️  \`uv\` is not on PATH. The local daemon is run with it, so memory stays inert\n` +
         `    until you install it: https://docs.astral.sh/uv/`
-    );
-  }
-  if (!(c.hasRust ?? hasRustToolchain)()) {
-    c.log?.(
-      `⚠️  macOS needs a current Rust toolchain to build the daemon's dependencies (litellm\n` +
-        `    publishes no macOS wheel). Install from https://rustup.rs, then\n` +
-        `    \`rustup default stable && rustup update\` — an OUT-OF-DATE toolchain fails too.`
     );
   }
   const llm = (c.detectLlm ?? detectLlm)();
@@ -552,8 +532,8 @@ function reportDaemonPrereqs(c: InstallCtx): void {
     c.log?.(`   local extraction will use ${llm.provider} (from ${llm.source})`);
   } else {
     c.log?.(
-      `⚠️  No LLM available for local fact extraction. Set OPENAI_API_KEY, ANTHROPIC_API_KEY or\n` +
-        `    GEMINI_API_KEY (or install the Claude Code CLI, which needs no key).`
+      `⚠️  No LLM available for local fact extraction. Set OPENAI_API_KEY or ANTHROPIC_API_KEY,\n` +
+        `    or install the Claude Code or Codex CLI (which needs no key).`
     );
   }
 }

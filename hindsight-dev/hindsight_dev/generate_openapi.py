@@ -41,11 +41,11 @@ def _restore_binary_format(node: object) -> None:
 
 def generate_openapi_spec(output_path: str = None):
     """Generate OpenAPI spec and save to file."""
-    # Default to hindsight-docs/static/openapi.json (single source of truth)
+    # Default to schemas/openapi.json (single source of truth)
     if output_path is None:
         # Get the root of the project (3 levels up from this file)
         root_dir = Path(__file__).parent.parent.parent
-        output_path = str(root_dir / "hindsight-docs" / "static" / "openapi.json")
+        output_path = str(root_dir / "schemas" / "openapi.json")
 
     # Create a temporary memory instance for OpenAPI generation
     _memory = MemoryEngine(

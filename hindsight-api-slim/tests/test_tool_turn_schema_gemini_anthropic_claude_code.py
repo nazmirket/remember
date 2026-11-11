@@ -46,26 +46,6 @@ async def _call(provider: Any) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_gemini_sends_the_schema_as_json_schema():
-    pytest.importorskip("google.genai")
-    with patch("google.genai.Client") as client_cls:
-        client_cls.return_value = MagicMock()
-        from hindsight_api.engine.providers.gemini_llm import GeminiLLM
-
-        provider = GeminiLLM(provider="gemini", api_key="k", base_url="", model="gemini-2.5-flash")
-    provider._client = MagicMock()
-    response = MagicMock(text=json.dumps(_REPLY), usage_metadata=None, candidates=[])
-    provider._client.aio.models.generate_content = AsyncMock(return_value=response)
-
-    assert await _call(provider) == _REPLY
-    config = provider._client.aio.models.generate_content.call_args.kwargs["config"]
-    # Full JSON Schema: Gemini's ``response_schema`` subset has no additionalProperties.
-    assert config.response_json_schema["properties"]["call"]["anyOf"][0]["additionalProperties"] is False
-    assert config.response_schema is None
-    assert not config.tools and not config.tool_config
-
-
-@pytest.mark.asyncio
 async def test_anthropic_sends_the_schema_as_its_structured_output():
     with patch("anthropic.AsyncAnthropic") as client_cls:
         client_cls.return_value = MagicMock()

@@ -15,7 +15,6 @@ VectorChord/pgroonga/pg_search/Oracle available.
 import pytest
 
 from hindsight_api.config import VALID_TEXT_SEARCH_EXTENSIONS
-from hindsight_api.engine.sql.oracle import OracleDialect
 from hindsight_api.engine.sql.postgresql import PostgreSQLDialect
 
 # Enumerate the family from config rather than restating it, so a sixth backend
@@ -50,11 +49,6 @@ def test_pg_backend_applies_the_caller_floor(extension):
     assert ">= 0.3" in _pg_arm(extension, 0.3)
 
 
-def test_oracle_applies_the_caller_floor():
-    arm = OracleDialect().build_bm25_arm(**ARM_KWARGS, bm25_min_score=0.3)
-    assert ">= 0.3" in arm
-
-
 @pytest.mark.parametrize("extension", PG_EXTENSIONS)
 def test_pg_floor_is_inclusive_not_exclusive(extension):
     """`min_scores` floors are documented as inclusive, and the semantic arm uses
@@ -75,11 +69,6 @@ def test_pg_default_floor_keeps_the_structural_match_gate(extension):
     else:
         assert "bm25_score >" not in arm
         assert "bm25_score >=" not in arm
-
-
-def test_oracle_default_floor_keeps_the_structural_match_gate():
-    arm = OracleDialect().build_bm25_arm(**ARM_KWARGS, bm25_min_score=0.0)
-    assert "> 0" in arm
 
 
 @pytest.mark.parametrize("extension", PG_EXTENSIONS)

@@ -54,7 +54,6 @@ const codexPrompt: HookSpec = {
     sessionId: ev.session_id as string | undefined,
   }),
 };
-const notGrokHosted = (): boolean => !process.env.GROK_HOOK_EVENT;
 
 export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
   "claude-code": {
@@ -64,12 +63,11 @@ export const HOOK_HARNESSES: Record<HookHarnessName, HookHarnessSpec> = {
       prompt: { event: "UserPromptSubmit", entry: "claude-hook.js", timeout: 30 },
       stop: { event: "Stop", entry: "claude-stop-hook.js", timeout: 60 },
     },
-    sessionStart: { ...standardSessionStart("claude-code"), accept: notGrokHosted },
-    prompt: { ...claudePrompt, accept: notGrokHosted },
+    sessionStart: standardSessionStart("claude-code"),
+    prompt: claudePrompt,
     retain: {
       hostTimeoutSec: 60,
       harness: "claude-code",
-      accept: notGrokHosted,
       parse: (ev) => ({
         sessionId: ev.session_id as string | undefined,
         transcriptPath: ev.transcript_path as string | undefined,

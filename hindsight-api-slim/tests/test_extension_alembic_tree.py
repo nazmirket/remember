@@ -53,16 +53,12 @@ _REVISION = textwrap.dedent(
         op.execute(f"DROP TABLE IF EXISTS {_schema_prefix()}ext_probe")
 
 
-    _oracle_upgrade = _pg_upgrade
-    _oracle_downgrade = _pg_downgrade
-
-
     def upgrade() -> None:
-        run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+        run_for_dialect(pg=_pg_upgrade)
 
 
     def downgrade() -> None:
-        run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+        run_for_dialect(pg=_pg_downgrade)
     '''
 ).strip()
 

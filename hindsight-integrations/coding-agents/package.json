@@ -37,7 +37,6 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^26.1.0",
-    "@vectorize-io/hindsight-all": "^0.10.2",
     "smol-toml": "^1.8.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",

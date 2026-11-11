@@ -18,7 +18,7 @@ This package exports the extension *interfaces* only. Concrete implementations â
 including the ones bundled under ``hindsight_api.extensions.builtin`` â€” are
 imported by path at load time, so importing this package never pulls in an
 implementation's dependencies. Extensions distributed outside the server live in
-``hindsight-extensions/`` in the repository.
+a separately installed package.
 """
 
 from hindsight_api.extensions.bank_tables import BankScopedTable

@@ -100,29 +100,3 @@ class TestAnthropicConversion:
         blocks = _to_anthropic_content([{"type": "text", "text": "prose"}])
 
         assert blocks == [{"type": "text", "text": "prose"}]
-
-
-class TestGeminiConversion:
-    def test_a_plain_string_becomes_one_text_part(self) -> None:
-        from google.genai import types as genai_types
-
-        from hindsight_api.engine.providers.gemini_llm import _to_gemini_parts
-
-        parts = _to_gemini_parts("hello", genai_types)
-
-        assert len(parts) == 1
-        assert parts[0].text == "hello"
-
-    def test_an_image_part_becomes_inline_data_with_the_raw_bytes(self) -> None:
-        from google.genai import types as genai_types
-
-        from hindsight_api.engine.providers.gemini_llm import _to_gemini_parts
-
-        prompt_parts = build_prompt_parts(f"see:\n\n{attachment_placeholder(PNG_HASH)}", {PNG_ID: PNG})
-
-        parts = _to_gemini_parts(prompt_parts, genai_types)
-
-        assert parts[0].text.strip() == "see:"
-        assert parts[1].inline_data.mime_type == "image/png"
-        # Raw bytes, not the base64 text — Gemini decodes nothing for us.
-        assert parts[1].inline_data.data == PNG_BYTES

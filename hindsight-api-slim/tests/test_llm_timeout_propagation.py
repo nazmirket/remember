@@ -42,13 +42,6 @@ def _spy_provider_call(monkeypatch, llm: LLMConfig) -> dict:
     return captured
 
 
-def test_litellm_provider_impl_receives_timeout():
-    """LLMConfig -> create_llm_provider -> LiteLLMLLM carries the resolved timeout."""
-    llm = LLMConfig(provider="litellm", api_key="k", base_url="", model="gpt-4o-mini", timeout=300.0)
-    assert llm.timeout == 300.0
-    assert llm._provider_impl.timeout == 300.0
-
-
 def test_openai_compatible_provider_impl_receives_timeout():
     """The OpenAI-compatible path (openai/groq/ollama/...) carries the timeout too."""
     llm = LLMConfig(provider="openai", api_key="k", base_url="", model="gpt-4o-mini", timeout=250.0)
@@ -60,9 +53,6 @@ def test_openai_compatible_provider_impl_receives_timeout():
     [
         ("openai-codex", {}),
         ("anthropic", {}),
-        ("gemini", {}),
-        ("github-copilot", {}),
-        ("cursor", {}),
         ("llamacpp", {}),
     ],
 )
@@ -82,8 +72,6 @@ async def test_every_network_provider_receives_the_resolved_timeout(provider, ex
     with (
         patch.object(CodexLLM, "_load_codex_auth", return_value=("token", "account")),
         patch.object(CodexLLM, "_load_codex_refresh_token", return_value=None),
-        # The cursor provider resolves its CLI at construction; CI has no cursor-agent.
-        patch("hindsight_api.engine.providers.cursor_llm.shutil.which", return_value="/usr/bin/cursor-agent"),
     ):
         llm = LLMConfig(provider=provider, api_key="k", base_url="", model="m", timeout=222.0, **extra)
     try:
@@ -92,24 +80,6 @@ async def test_every_network_provider_receives_the_resolved_timeout(provider, ex
         # github-copilot registers a process-wide shared runtime; an unreleased one is
         # reused by every later copilot provider and skips its sign-in check (#6114).
         await llm.cleanup()
-
-
-def test_gemini_uses_the_resolved_timeout_at_the_call_site():
-    """Gemini's ``asyncio.wait_for`` deadline comes from config, not a literal.
-
-    The 90 s literal used to be written at both call sites, so a configured
-    timeout was carried and then ignored — the attribute check above would have
-    passed anyway.
-    """
-    llm = LLMConfig(provider="gemini", api_key="k", base_url="", model="m", timeout=45.0)
-    assert llm._provider_impl._request_timeout == 45.0
-
-
-def test_gemini_deadline_falls_back_when_unconfigured():
-    from hindsight_api.engine.providers.gemini_llm import _DEFAULT_GEMINI_TIMEOUT
-
-    llm = LLMConfig(provider="gemini", api_key="k", base_url="", model="m")
-    assert llm._provider_impl._request_timeout == _DEFAULT_GEMINI_TIMEOUT
 
 
 def test_anthropic_passes_the_resolved_timeout_to_its_sdk_client():
@@ -147,7 +117,7 @@ def test_timeout_none_falls_back_to_provider_default():
     Guards against a regression where threading the value would override the
     long-standing default for callers that never configured a timeout.
     """
-    llm = LLMConfig(provider="litellm", api_key="k", base_url="", model="gpt-4o-mini")
+    llm = LLMConfig(provider="openai", api_key="k", base_url="", model="gpt-4o-mini")
     assert llm._provider_impl.timeout == DEFAULT_LLM_TIMEOUT
 
 

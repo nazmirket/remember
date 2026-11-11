@@ -19,8 +19,5 @@ export async function getHarness(name: string): Promise<HarnessAdapter> {
   return {
     name,
     chatReader: jsonChatReader(name),
-    createRuntime() {
-      throw new Error(`${name} uses hook entrypoints instead of a persistent plugin runtime`);
-    },
   };
 }

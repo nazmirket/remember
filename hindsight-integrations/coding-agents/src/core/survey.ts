@@ -36,7 +36,7 @@
  * Fire-and-forget and fail-safe throughout, mirroring core/seed.ts's `startBackgroundSeed`: a
  * missing binary or a spawn failure must silently no-op, never crash the caller.
  */
-import { execFileSync, spawn as realSpawn } from "node:child_process";
+import { spawn as realSpawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -64,7 +64,7 @@ export const SURVEY_DOC_IDS = [
   "repository-tech-stack-and-features",
 ] as const;
 
-export type SurveyHarness = "claude-code" | "codex" | "antigravity-cli" | "opencode";
+export type SurveyHarness = "claude-code" | "codex";
 
 /** Resolve the claude CLI binary for a detached spawn (a shell alias won't apply to child_process).
  *  Order: explicit arg -> env HINDSIGHT_CLAUDE_BIN -> ~/.claude/local/claude (native installer) ->
@@ -81,39 +81,6 @@ export function resolveClaudeBin(explicit?: string): string {
   return "claude";
 }
 
-/**
- * The opencode agent the survey runs under, defined by our own plugin (harness/opencode.ts feeds
- * this to opencode's `config` hook) so the recipe below needs nothing in the user's opencode.json.
- *
- * It replaces the built-in `plan` agent, which was chosen as the read-only boundary but appends a
- * system-reminder to every user message — "CRITICAL: Plan mode ACTIVE - you are in READ-ONLY phase
- * … ANY file edits, modifications, or system changes … This ABSOLUTE CONSTRAINT overrides ALL other
- * instructions" — while leaving plugin tools callable (plan denies only `edit`). The survey exists
- * to call hindsight_ingest_document, which reads as a "system change", so completion came down to
- * how literally a model took the reminder: #3450 saw the seed stall on ~half their repos, the agent
- * asking for permission that plan mode cannot grant. Prompt wording cannot win that argument — the
- * reminder claims to override all other instructions.
- *
- * The ruleset is also a TIGHTER boundary than plan's: opencode drops denied tools from the tool
- * list entirely, so the session is offered exactly read/grep/glob plus the one ingest tool — no
- * write, no bash, and no `task` (plan left all three reachable, and `task` reaches a subagent that
- * CAN write). Verified against opencode 1.18.9.
- */
-export const SURVEY_AGENT = "hindsight-survey";
-
-export const SURVEY_AGENT_CONFIG = {
-  description:
-    "One-time read-only structural survey that seeds this repository's Hindsight memory.",
-  mode: "primary",
-  permission: {
-    "*": "deny",
-    read: "allow",
-    grep: "allow",
-    glob: "allow",
-    hindsight_ingest_document: "allow",
-  },
-} as const;
-
 /** Resolve a harness's agent CLI binary: explicit `claudeBin` (claude only) -> `HINDSIGHT_<AGENT>_BIN`
  *  env override -> the bare command name (resolved on PATH by the caller); undefined for a host
  *  with no survey recipe. Callers cast any host id to SurveyHarness, so the default case is real. */
@@ -123,34 +90,9 @@ function resolveAgentBin(harness: SurveyHarness, claudeBin?: string): string | u
       return resolveClaudeBin(claudeBin);
     case "codex":
       return process.env.HINDSIGHT_CODEX_BIN || "codex";
-    case "antigravity-cli":
-      return process.env.HINDSIGHT_ANTIGRAVITY_BIN || "agy";
-    case "opencode":
-      return process.env.HINDSIGHT_OPENCODE_BIN || "opencode";
     default:
       // The host has no survey recipe (pi, opencode2, kilo, …): it gets no survey.
       return undefined;
-  }
-}
-
-/**
- * Whether `bin` is opencode v1 — the only opencode our plugin can teach SURVEY_AGENT to. npm
- * `@opencode/cli` (v2, versioned `0.0.0-beta-…`) publishes an `opencode` bin too, and a v2 plugin
- * cannot define an agent (harness/opencode2.ts), so `run --agent hindsight-survey` under it dies
- * with "agent hindsight-survey not found" (#5084). Stable v2 prints `2.x`, so only major 1 counts
- * (#5923). Any probe failure answers no.
- */
-function opencodeCanDefineSurveyAgent(bin: string): boolean {
-  try {
-    const out = execFileSync(bin, ["--version"], {
-      encoding: "utf8",
-      timeout: 5_000,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return Number(/(\d+)\./.exec(out)?.[1] ?? 0) === 1;
-  } catch {
-    return false;
   }
 }
 
@@ -296,30 +238,6 @@ function buildSurveyPlan(
         env,
       };
     }
-    case "antigravity-cli": {
-      // Antigravity's documented `-p` mode supports one-shot surveys. `--mode=plan` is the
-      // read-only boundary, and the installed MCP server comes from agy's current
-      // ~/.gemini/config/mcp_config.json compatibility location.
-      return {
-        bin,
-        args: ["-p", SURVEY_PROMPT, "--mode=plan"],
-        env,
-      };
-    }
-    case "opencode": {
-      // `opencode run` under the survey agent OUR OWN PLUGIN defines (harness/opencode.ts), which
-      // is both the injection boundary and the reason the seed completes: the built-in `plan` agent
-      // used to fill that slot, but its read-only system-reminder talked models out of the ingest
-      // call the survey exists to make (#3450). The hindsight tools come from the loaded plugin;
-      // under HINDSIGHT_DISABLE_HOOKS it registers tools but skips seed/recall/write-back
-      // (runtime.ts), so this survey run doesn't re-seed itself. Model left to opencode's
-      // configured default (its `provider/model` format differs per setup).
-      return {
-        bin,
-        args: ["run", "--agent", SURVEY_AGENT, SURVEY_PROMPT],
-        env,
-      };
-    }
   }
 }
 
@@ -362,7 +280,6 @@ export async function startCodebaseSurvey(
     sha?: string;
     spawn?: typeof realSpawn;
     resolveBin?: (bin: string) => string | undefined; // seam for tests
-    opencodeDefinesAgent?: (bin: string) => boolean; // seam for tests
     supervisorPath?: string;
     lease?: { dir?: string; staleMs?: number; heartbeatMs?: number }; // seam for tests
   } = {}
@@ -387,15 +304,6 @@ export async function startCodebaseSurvey(
       log.info("survey", `${harness}: ${name} not found, skipping the survey`);
       return false;
     }
-    // A runner that cannot have the survey agent would only fail after the lease is taken.
-    if (
-      harness === "opencode" &&
-      !(opts.opencodeDefinesAgent ?? opencodeCanDefineSurveyAgent)(bin)
-    ) {
-      log.info("survey", `${harness}: ${bin} cannot define the survey agent, skipping the survey`);
-      return false;
-    }
-
     const plan = buildSurveyPlan(harness, bin, repoDir, {
       model: opts.model,
       budgetUsd: opts.budgetUsd,

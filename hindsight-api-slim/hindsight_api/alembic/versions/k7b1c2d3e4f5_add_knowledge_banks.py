@@ -115,18 +115,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}banks DROP COLUMN IF EXISTS kind")
 
 
-def _oracle_upgrade() -> None:
-    # Only the column the shared bank queries read; the kb_* tables are PostgreSQL-only in v1.
-    op.execute("ALTER TABLE banks ADD (kind VARCHAR2(32) DEFAULT 'memory' NOT NULL)")
-
-
-def _oracle_downgrade() -> None:
-    op.execute("ALTER TABLE banks DROP COLUMN kind")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

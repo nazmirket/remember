@@ -6,7 +6,7 @@ even know it exists. Three environment variables point the real server here:
 
     HINDSIGHT_API_LLM_BASE_URL                  -> /v1/chat/completions
     HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL    -> /v1/embeddings
-    HINDSIGHT_API_RERANKER_SILICONFLOW_BASE_URL -> /rerank
+    HINDSIGHT_API_RERANKER_TEI_URL              -> /rerank
     HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL     -> /v1/systemone
 
 With ``HINDSIGHT_API_LLM_PROVIDER=anthropic`` the same base URL serves the
@@ -342,9 +342,28 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                 }
         return JSONResponse({"model": body.get("model", "stub"), "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
 
+    @app.get("/info")
+    async def reranker_info() -> JSONResponse:
+        return JSONResponse({"model_id": "stub-reranker"})
+
+    @app.get("/failing-tei/info")
+    async def failing_reranker_info() -> JSONResponse:
+        return JSONResponse({"model_id": "stub-reranker"})
+
+    @app.post("/failing-tei/rerank")
+    async def failing_rerank() -> JSONResponse:
+        return JSONResponse({"error": "intentional reranker failure"}, status_code=503)
+
     @app.post("/rerank")
     async def rerank(request: Request) -> JSONResponse:
         body = await request.json()
+        if "texts" in body:
+            results = [
+                {"index": index, "score": stubs.rerank.score(body["query"], document)}
+                for index, document in enumerate(body["texts"])
+            ]
+            results.sort(key=lambda item: item["score"], reverse=True)
+            return JSONResponse(results)
         validate_rerank(body)
 
         query = body["query"]

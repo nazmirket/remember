@@ -610,7 +610,7 @@ def test_configure_from_env_omits_model_when_unset(temp_home, monkeypatch):
     monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(cli, "CONFIG_FILE", config_dir / "embed")
 
-    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("HINDSIGHT_API_LLM_API_KEY", "test-key")
     monkeypatch.delenv("HINDSIGHT_API_LLM_MODEL", raising=False)
 
@@ -618,7 +618,7 @@ def test_configure_from_env_omits_model_when_unset(temp_home, monkeypatch):
     assert rc == 0
 
     contents = (config_dir / "embed").read_text()
-    assert "HINDSIGHT_API_LLM_PROVIDER=gemini" in contents
+    assert "HINDSIGHT_API_LLM_PROVIDER=anthropic" in contents
     # The config is seeded from .env.example, which carries a commented
     # `# HINDSIGHT_API_LLM_MODEL=gpt-4o-mini` reference line. What must not
     # appear is an *active* (uncommented) model line — that's what would get
@@ -655,16 +655,16 @@ def test_configure_from_env_accepts_providers_outside_interactive_menu(temp_home
     assert "HINDSIGHT_API_LLM_PROVIDER=anthropic" in contents
 
 
-def test_configure_from_env_accepts_github_copilot_without_api_key(temp_home, monkeypatch):
-    """GitHub Copilot authenticates through Copilot CLI rather than an LLM API key."""
+def test_configure_from_env_accepts_codex_without_api_key(temp_home, monkeypatch):
+    """OpenAI Codex authenticates through Codex CLI rather than an LLM API key."""
     from hindsight_embed import cli
 
     config_dir = temp_home / ".hindsight"
     monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(cli, "CONFIG_FILE", config_dir / "embed")
 
-    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "github-copilot")
-    monkeypatch.setenv("HINDSIGHT_API_LLM_MODEL", "gpt-5.6-terra")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "openai-codex")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_MODEL", "gpt-5.6-luna")
     monkeypatch.delenv("HINDSIGHT_API_LLM_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
 
@@ -672,10 +672,41 @@ def test_configure_from_env_accepts_github_copilot_without_api_key(temp_home, mo
     assert cli._do_configure_from_env() == 0
 
     contents = (config_dir / "embed").read_text()
-    assert "HINDSIGHT_API_LLM_PROVIDER=github-copilot" in contents
-    assert "HINDSIGHT_API_LLM_MODEL=gpt-5.6-terra" in contents
+    assert "HINDSIGHT_API_LLM_PROVIDER=openai-codex" in contents
+    assert "HINDSIGHT_API_LLM_MODEL=gpt-5.6-luna" in contents
     active_lines = [line for line in contents.splitlines() if line and not line.startswith("#")]
     assert not any(line.startswith("HINDSIGHT_API_LLM_API_KEY=") for line in active_lines)
+
+
+def test_configure_from_env_uses_anthropic_key(temp_home, monkeypatch):
+    from hindsight_embed import cli
+
+    config_dir = temp_home / ".hindsight"
+    monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cli, "CONFIG_FILE", config_dir / "embed")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("HINDSIGHT_API_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
+
+    assert cli._has_non_interactive_env() is True
+    assert cli._do_configure_from_env() == 0
+    contents = (config_dir / "embed").read_text()
+    assert "HINDSIGHT_API_LLM_API_KEY=anthropic-test-key" in contents
+    assert "unrelated-openai-key" not in contents
+
+
+def test_configure_from_env_rejects_removed_provider(temp_home, monkeypatch):
+    from hindsight_embed import cli
+
+    config_dir = temp_home / ".hindsight"
+    monkeypatch.setattr(cli, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(cli, "CONFIG_FILE", config_dir / "embed")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("HINDSIGHT_API_LLM_API_KEY", "test-key")
+
+    assert cli._do_configure_from_env() == 1
+    assert not (config_dir / "embed").exists()
 
 
 def _windows_scripts_dir(tmp_path: Path, *, with_pythonw: bool) -> Path:
@@ -719,7 +750,9 @@ def test_windows_daemon_launches_via_gui_interpreter(temp_home, tmp_path, monkey
         str(scripts_dir / "python.exe"),
     )
 
-    cmd = manager._find_api_command("0.0.0")
+    cmd = manager._find_api_command(
+        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+    )
     assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "hindsight_api.main"]
 
 
@@ -745,7 +778,9 @@ def test_windows_daemon_falls_back_to_console_exe_without_pythonw(temp_home, tmp
         str(scripts_dir / "python.exe"),
     )
 
-    cmd = manager._find_api_command("0.0.0")
+    cmd = manager._find_api_command(
+        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+    )
     assert cmd == [str(scripts_dir / "hindsight-api.exe")]
 
 
@@ -766,7 +801,9 @@ def test_posix_daemon_uses_console_entrypoint(temp_home, tmp_path, monkeypatch):
         lambda name: str(scripts_dir),
     )
 
-    cmd = manager._find_api_command("0.0.0")
+    cmd = manager._find_api_command(
+        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+    )
     assert cmd == [str(console_bin)]
 
 

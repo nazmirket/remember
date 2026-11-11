@@ -238,7 +238,6 @@ async def test_openai_soft_uses_json_object():
         ("lmstudio", None, False),
         ("openai", False, False),  # local server behind provider=openai (#4935)
         ("lmstudio", True, True),
-        ("zai", None, False),  # json_object mode deletes the token "json" from the text (#5175)
     ],
 )
 @pytest.mark.asyncio
@@ -276,32 +275,6 @@ def test_openai_compatible_json_mode_env(monkeypatch):
 # --------------------------------------------------------------------------- #
 # litellm: strict_schema -> response_format strict flag
 # --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize("strict", [True, False])
-@pytest.mark.asyncio
-async def test_litellm_response_format_strict_follows_arg(strict):
-    from hindsight_api.engine.providers.litellm_llm import LiteLLMLLM
-
-    llm = LiteLLMLLM(provider="litellm", api_key="test-key", base_url="", model="gpt-4o-mini")
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content='{"ok": true}'))],
-        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
-    )
-    acompletion = AsyncMock(return_value=response)
-    with (
-        patch.object(llm, "_acompletion", acompletion),
-        patch("hindsight_api.engine.providers.litellm_llm.get_metrics_collector"),
-    ):
-        await llm.call(
-            messages=[{"role": "user", "content": "Return whether this worked."}],
-            response_format=_Resp,
-            strict_schema=strict,
-            max_retries=0,
-        )
-    rf = acompletion.call_args.kwargs["response_format"]
-    assert rf["type"] == "json_schema"
-    assert rf["json_schema"]["strict"] is strict
 
 
 # --------------------------------------------------------------------------- #

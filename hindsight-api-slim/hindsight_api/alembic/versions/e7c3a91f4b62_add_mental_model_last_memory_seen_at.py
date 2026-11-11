@@ -64,36 +64,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}mental_models DROP COLUMN IF EXISTS last_memory_seen_at")
 
 
-def _oracle_upgrade() -> None:
-    # Oracle has no ADD COLUMN IF NOT EXISTS; guard on the data dictionary so a
-    # re-run doesn't fail with ORA-01430 (column already exists).
-    op.get_bind().exec_driver_sql(
-        """
-        DECLARE
-            n NUMBER;
-        BEGIN
-            SELECT COUNT(*) INTO n FROM user_tab_columns
-            WHERE table_name = 'MENTAL_MODELS'
-              AND column_name = 'LAST_MEMORY_SEEN_AT';
-            IF n = 0 THEN
-                EXECUTE IMMEDIATE
-                    'ALTER TABLE mental_models ADD (last_memory_seen_at TIMESTAMP WITH TIME ZONE)';
-            END IF;
-        END;
-        """
-    )
-    op.get_bind().exec_driver_sql(
-        "UPDATE mental_models SET last_memory_seen_at = last_refreshed_at WHERE last_memory_seen_at IS NULL"
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.get_bind().exec_driver_sql("ALTER TABLE mental_models DROP COLUMN last_memory_seen_at")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

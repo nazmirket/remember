@@ -1,22 +1,12 @@
-"""
-Alembic environment for Hindsight.
+"""Alembic environment for the local PostgreSQL backend.
 
-Supports two dialects:
-
-* PostgreSQL (sync psycopg2 driver) — default; uses ``search_path`` for
-  multi-tenant schema isolation and forces read-write transactions to work
-  around Supabase's read-only-by-default sessions.
-* Oracle 23ai (``oracledb`` driver) — uses ``CURRENT_SCHEMA`` for tenant
-  isolation; no equivalent of ``search_path`` or read-only session quirks.
-
-Each migration file dispatches its DDL through ``alembic._dialect.run_for_dialect``
-so a single revision tree serves both backends.
+Migrations use the sync psycopg2 driver and schema-specific search paths.
+The existing revision tree is retained for PostgreSQL databases.
 """
 
 import logging
 import os
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from alembic import context
 from dotenv import load_dotenv
@@ -45,39 +35,6 @@ config = context.config
 target_metadata = Base.metadata
 
 
-def _normalize_oracle_url(url: str) -> str:
-    """Coerce an Oracle URL into the SQLAlchemy form the oracledb dialect expects.
-
-    Two issues to handle:
-
-    1. Force the ``oracle+oracledb`` driver — bare ``oracle://`` defaults to
-       cx_Oracle.
-    2. Map a path-style service to ``?service_name=...``. SQLAlchemy's oracledb
-       dialect treats the URL path as a *SID* (legacy), but Oracle Free /
-       Autonomous DB only register a service name. Without this rewrite we get
-       ``DPY-6003: SID "FREEPDB1" is not registered`` even though the listener
-       is happy to accept the same name as a service.
-    """
-    parts = urlsplit(url)
-    if not parts.scheme.startswith("oracle"):
-        return url
-
-    new_scheme = "oracle+oracledb" if parts.scheme == "oracle" else parts.scheme
-    service = parts.path.lstrip("/")
-    new_query = parts.query
-    new_path = parts.path
-
-    # Promote /SERVICE to ?service_name=SERVICE unless the caller already
-    # supplied an explicit ?sid= or ?service_name=.
-    if service and "service_name=" not in new_query and "sid=" not in new_query:
-        params = [(k, v) for k, v in parse_qsl(new_query, keep_blank_values=True)]
-        params.append(("service_name", service))
-        new_query = urlencode(params)
-        new_path = ""
-
-    return urlunsplit((new_scheme, parts.netloc, new_path, new_query, parts.fragment))
-
-
 def get_database_url() -> str:
     """Resolve the migration URL from Alembic config or env, normalizing per-dialect."""
     database_url = config.get_main_option("sqlalchemy.url")
@@ -90,11 +47,8 @@ def get_database_url() -> str:
             )
 
     if is_oracle_url(database_url):
-        database_url = _normalize_oracle_url(database_url)
-    else:
-        # PG: convert SQLAlchemy-style asyncpg URLs and ?ssl= params to libpq form
-        # for the sync engine used during migrations.
-        database_url = to_libpq_url(database_url)
+        raise ValueError("Only PostgreSQL migrations are supported")
+    database_url = to_libpq_url(database_url)
 
     # Alembic stores options through ConfigParser, where '%' is interpolation.
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
@@ -136,20 +90,9 @@ def _configure_pg_session(engine: Engine, connection: Connection, target_schema:
     connection.commit()
 
 
-def _configure_oracle_session(connection: Connection, target_schema: str | None) -> None:
-    """Oracle: switch the session's default schema; tolerate DDL contention."""
-    from sqlalchemy import text
-
-    # Wait up to 30s for DDL locks instead of failing immediately (ORA-00054).
-    connection.execute(text("ALTER SESSION SET DDL_LOCK_TIMEOUT = 30"))
-    if target_schema:
-        connection.execute(text(f'ALTER SESSION SET CURRENT_SCHEMA = "{target_schema}"'))
-
-
 def run_migrations_online() -> None:
-    database_url = get_database_url()
+    get_database_url()
     target_schema = config.get_main_option("target_schema")
-    is_oracle = is_oracle_url(database_url)
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -158,30 +101,25 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        if is_oracle:
-            _configure_oracle_session(connection, target_schema)
-        else:
-            _configure_pg_session(connectable, connection, target_schema)
-            if target_schema:
-                from hindsight_api.alembic._new_schema_indexes import (
-                    build_new_schema_indexes_plainly,
-                    is_new_schema,
-                )
+        _configure_pg_session(connectable, connection, target_schema)
+        if target_schema:
+            from hindsight_api.alembic._new_schema_indexes import (
+                build_new_schema_indexes_plainly,
+                is_new_schema,
+            )
 
-                # Before alembic creates `alembic_version`, which is what "new" is judged by.
-                if is_new_schema(connection, target_schema):
-                    build_new_schema_indexes_plainly(connectable, target_schema)
-                # The check autobegan a transaction; end it so alembic opens its own (its
-                # autocommit blocks require one it owns).
-                connection.commit()
+            # Before alembic creates `alembic_version`, which is what "new" is judged by.
+            if is_new_schema(connection, target_schema):
+                build_new_schema_indexes_plainly(connectable, target_schema)
+            # The check autobegan a transaction; end it so alembic opens its own (its
+            # autocommit blocks require one it owns).
+            connection.commit()
 
         context_opts = {
             "connection": connection,
             "target_metadata": target_metadata,
         }
-        if target_schema and not is_oracle:
-            # Oracle has no equivalent of PG's per-schema version table; the
-            # ``alembic_version`` table lives in CURRENT_SCHEMA implicitly.
+        if target_schema:
             context_opts["version_table_schema"] = target_schema
 
         context.configure(**context_opts)

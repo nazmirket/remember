@@ -69,27 +69,9 @@ def _pg_downgrade() -> None:
     op.drop_column("async_operations", "serialization_key", schema=schema or None)
 
 
-def _oracle_upgrade() -> None:
-    op.add_column("async_operations", sa.Column("serialization_key", sa.String(4000), nullable=True))
-    # Oracle has no partial indexes. A function-based index on the same
-    # predicate gets the equivalent selectivity: terminal rows collapse to NULL
-    # and Oracle does not store all-NULL entries, so the index only holds the
-    # live rows the claim query looks at.
-    op.get_bind().exec_driver_sql(
-        f"CREATE INDEX {_INDEX} ON async_operations ("
-        f"  CASE WHEN status IN ('pending', 'processing') THEN bank_id END,"
-        f"  CASE WHEN status IN ('pending', 'processing') THEN serialization_key END)"
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.get_bind().exec_driver_sql(f"DROP INDEX {_INDEX}")
-    op.drop_column("async_operations", "serialization_key")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

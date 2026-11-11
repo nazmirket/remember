@@ -306,28 +306,6 @@ def test_llm_provider_constructor_ignores_global_config(monkeypatch):
     clear_config_cache()
 
 
-def test_llm_provider_constructor_ignores_global_safety_settings(monkeypatch):
-    """A Gemini provider built directly does not pull safety settings from config."""
-    import json
-    from unittest.mock import MagicMock, patch
-
-    from hindsight_api.config import ENV_LLM_GEMINI_SAFETY_SETTINGS, clear_config_cache
-    from hindsight_api.engine.llm_wrapper import LLMProvider
-
-    monkeypatch.setenv(
-        ENV_LLM_GEMINI_SAFETY_SETTINGS,
-        json.dumps([{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]),
-    )
-    clear_config_cache()
-
-    with patch("google.genai.Client", return_value=MagicMock()):
-        provider = LLMProvider(provider="gemini", api_key="k", base_url="", model="gemini-2.5-flash")
-
-    assert provider.gemini_safety_settings is None  # not inherited from global config
-
-    clear_config_cache()
-
-
 def test_reask_messages_appends_the_reply_as_text_and_the_correction():
     """The re-ask keeps the request as a prefix and replays any reply shape as a string (#4965)."""
     from pydantic import BaseModel

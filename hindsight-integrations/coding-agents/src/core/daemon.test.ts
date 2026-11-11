@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveConfig } from "./config";
+import { execFileSync } from "node:child_process";
 import { daemonEnv, detectLlm, ensureDaemon, hasForkEmbed, startDaemonDetached } from "./daemon";
 
-// A daemon-mode ensure has to clear `preflightDaemon`, which shells out to `uvx` and `cargo`.
+// A daemon-mode ensure has to clear `preflightDaemon`, which shells out to `uv`.
 // Neither is guaranteed on a test runner, so stub the subprocess layer; every
 // other use of it in daemon.ts sits behind an explicitly injected spawn.
 vi.mock("node:child_process", async (importOriginal) => {
@@ -19,10 +20,10 @@ afterEach(() => {
 });
 
 describe("connection modes", () => {
-  it("daemon mode derives the URL from apiPort, ignoring apiUrl", () => {
+  it("daemon mode derives the URL from apiPort", () => {
     // Resolving here (rather than at each client construction) is what lets the eight existing
     // call sites stay untouched.
-    const cfg = resolveConfig({ serverMode: "daemon", apiUrl: "https://cloud.example" });
+    const cfg = resolveConfig({ serverMode: "daemon" });
     expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
   });
 
@@ -32,16 +33,18 @@ describe("connection modes", () => {
     );
   });
 
+  it.each([
+    { serverMode: "cloud" as const },
+    { serverMode: "self-hosted" as const },
+    { apiUrl: "https://example.com" },
+  ])("rejects remote memory service settings", (raw) => {
+    expect(() => resolveConfig(raw)).toThrow("Only the local daemon is supported");
+  });
+
   it("defaults to the local daemon and disables upstream automatic updates", () => {
     const cfg = resolveConfig({});
     expect(cfg.serverMode).toBe("daemon");
     expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
-    expect(cfg.autoUpdate).toBe(false);
-  });
-
-  it("self-hosted keeps the configured apiUrl", () => {
-    const cfg = resolveConfig({ serverMode: "self-hosted", apiUrl: "http://localhost:8888" });
-    expect(cfg.apiUrl).toBe("http://localhost:8888");
   });
 
   // 9077, not hindsight-all's 8888: 8888 is the conventional port for a server the user runs, and
@@ -69,6 +72,13 @@ describe("detectLlm", () => {
   it("ignores a blank key", () => {
     const llm = detectLlm({ OPENAI_API_KEY: "   " } as NodeJS.ProcessEnv);
     expect(llm?.provider).not.toBe("openai");
+  });
+
+  it("uses Codex when Claude Code and API keys are unavailable", () => {
+    vi.mocked(execFileSync).mockImplementationOnce(() => {
+      throw new Error("claude not found");
+    });
+    expect(detectLlm({} as NodeJS.ProcessEnv)?.provider).toBe("openai-codex");
   });
 });
 
@@ -121,25 +131,6 @@ describe("fork checkout", () => {
 });
 
 describe("ensureDaemon", () => {
-  // Cloud and self-hosted must not so much as probe a local port.
-  it("touches nothing outside daemon mode", async () => {
-    const cfg = resolveConfig({ serverMode: "self-hosted", apiUrl: "https://cloud.example" });
-    const spawnFn = vi.fn(() => {
-      throw new Error("must not spawn");
-    });
-    await ensureDaemon(cfg, "claude-code", {
-      spawnFn: spawnFn as unknown as typeof import("node:child_process").spawn,
-    });
-    expect(spawnFn).not.toHaveBeenCalled();
-  });
-
-  // Side effect only: callers proceed either way, so a down daemon fails through the same client
-  // error path as a down Cloud/self-hosted server rather than being skipped.
-  it("resolves without reporting usability", async () => {
-    const cfg = resolveConfig({ apiUrl: "https://cloud.example" });
-    expect(await ensureDaemon(cfg, "claude-code", {})).toBeUndefined();
-  });
-
   /**
    * The persistent-plugin hosts (dsh, opencode) fire several ensure points in the same tick: a
    * SessionStart per session plus a Stop per finished turn. All of them see the same dead port, so
@@ -297,17 +288,12 @@ describe("startDaemonDetached", () => {
     expect(child.unref).toHaveBeenCalled();
   });
 
-  // #4964: tsup inlines @vectorize-io/hindsight-all into dist/daemon-start.js, so its spawns ship
-  // as ours. Before 0.9.2 they lacked windowsHide, and each opened a console window on Windows
-  // that killed the daemon when closed.
-  it("bundles a hindsight-all whose spawns hide the console window", () => {
+  it("keeps daemon subprocess windows hidden", () => {
     const bundled = readFileSync(
-      fileURLToPath(
-        new URL("../../node_modules/@vectorize-io/hindsight-all/dist/index.js", import.meta.url)
-      ),
+      fileURLToPath(new URL("./local-server/server.ts", import.meta.url)),
       "utf8"
     );
-    const spawns = bundled.match(/\bspawn\([^)]*\)/g) ?? [];
+    const spawns = bundled.split("\n").filter((line) => /\bspawn\(/.test(line));
     expect(spawns.length).toBeGreaterThan(0);
     for (const call of spawns) expect(call).toContain("windowsHide: true");
   });

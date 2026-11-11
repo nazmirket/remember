@@ -121,11 +121,14 @@ def get_config() -> dict[str, str]:
 # Provider -> API-key env var (None = no key needed)
 PROVIDER_API_KEYS = {
     "openai": "OPENAI_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "gemini": "GEMINI_API_KEY",
+    "openai-responses": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
     "ollama": None,
-    "vertexai": None,
-    "github-copilot": None,
+    "lmstudio": None,
+    "llamacpp": None,
+    "openai-codex": None,
+    "chatgpt": None,
+    "claude-code": None,
 }
 NO_API_KEY_PROVIDERS = frozenset(provider for provider, key_env in PROVIDER_API_KEYS.items() if key_env is None)
 
@@ -184,28 +187,28 @@ def _has_non_interactive_env() -> bool:
     doesn't need a key. Prevents the interactive prompt from kicking in when
     the user clearly wants CI/scripted behavior.
     """
-    if os.environ.get("HINDSIGHT_API_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+    provider = os.environ.get("HINDSIGHT_API_LLM_PROVIDER", "openai")
+    key_env = PROVIDER_API_KEYS.get(provider)
+    if os.environ.get("HINDSIGHT_API_LLM_API_KEY") or (key_env and os.environ.get(key_env)):
         return True
-    return os.environ.get("HINDSIGHT_API_LLM_PROVIDER") in NO_API_KEY_PROVIDERS
+    return provider in NO_API_KEY_PROVIDERS or ":" in provider
 
 
 def _do_configure_from_env():
     """Non-interactive configuration from environment variables (for CI)."""
     # Check for required environment variables
     provider = os.environ.get("HINDSIGHT_API_LLM_PROVIDER", "openai")
+    if provider not in PROVIDER_API_KEYS and ":" not in provider:
+        print(f"Unsupported LLM provider: {provider}", file=sys.stderr)
+        return 1
     api_key = (
         None
         if provider in NO_API_KEY_PROVIDERS
-        else os.environ.get("HINDSIGHT_API_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        else os.environ.get("HINDSIGHT_API_LLM_API_KEY") or os.environ.get(PROVIDER_API_KEYS.get(provider) or "")
     )
 
-    # Don't gate on PROVIDER_API_KEYS — that's only the small interactive-menu
-    # set. hindsight-api's PROVIDER_DEFAULT_MODELS supports many more
-    # providers (anthropic, claude-code, bedrock, openrouter, ...). Let the
-    # daemon validate; rejecting here would block valid configurations.
-
     # These providers authenticate locally rather than through an LLM API key.
-    if not api_key and provider not in NO_API_KEY_PROVIDERS:
+    if not api_key and provider not in NO_API_KEY_PROVIDERS and ":" not in provider:
         print("Error: Cannot run interactive configuration without a terminal.", file=sys.stderr)
         print("", file=sys.stderr)
         print("For non-interactive (CI) mode, set environment variables:", file=sys.stderr)
@@ -368,10 +371,11 @@ def _do_configure_interactive(profile_name: str | None = None, port: int | None 
     # Provider selection
     providers = [
         ("OpenAI (recommended)", "openai"),
-        ("Groq (fast & free tier)", "groq"),
-        ("Google Gemini", "gemini"),
+        ("Anthropic", "anthropic"),
+        ("Claude Code subscription", "claude-code"),
+        ("OpenAI Codex subscription", "openai-codex"),
         ("Ollama (local, no API key)", "ollama"),
-        ("GitHub Copilot (signed-in account, no LLM API key)", "github-copilot"),
+        ("LM Studio (local, no API key)", "lmstudio"),
     ]
 
     provider = _prompt_choice("Select your LLM provider:", providers, default=1)

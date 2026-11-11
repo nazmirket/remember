@@ -73,46 +73,9 @@ def _pg_downgrade() -> None:
     op.execute(f"DROP TABLE IF EXISTS {schema}entity_maintenance_queue")
 
 
-def _oracle_execute_ignoring_955(sql: str) -> None:
-    """Run a CREATE statement and swallow ORA-00955 (object already exists).
-
-    Mirrors the helper in the graph_maintenance_queue migration so reruns stay
-    safe on a database where the table was created by an earlier partial run.
-    """
-    block = (
-        "BEGIN "
-        "EXECUTE IMMEDIATE :stmt; "
-        "EXCEPTION WHEN OTHERS THEN "
-        "IF SQLCODE = -955 THEN NULL; ELSE RAISE; END IF; "
-        "END;"
-    )
-    op.get_bind().exec_driver_sql(block, {"stmt": sql.strip()})
-
-
-def _oracle_upgrade() -> None:
-    _oracle_execute_ignoring_955(
-        """
-        CREATE TABLE entity_maintenance_queue (
-            bank_id     VARCHAR2(256) NOT NULL,
-            entity_id   RAW(16)       NOT NULL,
-            enqueued_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_entity_maintenance_queue PRIMARY KEY (bank_id, entity_id)
-        )
-        """
-    )
-    _oracle_execute_ignoring_955(
-        "CREATE INDEX idx_entity_maintenance_queue_bank_enqueued ON entity_maintenance_queue (bank_id, enqueued_at)"
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.execute("DROP INDEX idx_entity_maintenance_queue_bank_enqueued")
-    op.execute("DROP TABLE entity_maintenance_queue")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

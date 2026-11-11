@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hindsight_api import RequestContext
-from hindsight_api.engine.db.ops_oracle import OracleOps
 from hindsight_api.engine.graph_maintenance import enqueue_entity_prune_candidates
 from hindsight_api.engine.memory_engine import MemoryEngine
 
@@ -80,88 +79,6 @@ async def _posting_count(conn, entity_id: uuid.UUID) -> int:
 # ---------------------------------------------------------------------------
 # SQL shape (no database)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_oracle_release_reads_the_postings_once_and_queues_before_it_debits():
-    """Oracle adapter: one read of `unit_entities` feeds both writes, the queue
-    MERGE runs before the entity UPDATE (the order the drain takes those locks,
-    so a delete cannot cycle against a worker), and each entity is debited by
-    its own posting count, bound in sorted id order."""
-    ops = OracleOps()
-    conn = AsyncMock()
-    id_a = "00000000-0000-0000-0000-00000000000a"
-    id_b = "00000000-0000-0000-0000-00000000000b"
-    # Deliberately returned out of id order.
-    conn.fetch.return_value = [
-        {"entity_id": id_b, "n": 1},
-        {"entity_id": id_a, "n": 3},
-    ]
-
-    enqueued = await ops.release_entity_postings(
-        conn, "entity_maintenance_queue", "entities", "unit_entities", "memory_units", "bank-1", ["u2", "u1"]
-    )
-
-    assert enqueued == 2
-    assert conn.fetch.await_count == 1, "both halves must come out of one scan of the postings"
-    # The memories are locked before their postings are read, one row at a time
-    # in ascending id order — Oracle's multi-row FOR UPDATE has no lock order (#6229).
-    locks = [call.args for call in conn.fetchrow.await_args_list]
-    assert [args[1] for args in locks] == ["u1", "u2"]
-    assert all("FROM memory_units" in args[0] and "FOR UPDATE" in args[0] for args in locks)
-
-    (queue_sql, queue_rows), (debit_sql, debit_rows) = (call.args for call in conn.executemany.await_args_list)
-    assert "MERGE INTO entity_maintenance_queue" in queue_sql
-    assert queue_rows == [("bank-1", id_a), ("bank-1", id_b)]
-    assert "GREATEST(mention_count - $3, 0)" in debit_sql
-    assert debit_rows == [(id_a, "bank-1", 3), (id_b, "bank-1", 1)]
-
-
-@pytest.mark.asyncio
-async def test_oracle_release_of_units_with_no_postings_writes_nothing():
-    """Units that never named an entity cost no write round-trip."""
-    ops = OracleOps()
-    conn = AsyncMock()
-    conn.fetch.return_value = []
-
-    released = await ops.release_entity_postings(
-        conn, "entity_maintenance_queue", "entities", "unit_entities", "memory_units", "bank-1", ["u1"]
-    )
-
-    assert released == 0
-    conn.executemany.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_oracle_restore_credits_only_the_entities_that_still_exist():
-    """The archive snapshot names entities the orphan prune may since have
-    swept; the surviving set drives both the posting insert and the credit."""
-    ops = OracleOps()
-    conn = AsyncMock()
-    id_a = "00000000-0000-0000-0000-00000000000a"
-    id_b = "00000000-0000-0000-0000-00000000000b"
-    gone = "00000000-0000-0000-0000-00000000000c"
-    conn.fetch.return_value = [{"id": id_b}, {"id": id_a}]
-
-    posted = await ops.restore_entity_postings(
-        conn, "unit_entities", "entities", "bank-1", "unit-1", [id_a, id_b, gone]
-    )
-
-    assert posted == 2
-    (post_sql, post_rows), (credit_sql, credit_rows) = (call.args for call in conn.executemany.await_args_list)
-    assert "INSERT INTO unit_entities" in post_sql
-    assert post_rows == [("unit-1", id_a), ("unit-1", id_b)]
-    assert "mention_count + 1" in credit_sql
-    assert credit_rows == [(id_a, "bank-1"), (id_b, "bank-1")]
-
-
-@pytest.mark.asyncio
-async def test_oracle_restore_of_nothing_writes_nothing():
-    ops = OracleOps()
-    conn = AsyncMock()
-
-    assert await ops.restore_entity_postings(conn, "unit_entities", "entities", "bank-1", "unit-1", []) == 0
-    conn.executemany.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

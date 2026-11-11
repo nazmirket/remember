@@ -32,7 +32,6 @@ from hindsight_api.engine.cache_affinity import (
 )
 from hindsight_api.engine.llm_trace import LLMTraceContext, reset_trace_context, set_trace_context
 from hindsight_api.engine.llm_wrapper import LLMProvider, create_llm_provider
-from hindsight_api.engine.providers.nous_auth import NousAuthManager
 from hindsight_api.engine.providers.openai_compatible_headers import OPENAI_COMPATIBLE_USER_AGENT
 from hindsight_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM
 
@@ -48,33 +47,6 @@ def _llm(cache_affinity: str | None = None, **kwargs) -> OpenAICompatibleLLM:
     kwargs.setdefault("api_key", "test-key")
     kwargs.setdefault("model", "gpt-4o-mini")
     return OpenAICompatibleLLM(cache_affinity=cache_affinity, **kwargs)
-
-
-class _FakeNousAuth:
-    """Minimal `NousAuthManager` stand-in: a fresh token, refresh never needed.
-
-    Mirrors the fake in `test_nous_provider.py` but trimmed to what construction
-    and a no-401 `call()` touch — `access_token`, `base_url`, `_token_is_stale()`.
-    """
-
-    def __init__(self, token: str = "tok-1", base_url: str = "https://inference-api.nousresearch.com/v1"):
-        self.access_token = token
-        self.base_url = base_url
-
-    def _token_is_stale(self) -> bool:
-        return False
-
-
-def _nous_llm(cache_affinity: str | None = None, **kwargs):
-    """Construct a NousLLM through the real `create_llm_provider` factory — the
-    exact path that silently dropped `cache_affinity`/`default_headers` — with
-    Nous's ~/.hermes/auth.json read stubbed out so the test needs no real login."""
-    kwargs.setdefault("base_url", "https://inference-api.nousresearch.com/v1")
-    kwargs.setdefault("api_key", "ignored")
-    kwargs.setdefault("model", "deepseek/deepseek-v4-flash")
-    kwargs.setdefault("reasoning_effort", "low")
-    with patch.object(NousAuthManager, "from_file", return_value=_FakeNousAuth()):
-        return create_llm_provider(provider="nous", cache_affinity=cache_affinity, **kwargs)
 
 
 def _chat_response(content: str = "hello"):
@@ -152,19 +124,17 @@ async def test_openai_prompt_cache_key_is_sent():
 
 
 async def test_openai_prompt_cache_key_coexists_with_extra_body():
-    """The provider's own extra_body defaults and the operator's configured
-    extra_body must both survive — the affinity hint merges, never replaces."""
+    """The configured extra_body and affinity hint must both survive."""
     llm = _llm(
         "openai_prompt_cache_key",
-        provider="minimax",
-        base_url="https://api.minimax.io/v1",
-        model="MiniMax-M3",
+        provider="openai",
+        base_url="http://127.0.0.1:8080/v1",
+        model="local-model",
         extra_body={"top_p": 0.9},
     )
     create = await _call(llm, AsyncMock(return_value=_chat_response()))
     kwargs = create.call_args.kwargs
     assert _HEX32.match(kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM])
-    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}  # minimax default
     assert kwargs["extra_body"]["top_p"] == 0.9  # operator config
 
 
@@ -294,49 +264,6 @@ def test_configured_user_agent_wins_case_insensitively():
     llm = _llm(default_headers={"user-agent": "operator-client/1.0"})
     assert llm._client.default_headers["user-agent"] == "operator-client/1.0"
     assert OPENAI_COMPATIBLE_USER_AGENT not in llm._client.default_headers.values()
-
-
-def test_default_headers_reach_the_fireworks_client():
-    """Fireworks subclasses OpenAICompatibleLLM and had the same gap."""
-    llm = create_llm_provider(
-        provider="fireworks",
-        api_key="test-key",
-        base_url="https://api.fireworks.ai/inference/v1",
-        model="accounts/fireworks/models/llama-v3p1-8b-instruct",
-        reasoning_effort="low",
-        default_headers={"x-test": "2"},
-    )
-    assert llm._client.default_headers["x-test"] == "2"
-
-
-def test_fireworks_branch_forwards_cache_affinity():
-    llm = create_llm_provider(
-        provider="fireworks",
-        api_key="test-key",
-        base_url="https://api.fireworks.ai/inference/v1",
-        model="accounts/fireworks/models/llama-v3p1-8b-instruct",
-        reasoning_effort="low",
-        cache_affinity="xai_conv_id",
-    )
-    assert llm._cache_affinity is CacheAffinityMode.XAI_CONV_ID
-
-
-def test_default_headers_reach_the_nous_client():
-    """NousLLM subclasses OpenAICompatibleLLM and had the same gap: the `nous`
-    factory branch forwarded neither `default_headers` nor `cache_affinity`,
-    even though `NousLLM.__init__` already passes both through **kwargs."""
-    llm = _nous_llm(default_headers={"x-test": "3"})
-    assert llm._client.default_headers["x-test"] == "3"
-
-
-async def test_nous_branch_forwards_cache_affinity():
-    """AC7-style factory-branch check, taken all the way to the wire (AC1 style)
-    rather than stopping at `_cache_affinity`, since the missing kwarg here is a
-    silent no-op — the same failure shape AC10's end-to-end test exists for."""
-    llm = _nous_llm(cache_affinity="xai_conv_id")
-    create = await _call(llm, AsyncMock(return_value=_chat_response()))
-    header = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
-    assert _HEX32.match(header)
 
 
 # ── AC8: config plumbing (env round-trip) ─────────────────────────────────────

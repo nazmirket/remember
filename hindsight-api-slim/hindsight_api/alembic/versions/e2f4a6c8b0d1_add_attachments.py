@@ -140,64 +140,9 @@ def _pg_downgrade() -> None:
     op.execute(f"DROP TABLE IF EXISTS {schema}attachments")
 
 
-def _oracle_upgrade() -> None:
-    # bank_id/document_id are VARCHAR2 rather than PG's TEXT because they are PK
-    # columns, and Oracle cannot index a CLOB — the same trade the other
-    # bank-scoped tables in this tree make.
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS attachments (
-            bank_id VARCHAR2(256) NOT NULL,
-            attachment_hash VARCHAR2(64) NOT NULL,
-            short_id VARCHAR2(12) NOT NULL,
-            media_type VARCHAR2(255) NOT NULL,
-            byte_size NUMBER NOT NULL,
-            storage_key VARCHAR2(1024) NOT NULL,
-            kind VARCHAR2(16) DEFAULT 'image' NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_attachments PRIMARY KEY (bank_id, attachment_hash),
-            CONSTRAINT fk_attachments_bank FOREIGN KEY (bank_id)
-                REFERENCES banks(bank_id) ON DELETE CASCADE
-        )
-        """
-    )
-    op.execute("CREATE UNIQUE INDEX uq_attachments_short_id ON attachments (bank_id, short_id)")
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS document_attachments (
-            bank_id VARCHAR2(256) NOT NULL,
-            document_id VARCHAR2(512) NOT NULL,
-            attachment_hash VARCHAR2(64) NOT NULL,
-            filename VARCHAR2(1024),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_document_attachments PRIMARY KEY (bank_id, document_id, attachment_hash),
-            CONSTRAINT fk_document_attachments_document FOREIGN KEY (document_id, bank_id)
-                REFERENCES documents(id, bank_id) ON DELETE CASCADE
-        )
-        """
-    )
-    op.execute("CREATE INDEX idx_document_attachments_bank_hash ON document_attachments (bank_id, attachment_hash)")
-
-    # Oracle has no array type in this tree's dialect surface, so the ids are a
-    # JSON array in a CLOB — the shape `tags` and `observation_scopes` already
-    # take on this backend.
-    for table, constraint in (("memory_units", "mu"), ("invalidated_memory_units", "imu")):
-        op.execute(
-            f"ALTER TABLE {table} ADD (attachment_ids CLOB DEFAULT '[]' NOT NULL "
-            f"CONSTRAINT {constraint}_attachment_ids_json CHECK (attachment_ids IS JSON))"
-        )
-
-
-def _oracle_downgrade() -> None:
-    for table in ("memory_units", "invalidated_memory_units"):
-        op.execute(f"ALTER TABLE {table} DROP COLUMN attachment_ids")
-    op.execute("DROP TABLE document_attachments CASCADE CONSTRAINTS")
-    op.execute("DROP TABLE attachments CASCADE CONSTRAINTS")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

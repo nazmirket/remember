@@ -2009,17 +2009,6 @@ class TestAuthorizationDisabled:
 class TestTagFilter:
     """Tree and search take recall's tag filter: tags + tags_match, and tag_groups."""
 
-    @pytest.mark.parametrize("match", ["any", "any_strict", "all_strict", "exact"])
-    def test_clause_survives_the_oracle_rewrite(self, match):
-        """The clause names the column bare, because Oracle's ``&&``/``@>`` rewrite only
-        matches a bare column — a qualified ``mm.tags`` came out as ``mm.EXISTS(...)``."""
-        from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
-
-        clause = PageTagFilter(tags=["user:kate"], tags_match=match).clause(3)
-        rewritten = _rewrite_pg_to_oracle(f"SELECT 1 FROM t WHERE x = $1 {clause.sql}").query
-        assert "&&" not in rewritten and "@>" not in rewritten, rewritten
-        assert "mm." not in rewritten, rewritten
-
     @staticmethod
     def _names(roots: list[dict]) -> set[str]:
         out: set[str] = set()

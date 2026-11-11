@@ -30,7 +30,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hindsight_api.engine.db.ops_oracle import OracleOps
 from hindsight_api.engine.db.ops_postgresql import PostgreSQLOps
 
 
@@ -72,32 +71,6 @@ async def test_pg_enqueue_graph_maintenance_inserts_in_sorted_order():
 
 
 @pytest.mark.asyncio
-async def test_oracle_enqueue_graph_maintenance_inserts_in_sorted_order():
-    """The Oracle ops impl applies the same sort. `executemany` receives a
-    list of (bank_id, unit_id) tuples; the unit_id projection must be
-    sorted."""
-    ops = OracleOps()
-    conn = AsyncMock()
-
-    unit_ids = _shuffled_uuids(6)
-    assert unit_ids != sorted(unit_ids), "test inputs must be unsorted"
-
-    await ops.enqueue_graph_maintenance(
-        conn=conn,
-        table="graph_maintenance_queue",
-        bank_id="test-bank",
-        unit_ids=unit_ids,
-    )
-
-    assert conn.executemany.await_count == 1
-    _sql, rows = conn.executemany.await_args.args
-    assert [r[0] for r in rows] == ["test-bank"] * len(unit_ids)
-    assert [r[1] for r in rows] == sorted(unit_ids), (
-        f"expected sorted unit_ids for deadlock-free concurrent inserts, got {[r[1] for r in rows]}"
-    )
-
-
-@pytest.mark.asyncio
 async def test_pg_empty_unit_ids_short_circuits():
     """Empty input must remain a no-op — the early return predates this fix
     and must continue to skip the INSERT entirely."""
@@ -105,11 +78,3 @@ async def test_pg_empty_unit_ids_short_circuits():
     conn = AsyncMock()
     await ops.enqueue_graph_maintenance(conn, "graph_maintenance_queue", "b", [])
     conn.execute.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_oracle_empty_unit_ids_short_circuits():
-    ops = OracleOps()
-    conn = AsyncMock()
-    await ops.enqueue_graph_maintenance(conn, "graph_maintenance_queue", "b", [])
-    conn.executemany.assert_not_awaited()

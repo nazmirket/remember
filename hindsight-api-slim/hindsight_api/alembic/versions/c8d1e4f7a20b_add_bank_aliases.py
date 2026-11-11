@@ -71,44 +71,9 @@ def _pg_downgrade() -> None:
     op.execute(f"DROP TABLE IF EXISTS {schema}bank_aliases")
 
 
-def _oracle_execute_ignoring_955(sql: str) -> None:
-    """Run a CREATE statement and swallow ORA-00955 (object already exists)."""
-    block = (
-        "BEGIN "
-        "EXECUTE IMMEDIATE :stmt; "
-        "EXCEPTION WHEN OTHERS THEN "
-        "IF SQLCODE = -955 THEN NULL; ELSE RAISE; END IF; "
-        "END;"
-    )
-    op.get_bind().exec_driver_sql(block, {"stmt": sql.strip()})
-
-
-def _oracle_upgrade() -> None:
-    # VARCHAR2(256) mirrors the bank_id columns elsewhere in the Oracle schema;
-    # ID_MAX_BYTES (192) bounds what either column can actually hold.
-    _oracle_execute_ignoring_955(
-        """
-        CREATE TABLE bank_aliases (
-            alias      VARCHAR2(256) NOT NULL,
-            bank_id    VARCHAR2(256) NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_bank_aliases PRIMARY KEY (alias),
-            CONSTRAINT fk_bank_aliases_bank FOREIGN KEY (bank_id)
-                REFERENCES banks(bank_id) ON DELETE CASCADE
-        )
-        """
-    )
-    _oracle_execute_ignoring_955("CREATE INDEX idx_bank_aliases_bank ON bank_aliases (bank_id)")
-
-
-def _oracle_downgrade() -> None:
-    op.execute("DROP INDEX idx_bank_aliases_bank")
-    op.execute("DROP TABLE bank_aliases")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

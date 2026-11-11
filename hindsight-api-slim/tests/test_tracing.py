@@ -458,8 +458,6 @@ def _tracing_config(**overrides):
 
     defaults = {
         "otel_traces_enabled": True,
-        "otel_exporter_otlp_endpoint": "http://localhost:4318",
-        "otel_exporter_otlp_headers": None,
         # None is "operator named nothing" — the state the API default stands in for.
         "otel_service_name": None,
         "otel_deployment_environment": "test",
@@ -473,18 +471,6 @@ def test_initialize_tracing_from_config_disabled(restore_tracing_globals):
 
     assert tracing_module.initialize_tracing_from_config(_tracing_config(otel_traces_enabled=False)) is False
     assert tracing_module.is_tracing_enabled() is False
-
-
-def test_initialize_tracing_from_config_without_endpoint_warns(restore_tracing_globals, caplog):
-    """Enabled but endpoint-less config is reported, not silently ignored."""
-    tracing_module = restore_tracing_globals
-
-    with caplog.at_level("WARNING", logger="hindsight_api.tracing"):
-        result = tracing_module.initialize_tracing_from_config(_tracing_config(otel_exporter_otlp_endpoint=None))
-
-    assert result is False
-    assert tracing_module.is_tracing_enabled() is False
-    assert "no endpoint configured" in caplog.text
 
 
 def test_initialize_tracing_from_config_enables_tracing(restore_tracing_globals):
@@ -594,7 +580,6 @@ async def test_api_lifespan_bootstraps_and_flushes_tracing():
     config = dataclasses.replace(
         _get_raw_config(),
         otel_traces_enabled=True,
-        otel_exporter_otlp_endpoint="http://localhost:4318",
         worker_enabled=False,
     )
     memory = AsyncMock()

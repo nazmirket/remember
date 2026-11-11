@@ -64,51 +64,9 @@ def _pg_downgrade() -> None:
     op.execute(f"CREATE INDEX IF NOT EXISTS idx_memory_units_access_count ON {schema}memory_units (access_count DESC)")
 
 
-def _oracle_upgrade() -> None:
-    # Oracle has no `DROP COLUMN IF EXISTS`; swallow ORA-00904 (column does not
-    # exist) so the migration is idempotent and safe on a schema that already
-    # lacks the column. Dropping the column also drops idx_mu_access_count.
-    for table in _TABLES:
-        op.execute(
-            f"""
-            BEGIN
-                EXECUTE IMMEDIATE 'ALTER TABLE {table} DROP COLUMN access_count';
-            EXCEPTION WHEN OTHERS THEN
-                IF SQLCODE != -904 THEN RAISE; END IF;
-            END;
-            """
-        )
-
-
-def _oracle_downgrade() -> None:
-    # Swallow ORA-01430 (column already exists) for idempotency. Matches the
-    # Oracle baseline's declaration: NUMBER(10) DEFAULT 0 NOT NULL.
-    for table in _TABLES:
-        op.execute(
-            f"""
-            BEGIN
-                EXECUTE IMMEDIATE
-                    'ALTER TABLE {table} ADD (access_count NUMBER(10) DEFAULT 0 NOT NULL)';
-            EXCEPTION WHEN OTHERS THEN
-                IF SQLCODE != -1430 THEN RAISE; END IF;
-            END;
-            """
-        )
-    # ORA-00955: index name already in use.
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'CREATE INDEX idx_mu_access_count ON memory_units(access_count DESC)';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -955 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

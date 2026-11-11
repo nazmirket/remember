@@ -1,7 +1,6 @@
 /**
  * The README is the single source of truth for configuration (scripts/build-skill.mjs copies its
- * marked regions into the companion skill; hindsight-docs/scripts/sync-coding-agents-doc.mjs copies
- * the whole thing into the docs site). These tests keep it honest in both directions:
+ * marked regions into the companion skill). These tests keep it honest in both directions:
  *
  *   - the generated skill matches what the README currently says, and
  *   - no config field is readable but undocumented — the drift issue #3735 was filed about, where

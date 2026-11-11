@@ -147,12 +147,9 @@ def stub_environment(stub_url: str) -> dict[str, str]:
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": f"{stub_url}/v1",
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL": "stub-embeddings",
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS": "384",
-        # Reranker: siliconflow is the plain Cohere-compatible POST {base}/rerank,
-        # with no vendor SDK in the way.
-        "HINDSIGHT_API_RERANKER_PROVIDER": "siliconflow",
-        "HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY": "stub-key",
-        "HINDSIGHT_API_RERANKER_SILICONFLOW_BASE_URL": stub_url,
-        "HINDSIGHT_API_RERANKER_SILICONFLOW_MODEL": "stub-reranker",
+        # Exercise the local TEI-compatible interface without a real model.
+        "HINDSIGHT_API_RERANKER_PROVIDER": "tei",
+        "HINDSIGHT_API_RERANKER_TEI_URL": stub_url,
         # Consolidation's decision model (triage), for consolidation only: set up globally it
         # would also rank recall. Triage is on by default wherever one is set up; it is off
         # here so no other story's consolidation changes, and test_22 turns it on per bank.

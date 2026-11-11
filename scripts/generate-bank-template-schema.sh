@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# Regenerate hindsight-docs/static/bank-template-schema.json from the
+# Regenerate schemas/bank-template-schema.json from the
 # BankTemplateManifest Pydantic model. This file is the source of truth
-# for Ajv validation in hindsight-docs/scripts/check-templates.mjs and
+# for local validation and
 # is served verbatim at /bank-template-schema.json on the docs site.
 
 cd "$(dirname "$0")/.."

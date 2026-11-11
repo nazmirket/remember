@@ -1,13 +1,12 @@
 """
-OpenTelemetry distributed tracing instrumentation for Hindsight API.
+Local tracing instrumentation for Hindsight API.
 
 This module provides tracing for:
 - LLM API calls with full prompts/completions following GenAI semantic conventions
 - Token usage and model information
 - Error tracking and finish reasons
 
-Tracing is conditional and disabled by default. When enabled, traces are exported
-to Langfuse (or any OTLP-compatible backend) via OTLP HTTP protocol.
+Tracing is conditional and disabled by default. When enabled, spans stay in-process.
 """
 
 import json
@@ -95,7 +94,7 @@ class NoOpSpan:
 _tracer: trace.Tracer | NoOpTracer = NoOpTracer()
 _tracing_enabled: bool = False
 # The SDK provider created by initialize_tracing(). Kept so shutdown_tracing()
-# can flush the BatchSpanProcessor directly instead of going through the global
+# can shut it down directly instead of going through the global
 # provider, which may be a proxy that never exposes shutdown().
 _provider: "TracerProvider | None" = None
 
@@ -174,35 +173,14 @@ def bank_id_span_processor() -> "SpanProcessor":
     return BankIdSpanProcessor()
 
 
-def initialize_tracing(
-    service_name: str,
-    endpoint: str,
-    headers: Optional[str] = None,
-    deployment_environment: str = "development",
-) -> None:
-    """
-    Initialize OpenTelemetry tracing with OTLP exporter.
-
-    Args:
-        service_name: Name of the service for resource attributes
-        endpoint: OTLP endpoint URL (e.g., https://cloud.langfuse.com/api/public/otel)
-        headers: Optional headers in format "key1=value1,key2=value2"
-        deployment_environment: Deployment environment (e.g., development, staging, production)
-    """
+def initialize_tracing(service_name: str, deployment_environment: str = "development") -> None:
+    """Initialize local in-process tracing without an external exporter."""
     global _tracer, _tracing_enabled, _provider
-
-    # Imported lazily: __version__ is defined at the end of hindsight_api/__init__.py,
-    # after the imports that pull in this module.
-    # The SDK and OTLP exporter load here, not at module import: tracing is off by
-    # default, and every process would otherwise pay for them on startup.
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     from hindsight_api import __version__
 
-    # Create resource with service information
     resource = Resource.create(
         {
             "service.name": service_name,
@@ -210,101 +188,38 @@ def initialize_tracing(
             "deployment.environment.name": deployment_environment,
         }
     )
-
-    # Parse headers
-    headers_dict = {}
-    if headers:
-        for pair in headers.split(","):
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-                headers_dict[key.strip()] = value.strip()
-
-    # Create OTLP HTTP exporter
-    # Note: Langfuse expects /v1/traces path appended to base endpoint
-    otlp_endpoint = endpoint if endpoint.endswith("/v1/traces") else f"{endpoint}/v1/traces"
-    otlp_exporter = OTLPSpanExporter(
-        endpoint=otlp_endpoint,
-        headers=headers_dict,
-    )
-
-    # Create tracer provider: stamp the bank on each span, then batch-export
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(bank_id_span_processor())
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-
-    # Set global tracer provider
     trace.set_tracer_provider(provider)
-
-    # Get tracer for this application
     _tracer = trace.get_tracer(__name__)
     _tracing_enabled = True
     _provider = provider
-
-    logger.info(f"Tracing initialized: endpoint={otlp_endpoint}, service={service_name}")
+    logger.info("Local tracing initialized: service=%s", service_name)
 
 
 def initialize_tracing_from_config(
-    config: "HindsightConfig | StaticConfigProxy",
-    *,
-    default_service_name: str | None = None,
+    config: "HindsightConfig | StaticConfigProxy", *, default_service_name: str | None = None
 ) -> bool:
-    """
-    Bootstrap tracing from a HindsightConfig, for any process entrypoint.
-
-    Both the API (FastAPI lifespan) and the standalone worker call this, so a
-    deployment that sets HINDSIGHT_API_OTEL_* gets traces from every process
-    that does work rather than only from the one serving HTTP (issue #3614).
-
-    Failures are logged and swallowed: tracing must never keep a process from
-    starting.
-
-    Args:
-        config: Resolved Hindsight configuration (raw dataclass or the static proxy).
-        default_service_name: Service name to use when HINDSIGHT_API_OTEL_SERVICE_NAME
-            is not set in the environment. Lets the worker report itself as
-            "hindsight-worker" — matching the name it already reports for metrics —
-            without overriding an operator's explicit choice.
-
-    Returns:
-        True when tracing was initialized, False otherwise.
-    """
+    """Enable local tracing when configured; startup never depends on it."""
     from .config import DEFAULT_OTEL_SERVICE_NAME
 
     if not config.otel_traces_enabled:
         return False
-
-    if not config.otel_exporter_otlp_endpoint:
-        logger.warning("OTEL tracing enabled but no endpoint configured. Tracing disabled.")
-        return False
-
-    # config.otel_service_name is None when the operator named nothing, so an explicit
-    # name still beats the caller's per-process default without this having to consult
-    # the environment a second time.
-    service_name = config.otel_service_name or default_service_name or DEFAULT_OTEL_SERVICE_NAME
-
     try:
         initialize_tracing(
-            service_name=service_name,
-            endpoint=config.otel_exporter_otlp_endpoint,
-            headers=config.otel_exporter_otlp_headers,
+            service_name=config.otel_service_name or default_service_name or DEFAULT_OTEL_SERVICE_NAME,
             deployment_environment=config.otel_deployment_environment,
         )
         create_span_recorder()
-        logger.info("OpenTelemetry tracing enabled and configured")
         return True
-    except Exception as e:
-        logger.error(f"Failed to initialize tracing: {e}")
-        logger.warning("Continuing without tracing")
+    except Exception as exc:
+        logger.warning("Could not initialize local tracing: %s", exc)
         return False
 
 
 def shutdown_tracing() -> None:
     """
-    Flush and shut down the tracing pipeline. No-op when tracing was never initialized.
-
-    Spans are batched, so without this a process exiting on SIGTERM drops
-    everything still in the BatchSpanProcessor's queue. That matters most for
-    the worker, where a single consolidation span can be minutes long.
+    Shut down the local tracing pipeline. No-op when tracing was never initialized.
     """
     global _tracer, _tracing_enabled, _provider, _span_recorder
 
@@ -313,7 +228,7 @@ def shutdown_tracing() -> None:
         return
 
     try:
-        provider.shutdown()  # force-flushes the BatchSpanProcessor
+        provider.shutdown()
     except Exception as e:
         logger.warning(f"Failed to shut down tracing cleanly: {e}")
     finally:
@@ -673,8 +588,8 @@ class NoOpLLMSpanRecorder:
 class CompositeSpanRecorder:
     """Fans out ``record_llm_call`` to every registered recorder.
 
-    This lets multiple GenAI consumers observe the same LLM calls — e.g. the
-    OpenTelemetry span exporter and the per-bank DB tracer — through the single
+    This lets multiple local consumers observe the same LLM calls — e.g. the
+    in-process span recorder and the per-bank DB tracer — through the single
     ``record_llm_call`` chokepoint each provider already calls. A failure in one
     recorder never affects the others or the LLM call itself.
     """

@@ -16,11 +16,7 @@ The daemon runs on `localhost:8888` and uses an embedded PostgreSQL database (pg
 
 ## Installation
 
-```bash
-pip install hindsight-embed
-# or with uvx (no install needed)
-uvx hindsight-embed --help
-```
+Install and run the embedded manager from this checkout. See the [project setup guide](../README.md) for the supported local workflow.
 
 ## Quick Start
 
@@ -151,7 +147,7 @@ Run `hindsight-embed configure` for a guided setup that saves to `~/.hindsight/e
 |----------|-------------|---------|
 | `HINDSIGHT_EMBED_PROFILE` | Profile name to use (overrides active profile) | None (uses default profile) |
 | `HINDSIGHT_API_LLM_API_KEY` | LLM API key (or use `OPENAI_API_KEY`); required only when the selected provider uses an API key | Provider-dependent |
-| `HINDSIGHT_API_LLM_PROVIDER` | LLM provider (`openai`, `groq`, `gemini`, `ollama`, `github-copilot`) | `openai` |
+| `HINDSIGHT_API_LLM_PROVIDER` | LLM provider (OpenAI, Anthropic, Codex, Claude Code, or local) | `openai` |
 | `HINDSIGHT_API_LLM_MODEL` | LLM model | `gpt-4o-mini` |
 | `HINDSIGHT_EMBED_API_URL` | Use external API server instead of starting local daemon | None (starts local daemon) |
 | `HINDSIGHT_EMBED_API_TOKEN` | Authentication token for external API (sent as Bearer token) | None |
@@ -265,13 +261,7 @@ hindsight-embed profile delete my-app
 
 ## Use with AI Coding Assistants
 
-This CLI is designed to work with AI coding assistants like Claude Code, Cursor, and Windsurf. Install the Hindsight skill:
-
-```bash
-curl -fsSL https://hindsight.vectorize.io/get-skill | bash
-```
-
-This will configure the LLM provider and install the skill to your assistant's skills directory.
+For Codex and Claude Code setup, use the [coding-agent integration guide](../hindsight-integrations/coding-agents/README.md).
 
 ## Troubleshooting
 

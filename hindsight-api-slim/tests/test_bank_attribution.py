@@ -19,7 +19,6 @@ from pydantic import BaseModel
 
 from hindsight_api.engine.aiohttp_session import LoopLocal
 from hindsight_api.engine.bank_attribution import apply_bank_attribution
-from hindsight_api.engine.cross_encoder import LiteLLMCrossEncoder
 from hindsight_api.engine.embeddings import OpenAIEmbeddings
 from hindsight_api.engine.memory_engine import MemoryEngine, _bind_bank_id
 from hindsight_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM
@@ -260,26 +259,6 @@ async def test_embeddings_user_injected_on_every_concurrent_batch():
     finally:
         _current_bank_id.reset(token)
     assert [request["user"] for request in captured] == ["user-fanout"] * 4
-
-
-async def test_litellm_proxy_sends_bank_header():
-    received: list[dict[str, str]] = []
-
-    async def handler(request: web.Request) -> web.StreamResponse:
-        received.append(dict(request.headers))
-        return web.json_response({"results": [{"index": 0, "relevance_score": 0.91}]})
-
-    async with stub_server(handler) as base_url:
-        encoder = LiteLLMCrossEncoder(api_base=base_url, model="will-memory-rerank")
-        await encoder.initialize()
-        with patch(
-            "hindsight_api.engine.cross_encoder.reranker_bank_attribution_headers",
-            return_value={"X-Hindsight-Bank-Id": "bank-litellm-proxy"},
-        ):
-            scores = await encoder.predict([("query", "document")])
-
-    assert scores == [0.91]
-    assert received[0]["X-Hindsight-Bank-Id"] == "bank-litellm-proxy"
 
 
 # ── Executor context propagation ──────────────────────────────────────────────

@@ -25,14 +25,4 @@ export interface HarnessAdapter {
   readonly name: string;
   /** How this harness's past sessions are ingested during backfill. */
   readonly chatReader: ChatReader;
-  /**
-   * Build the agent-native runtime entry from a RuntimeCore. The return type is harness-specific
-   * (opencode: a Plugin hooks object), so it is intentionally `unknown` at the interface boundary —
-   * the harness's own entrypoint casts it to that agent's expected shape.
-   *
-   * Note: harness/registry.ts's getHarness("opencode") returns a no-runtime adapter whose
-   * createRuntime always throws — the real opencode runtime is built by src/index.ts importing
-   * opencodeAdapter directly, bypassing the registry (keeps backfill.js free of @opencode-ai/plugin).
-   */
-  createRuntime(core: unknown): unknown;
 }

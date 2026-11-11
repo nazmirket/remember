@@ -4,7 +4,7 @@ LLM provider implementations.
 This package contains concrete implementations of the LLMInterface for various providers.
 
 The classes load on first access (PEP 562 ``__getattr__``), not at import time. Each
-provider pulls in its own SDK — google-genai alone is ~4 s, openai ~2 s — and anything
+provider pulls in its own SDK, and anything
 importing a submodule here (``http.py`` imports ``none_llm``) runs this file first, so
 eager imports made every process pay for every SDK, used or not.
 """
@@ -16,12 +16,6 @@ if TYPE_CHECKING:
     from .anthropic_llm import AnthropicLLM
     from .claude_code_llm import ClaudeCodeLLM
     from .codex_llm import CodexLLM
-    from .cursor_llm import CursorLLM
-    from .fireworks_llm import FireworksLLM
-    from .gemini_llm import GeminiLLM
-    from .github_copilot_llm import GitHubCopilotLLM
-    from .litellm_llm import LiteLLMLLM
-    from .litellm_router_llm import LiteLLMRouterLLM
     from .llamacpp_llm import LlamaCppLLM
     from .mock_llm import MockLLM
     from .none_llm import NoneLLM
@@ -32,12 +26,6 @@ _MODULES = {
     "AnthropicLLM": "anthropic_llm",
     "ClaudeCodeLLM": "claude_code_llm",
     "CodexLLM": "codex_llm",
-    "CursorLLM": "cursor_llm",
-    "FireworksLLM": "fireworks_llm",
-    "GeminiLLM": "gemini_llm",
-    "GitHubCopilotLLM": "github_copilot_llm",
-    "LiteLLMLLM": "litellm_llm",
-    "LiteLLMRouterLLM": "litellm_router_llm",
     "LlamaCppLLM": "llamacpp_llm",
     "MockLLM": "mock_llm",
     "NoneLLM": "none_llm",
@@ -49,12 +37,6 @@ __all__ = [
     "AnthropicLLM",
     "ClaudeCodeLLM",
     "CodexLLM",
-    "CursorLLM",
-    "FireworksLLM",
-    "GeminiLLM",
-    "GitHubCopilotLLM",
-    "LiteLLMLLM",
-    "LiteLLMRouterLLM",
     "LlamaCppLLM",
     "MockLLM",
     "NoneLLM",

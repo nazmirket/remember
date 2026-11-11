@@ -39,23 +39,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}graph_maintenance_queue DROP COLUMN IF EXISTS claimed_at")
 
 
-def _oracle_upgrade() -> None:
-    # ORA-01430 (column already exists) keeps a rerun after a partial upgrade safe.
-    op.get_bind().exec_driver_sql(
-        "BEGIN "
-        "EXECUTE IMMEDIATE 'ALTER TABLE graph_maintenance_queue ADD (claimed_at TIMESTAMP WITH TIME ZONE)'; "
-        "EXCEPTION WHEN OTHERS THEN IF SQLCODE = -1430 THEN NULL; ELSE RAISE; END IF; "
-        "END;"
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.execute("ALTER TABLE graph_maintenance_queue DROP COLUMN claimed_at")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

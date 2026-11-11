@@ -855,8 +855,6 @@ ENV_EXTENSION_PASSTHROUGH_HEADERS = "HINDSIGHT_API_EXTENSION_PASSTHROUGH_HEADERS
 
 # OpenTelemetry tracing configuration
 ENV_OTEL_TRACES_ENABLED = "HINDSIGHT_API_OTEL_TRACES_ENABLED"
-ENV_OTEL_EXPORTER_OTLP_ENDPOINT = "HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT"
-ENV_OTEL_EXPORTER_OTLP_HEADERS = "HINDSIGHT_API_OTEL_EXPORTER_OTLP_HEADERS"
 ENV_OTEL_SERVICE_NAME = "HINDSIGHT_API_OTEL_SERVICE_NAME"
 ENV_OTEL_DEPLOYMENT_ENVIRONMENT = "HINDSIGHT_API_OTEL_DEPLOYMENT_ENVIRONMENT"
 ENV_METRICS_INCLUDE_BANK_ID = "HINDSIGHT_API_METRICS_INCLUDE_BANK_ID"
@@ -945,16 +943,6 @@ ENV_FILE_STORAGE_TYPE = "HINDSIGHT_API_FILE_STORAGE_TYPE"
 # HINDSIGHT_API_FILE_STORAGE_* variable is handed to it as a lowercased config dict,
 # so those stay dynamic and are read from the environment by the storage factory.
 ENV_FILE_STORAGE_EXTENSION = "HINDSIGHT_API_FILE_STORAGE_EXTENSION"
-ENV_FILE_STORAGE_S3_BUCKET = "HINDSIGHT_API_FILE_STORAGE_S3_BUCKET"
-ENV_FILE_STORAGE_S3_REGION = "HINDSIGHT_API_FILE_STORAGE_S3_REGION"
-ENV_FILE_STORAGE_S3_ENDPOINT = "HINDSIGHT_API_FILE_STORAGE_S3_ENDPOINT"
-ENV_FILE_STORAGE_S3_ACCESS_KEY_ID = "HINDSIGHT_API_FILE_STORAGE_S3_ACCESS_KEY_ID"
-ENV_FILE_STORAGE_S3_SECRET_ACCESS_KEY = "HINDSIGHT_API_FILE_STORAGE_S3_SECRET_ACCESS_KEY"
-ENV_FILE_STORAGE_GCS_BUCKET = "HINDSIGHT_API_FILE_STORAGE_GCS_BUCKET"
-ENV_FILE_STORAGE_GCS_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_FILE_STORAGE_GCS_SERVICE_ACCOUNT_KEY"
-ENV_FILE_STORAGE_AZURE_CONTAINER = "HINDSIGHT_API_FILE_STORAGE_AZURE_CONTAINER"
-ENV_FILE_STORAGE_AZURE_ACCOUNT_NAME = "HINDSIGHT_API_FILE_STORAGE_AZURE_ACCOUNT_NAME"
-ENV_FILE_STORAGE_AZURE_ACCOUNT_KEY = "HINDSIGHT_API_FILE_STORAGE_AZURE_ACCOUNT_KEY"
 ENV_FILE_PARSER = "HINDSIGHT_API_FILE_PARSER"
 ENV_FILE_PARSER_ALLOWLIST = "HINDSIGHT_API_FILE_PARSER_ALLOWLIST"
 ENV_FILE_PARSER_MARKITDOWN_OCR_ENABLED = "HINDSIGHT_API_FILE_PARSER_MARKITDOWN_OCR_ENABLED"
@@ -1275,34 +1263,14 @@ PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "openai-responses": "gpt-5.6",
     "anthropic": "claude-haiku-4-5",
-    "gemini": "gemini-3.5-flash",
-    "groq": "openai/gpt-oss-120b",
-    "minimax": "MiniMax-M3",
-    "deepseek": "deepseek-v4-flash",
-    "zai": "glm-4.5-flash",
-    "opencode-go": "deepseek-v4-flash",
-    "atlas": "deepseek-ai/deepseek-v4-pro",
-    "meta": "muse-spark-1.3",
     "ollama": "gemma3:12b",
-    "ollama-cloud": "gemma3:12b",
     "llamacpp": "gemma-4-e2b-it",
     "lmstudio": "local-model",
-    "vertexai": "google/gemini-3.1-flash-lite",
     "openai-codex": "gpt-5.6-luna",
     "chatgpt": "gpt-6-luna",
     "claude-code": "claude-sonnet-4-5-20250929",
-    "cursor": "auto",
-    "github-copilot": "gpt-5.6-terra",
     "mock": "mock-model",
     "none": "none",
-    "litellm": "gpt-4o-mini",
-    "bedrock": "us.amazon.nova-2-lite-v1:0",
-    "volcano": "doubao-pro-32k",
-    "openrouter": "qwen/qwen3.5-9b",
-    "requesty": "openai/gpt-4o-mini",
-    "fireworks": "accounts/fireworks/models/llama-v3p1-8b-instruct",
-    "nous": "deepseek/deepseek-v4-flash",
-    "xai-oauth": "grok-4.5",
 }
 DEFAULT_LLM_MODEL = "gpt-4o-mini"  # Fallback if provider not in table
 # Built-in llama.cpp defaults
@@ -1663,7 +1631,7 @@ DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
 # Hindsight Inference: embeddings (OpenAI-compatible /v1/embeddings), reranking (Cohere-style
 # /v1/rerank) and the decision model (System One). hs-rerank-1 reranks and hs-decide-1-flash decides.
-# Keys come from the provider's own *_HINDSIGHT_API_KEY or `hindsight-admin cloud login`.
+# Hindsight Inference keys come from the provider-specific API key setting.
 HINDSIGHT_INFERENCE_URL = "https://inference.hindsight.vectorize.io"
 DEFAULT_EMBEDDINGS_HINDSIGHT_MODEL = "hs-embed-1"
 DEFAULT_RERANKER_HINDSIGHT_MODEL = "hs-rerank-1"
@@ -1698,7 +1666,7 @@ class _DecisionProviderDefaults:
 # "none": no decision model; operations that could use one keep their LLM-only path.
 # hindsight, typesafe and cloudflare speak the System One API; openai has its own Decisions API.
 # hindsight is Hindsight Inference: its key comes from HINDSIGHT_API_DECISION_MODEL_API_KEY or,
-# when unset, from `hindsight-admin cloud login`. Hindsight Inference fits each request to the
+# Hindsight Inference fits each request to the
 # window of the model that serves it and merges the answers, so the whole pool goes in one request.
 # It used to split at 54k tokens there too, counted on the whole JSON body: about twice the text the
 # model reads, so pools that fit were sent as 2+ calls (#6489). The 54k still applies on a custom URL,
@@ -3171,7 +3139,7 @@ class RerankerMemberConfig:
     google_project_id: str | None
     google_service_account_key: str | None
     google_timeout: float
-    # hindsight (None: the key `hindsight-admin cloud login` saved)
+    # hindsight inference
     hindsight_api_key: str | None
 
     def env_name(self, suffix: str) -> str:
@@ -3468,7 +3436,7 @@ class HindsightConfig:
     """Configuration container for Hindsight API."""
 
     # Database
-    database_backend: Literal["postgresql", "oracle"]
+    database_backend: Literal["postgresql"]
     database_url: str
     # Optional read-replica URL for recall queries. When set, the engine opens
     # a second pool and routes recall SELECTs through it.
@@ -3925,17 +3893,7 @@ class HindsightConfig:
     retain_max_attachments_per_chunk: int  # Hard cap on images in a single extraction chunk
 
     # File storage (static - server-level only)
-    file_storage_type: str  # "native" (PostgreSQL) or "s3" (S3-compatible)
-    file_storage_s3_bucket: str | None  # S3 bucket name (required for s3 storage)
-    file_storage_s3_region: str | None  # S3 region (optional, uses SDK default)
-    file_storage_s3_endpoint: str | None  # S3 endpoint URL (for MinIO, R2, etc.)
-    file_storage_s3_access_key_id: str | None  # S3 access key (optional, uses env/IAM)
-    file_storage_s3_secret_access_key: str | None  # S3 secret key (optional, uses env/IAM)
-    file_storage_gcs_bucket: str | None  # GCS bucket name (required for gcs storage)
-    file_storage_gcs_service_account_key: str | None  # GCS service account key JSON (optional, uses ADC)
-    file_storage_azure_container: str | None  # Azure container name (required for azure storage)
-    file_storage_azure_account_name: str | None  # Azure storage account name
-    file_storage_azure_account_key: str | None  # Azure storage account key
+    file_storage_type: str  # "native" (PostgreSQL), or an extension-defined backend
     file_parser: list[str]  # Ordered fallback chain of parsers (e.g. ["iris", "markitdown"])
     file_parser_allowlist: list[str] | None  # Parsers clients may request (None = all registered)
     file_parser_iris_token: str | None  # Vectorize API token for iris parser (VECTORIZE_TOKEN)
@@ -4090,8 +4048,6 @@ class HindsightConfig:
 
     # OpenTelemetry tracing configuration
     otel_traces_enabled: bool
-    otel_exporter_otlp_endpoint: str | None
-    otel_exporter_otlp_headers: str | None
     # None when unset, so a caller can tell "operator chose a name" from "nobody said".
     # The API default is applied at the point of use (see tracing.initialize_tracing_from_config),
     # which is also where a per-process default like "hindsight-worker" gets its chance.
@@ -4165,7 +4121,7 @@ class HindsightConfig:
     embeddings_zeroentropy_encoding_format: str = DEFAULT_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT
     embeddings_zeroentropy_batch_size: int = DEFAULT_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE
     embeddings_zeroentropy_latency: str | None = DEFAULT_EMBEDDINGS_ZEROENTROPY_LATENCY
-    # hindsight: None falls back to the key `hindsight-admin cloud login` saved.
+    # hindsight: configure the provider API key explicitly.
     embeddings_hindsight_api_key: str | None = None
     # Per-side embeddings configs (see EMBEDDINGS_SIDE_QUERY). None means the side uses the
     # main embeddings config above. Static: a vector space is a deployment-wide choice.
@@ -4356,10 +4312,6 @@ class HindsightConfig:
         "embeddings_hindsight_api_key",
         "reranker_hindsight_api_key",
         # File storage credentials
-        "file_storage_s3_access_key_id",
-        "file_storage_s3_secret_access_key",
-        "file_storage_gcs_service_account_key",
-        "file_storage_azure_account_key",
         # File parser credentials
         "file_parser_markitdown_ocr_api_key",
         "file_parser_markitdown_ocr_base_url",
@@ -4633,6 +4585,8 @@ class HindsightConfig:
 
     def validate(self) -> None:
         """Validate configuration values and raise errors for invalid combinations."""
+        if self.database_backend != "postgresql":
+            raise ValueError("Only the PostgreSQL database backend is supported")
         for operation in DECISION_MODEL_OPERATIONS:
             self.decision_model_config(operation)  # raises on an unknown provider or a missing key
         # Validate vector_extension
@@ -4789,8 +4743,8 @@ class HindsightConfig:
                     "is not installed. The API will fail at startup. Either:\n"
                     "  1. Install local ML deps: pip install hindsight-api[local-ml]\n"
                     "  2. Use a remote provider instead:\n"
-                    "     HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai (or gemini, tei)\n"
-                    "     HINDSIGHT_API_RERANKER_PROVIDER=none (or tei)",
+                    "     HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai (or tei)\n"
+                    "     HINDSIGHT_API_RERANKER_PROVIDER=rrf (or tei)",
                     " and ".join(missing),
                 )
 
@@ -4889,7 +4843,7 @@ class HindsightConfig:
             # `.lower()` returns a plain `str`; the field declares the two backends it accepts,
             # and an unknown value is rejected by that field rather than here.
             database_backend=cast(
-                'Literal["postgresql", "oracle"]',
+                'Literal["postgresql"]',
                 os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
             ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
@@ -5718,16 +5672,6 @@ class HindsightConfig:
             ),
             # File storage
             file_storage_type=os.getenv(ENV_FILE_STORAGE_TYPE, DEFAULT_FILE_STORAGE_TYPE),
-            file_storage_s3_bucket=os.getenv(ENV_FILE_STORAGE_S3_BUCKET) or None,
-            file_storage_s3_region=os.getenv(ENV_FILE_STORAGE_S3_REGION) or None,
-            file_storage_s3_endpoint=os.getenv(ENV_FILE_STORAGE_S3_ENDPOINT) or None,
-            file_storage_s3_access_key_id=os.getenv(ENV_FILE_STORAGE_S3_ACCESS_KEY_ID) or None,
-            file_storage_s3_secret_access_key=os.getenv(ENV_FILE_STORAGE_S3_SECRET_ACCESS_KEY) or None,
-            file_storage_gcs_bucket=os.getenv(ENV_FILE_STORAGE_GCS_BUCKET) or None,
-            file_storage_gcs_service_account_key=os.getenv(ENV_FILE_STORAGE_GCS_SERVICE_ACCOUNT_KEY) or None,
-            file_storage_azure_container=os.getenv(ENV_FILE_STORAGE_AZURE_CONTAINER) or None,
-            file_storage_azure_account_name=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_NAME) or None,
-            file_storage_azure_account_key=os.getenv(ENV_FILE_STORAGE_AZURE_ACCOUNT_KEY) or None,
             file_parser=_parse_str_list(os.getenv(ENV_FILE_PARSER, DEFAULT_FILE_PARSER)),
             file_parser_allowlist=_env_str_list(ENV_FILE_PARSER_ALLOWLIST),
             file_parser_markitdown_ocr_enabled=os.getenv(
@@ -6071,8 +6015,6 @@ class HindsightConfig:
             # OpenTelemetry tracing configuration
             otel_traces_enabled=os.getenv(ENV_OTEL_TRACES_ENABLED, str(DEFAULT_OTEL_TRACES_ENABLED)).lower()
             in ("true", "1", "yes"),
-            otel_exporter_otlp_endpoint=os.getenv(ENV_OTEL_EXPORTER_OTLP_ENDPOINT) or None,
-            otel_exporter_otlp_headers=os.getenv(ENV_OTEL_EXPORTER_OTLP_HEADERS) or None,
             otel_service_name=os.getenv(ENV_OTEL_SERVICE_NAME) or None,
             otel_deployment_environment=os.getenv(ENV_OTEL_DEPLOYMENT_ENVIRONMENT, DEFAULT_OTEL_DEPLOYMENT_ENVIRONMENT),
             metrics_include_bank_id=os.getenv(ENV_METRICS_INCLUDE_BANK_ID, str(DEFAULT_METRICS_INCLUDE_BANK_ID)).lower()
@@ -6194,12 +6136,8 @@ class HindsightConfig:
             return self.llm_base_url
 
         provider = self.llm_provider.lower()
-        if provider == "groq":
-            return "https://api.groq.com/openai/v1"
-        elif provider == "ollama":
+        if provider == "ollama":
             return "http://localhost:11434/v1"
-        elif provider == "ollama-cloud":
-            return "https://ollama.com/v1"
         elif provider == "lmstudio":
             return "http://localhost:1234/v1"
         else:
@@ -6330,16 +6268,6 @@ class HindsightConfig:
             except ValueError as err:
                 raise ValueError(f"{ENV_DECISION_MODEL_TOKENIZER}: {err}") from err
         api_key = setting("api_key")
-        if not api_key and provider == "hindsight":
-            # Imported here: cloud_auth pulls in aiohttp's server, which only this provider needs.
-            from .engine.providers.cloud_auth import saved_api_key
-
-            api_key = saved_api_key()
-            if not api_key:
-                raise ValueError(
-                    "The hindsight decision model needs a key: run `hindsight-admin cloud login`, "
-                    f"or set HINDSIGHT_API_DECISION_MODEL_API_KEY (or {_decision_model_env(operation, 'API_KEY')})"
-                )
         return DecisionModelConfig(
             provider=provider,
             api_key=required(api_key, "API_KEY"),

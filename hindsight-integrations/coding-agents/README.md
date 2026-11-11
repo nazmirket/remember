@@ -2,8 +2,6 @@
 
 **Claude Code** and **Codex CLI** share a local, persistent memory service. The integration captures session transcripts, recalls relevant memories, seeds a project from git, and provides memory tools through MCP.
 
-[View Changelog →](/changelog/integrations/coding-agents)
-
 ## Install from this checkout
 
 Requires Node.js, npm, `uv`, Python and a configured inference provider. On macOS, a current Rust toolchain may be needed to build Python dependencies. The daemon and its pg0 database run locally; a hosted inference provider may receive memory content.
@@ -48,7 +46,7 @@ Useful settings include `disabled`, `retainSessions`, `autoInject`, `gitIngest`,
 
 The supported configuration fields and their definitions are in `src/core/config.ts` (`RawConfig`):
 
-`serverMode`, `apiUrl`, `apiToken`, `apiPort`, `daemonIdleTimeout`, `daemonProfile`, `embedVersion`, `embedPackagePath`, `bankId`, `dynamicBankId`, `bankIdTemplate`, `mapPathToBank`, `resolveWorktrees`, `optInOnly`, `optInPaths`, `harness`, `disabled`, `retainSessions`, `maxParallelRetains`, `reflectTimeoutMs`, `reflectToolTimeoutMs`, `injectTimeoutMs`, `reflectBudget`, `autoInject`, `autoReflect`, `pageSearchLimit`, `recallOptions`, `toolGuideExtra`, `pageRefreshEveryTurns`, `pageTriggerType`, `pageTriggerCron`, `pages`, `customPages`, `autoSeed`, `seedLimit`, `codebaseSurvey`, `surveyModel`, `surveyBudgetUsd`, `logLevel`, `autoUpdate`, `surveyRefreshCommits`, `gitIngest`, `retainTags`, `retainMetadata`, `retainContext`, `manageBankConfig`, `retainExtractionMode`, `defaultBankConfig`, `observationScopes`, `harnesses`, `banks`, `paths`
+`serverMode`, `apiUrl`, `apiToken`, `apiPort`, `daemonIdleTimeout`, `daemonProfile`, `embedPackagePath`, `bankId`, `dynamicBankId`, `bankIdTemplate`, `mapPathToBank`, `resolveWorktrees`, `optInOnly`, `optInPaths`, `harness`, `disabled`, `retainSessions`, `maxParallelRetains`, `reflectTimeoutMs`, `reflectToolTimeoutMs`, `injectTimeoutMs`, `reflectBudget`, `autoInject`, `autoReflect`, `pageSearchLimit`, `recallOptions`, `toolGuideExtra`, `pageRefreshEveryTurns`, `pageTriggerType`, `pageTriggerCron`, `pages`, `customPages`, `autoSeed`, `seedLimit`, `codebaseSurvey`, `surveyModel`, `surveyBudgetUsd`, `logLevel`, `surveyRefreshCommits`, `gitIngest`, `retainTags`, `retainMetadata`, `retainContext`, `manageBankConfig`, `retainExtractionMode`, `defaultBankConfig`, `observationScopes`, `harnesses`, `banks`, `paths`
 
 ## Troubleshooting
 

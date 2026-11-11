@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Hindsight API client (generated)
-hindsight-client = { path = "../hindsight-clients/rust" }
+hindsight-client = { path = "client" }
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "env"] }

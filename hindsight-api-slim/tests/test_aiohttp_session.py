@@ -197,7 +197,7 @@ def test_every_production_session_decides_about_the_proxy():
     repo = package.parents[1]
     # The server package plus the extensions, which is where the supabase session that
     # reached an external endpoint without following the proxy was found.
-    roots = [package, repo / "hindsight-extensions"]
+    roots = [package]
     # aiohttp_session.py IS the shared decision, so it has nothing to defer to.
     exempt = {package / "engine" / "aiohttp_session.py"}
     missing = []

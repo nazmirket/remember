@@ -346,62 +346,6 @@ def test_fixed_type_call_sites_drop_the_candidate_guard():
     assert "bank_peer.operation_type = o.operation_type" in mixed
 
 
-def test_guard_survives_the_oracle_sql_rewrite():
-    """The shared predicate must still be valid Oracle after db/oracle.py rewrites it.
-
-    Oracle tests need an ORACLE_TEST_DSN this suite does not have, so the dialect
-    parity of this guard is otherwise unverified. The rewriter is pure text
-    substitution, so assert on its output directly: PG-only spellings must be
-    gone, and the ROWNUM row limit must land on the *outer* WHERE rather than the
-    subquery's (the rewriter replaces only the first WHERE it sees).
-    """
-    from hindsight_api.engine.db.ops import bank_serialization_sql, key_serialization_sql
-    from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
-
-    table = "async_operations"
-    rewritten = _rewrite_pg_to_oracle(
-        f"""
-        SELECT o.operation_id FROM {table} o
-        WHERE o.status = 'pending'
-          AND (o.next_retry_at IS NULL OR o.next_retry_at <= NOW())
-          AND o.operation_id != ALL($1::uuid[])
-          AND {bank_serialization_sql(table, "o")}
-          AND {key_serialization_sql(table, "o")}
-        ORDER BY o.created_at
-        LIMIT $2
-        FOR UPDATE SKIP LOCKED
-        """
-    ).query
-
-    assert "NOW()" not in rewritten and "SYSTIMESTAMP" in rewritten
-    assert "!= ALL" not in rewritten and "::uuid[]" not in rewritten
-    assert "LIMIT" not in rewritten
-    assert "FOR UPDATE SKIP LOCKED" in rewritten
-    assert "WHERE ROWNUM <= :2 AND o.status = 'pending'" in rewritten
-    assert "WHERE doc_peer.bank_id = o.bank_id" in rewritten
-    # The correlated subquery keeps its own unmodified WHERE.
-    assert "WHERE bank_peer.bank_id = o.bank_id" in rewritten
-
-    # The consolidation tiers pair the guard with LIKE ANY, whose rewrite is a
-    # regex on a *bare* column name — an "o." prefix would survive it as
-    # "o.(bank_id LIKE :p0 ...)", so that one column stays unqualified.
-    tiered = _rewrite_pg_to_oracle(
-        f"""
-        SELECT o.operation_id FROM {table} o
-        WHERE o.status = 'pending'
-          AND {bank_serialization_sql(table, "o", "consolidation")}
-          AND bank_id LIKE ANY($1::text[])
-        ORDER BY o.created_at
-        LIMIT $2
-        FOR UPDATE SKIP LOCKED
-        """
-    ).query
-
-    assert "LIKE ANY" not in tiered
-    assert "o./*LIKE_ANY" not in tiered
-    assert "WHERE ROWNUM <= :2 AND o.status = 'pending'" in tiered
-
-
 @pytest.mark.asyncio
 async def test_reserved_pool_is_serialised_too(pool, backend, clean_operations):
     """The guard also applies when graph_maintenance has reserved slots.

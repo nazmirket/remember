@@ -1,23 +1,4 @@
-"""
-OpenAI-compatible LLM provider supporting OpenAI, Groq, Ollama, LMStudio, MiniMax, DeepSeek,
-and Opencode Go.
-
-This provider handles all OpenAI API-compatible models including:
-- OpenAI: GPT-4, GPT-4o, GPT-5, o1, o3 (reasoning models)
-- Groq: Fast inference with seed control and service tiers
-- Ollama: Local models with native streaming API support
-- LMStudio: Local models with OpenAI-compatible API
-- MiniMax: MiniMax-M3 / MiniMax-M2.7 models with 1M context window
-- DeepSeek: deepseek-v4-flash / deepseek-v4-pro / deepseek-chat / deepseek-reasoner via api.deepseek.com
-- Opencode Go: deepseek-v4-flash via https://opencode.ai/zen/go/v1
-
-Features:
-- Reasoning models with extended thinking (o1, o3, GPT-5 families)
-- Strict JSON schema enforcement (OpenAI)
-- Provider-specific parameters (Groq seed, service tier)
-- Native Ollama streaming for better structured output
-- Automatic token limit handling per model family
-"""
+"""OpenAI-compatible inference for OpenAI and local model servers."""
 
 import asyncio
 import io
@@ -875,19 +856,7 @@ def _raise_provider_quota_defer(
 
 
 class OpenAICompatibleLLM(LLMInterface):
-    """
-    LLM provider for OpenAI-compatible APIs.
-
-    Supports:
-    - OpenAI: Standard models (GPT-4, GPT-4o) and reasoning models (o1, o3, GPT-5)
-    - Groq: Fast inference with seed control and service tiers
-    - Ollama: Local models with native streaming API for better structured output
-    - LMStudio: Local models with OpenAI-compatible API
-    - MiniMax: MiniMax-M3 / MiniMax-M2.7 models via OpenAI-compatible API (https://api.minimax.io/v1)
-    - DeepSeek: deepseek-v4-flash / deepseek-v4-pro / deepseek-chat / deepseek-reasoner via https://api.deepseek.com
-    - opencode-go: deepseek-v4-flash via https://opencode.ai/zen/go/v1
-    - Meta: Muse Spark models via Meta Model API (https://api.meta.ai/v1)
-    """
+    """Call OpenAI, Ollama, LM Studio, or a local llama.cpp server."""
 
     def __init__(
         self,
@@ -909,9 +878,9 @@ class OpenAICompatibleLLM(LLMInterface):
         Initialize OpenAI-compatible LLM provider.
 
         Args:
-            provider: Provider name ("openai", "groq", "ollama", "lmstudio", "opencode-go", etc.).
+            provider: One of "openai", "ollama", "lmstudio", or "llamacpp".
             api_key: API key (optional for ollama/lmstudio).
-            base_url: Base URL for the API (uses defaults for groq/ollama/lmstudio if empty).
+            base_url: Base URL for the API (uses local defaults for Ollama and LM Studio).
             model: Model name.
             reasoning_effort: Reasoning effort level for supported models
                 ("none", "low", "medium", "high").
@@ -930,57 +899,16 @@ class OpenAICompatibleLLM(LLMInterface):
         super().__init__(provider, api_key, base_url, model, reasoning_effort, **kwargs)
 
         # Validate provider
-        valid_providers = [
-            "openai",
-            "groq",
-            "ollama",
-            "ollama-cloud",
-            "lmstudio",
-            "llamacpp",
-            "minimax",
-            "deepseek",
-            "volcano",
-            "openrouter",
-            "requesty",
-            "zai",
-            "opencode-go",
-            "atlas",
-            "fireworks",
-            "meta",
-        ]
+        valid_providers = ["openai", "ollama", "lmstudio", "llamacpp"]
         if self.provider not in valid_providers:
             raise ValueError(f"OpenAICompatibleLLM only supports: {', '.join(valid_providers)}. Got: {self.provider}")
 
         # Set default base URLs
         if not self.base_url:
-            if self.provider == "groq":
-                self.base_url = "https://api.groq.com/openai/v1"
-            elif self.provider == "ollama":
+            if self.provider == "ollama":
                 self.base_url = "http://localhost:11434/v1"
-            elif self.provider == "ollama-cloud":
-                self.base_url = "https://ollama.com/v1"
             elif self.provider == "lmstudio":
                 self.base_url = "http://localhost:1234/v1"
-            elif self.provider == "minimax":
-                self.base_url = "https://api.minimax.io/v1"
-            elif self.provider == "deepseek":
-                self.base_url = "https://api.deepseek.com"
-            elif self.provider == "openrouter":
-                self.base_url = "https://openrouter.ai/api/v1"
-            elif self.provider == "requesty":
-                self.base_url = "https://router.requesty.ai/v1"
-            elif self.provider == "zai":
-                self.base_url = "https://api.z.ai/api/coding/paas/v4"
-            elif self.provider == "opencode-go":
-                self.base_url = "https://opencode.ai/zen/go/v1"
-            elif self.provider == "atlas":
-                self.base_url = "https://api.atlascloud.ai/v1"
-            elif self.provider == "meta":
-                self.base_url = "https://api.meta.ai/v1"
-            elif self.provider == "fireworks":
-                # OpenAI-compatible inference host (online path). The batch API
-                # lives on a separate control-plane host — see FireworksLLM.
-                self.base_url = "https://api.fireworks.ai/inference/v1"
 
         # Normalize bare local base URLs (e.g. a user pasting the address shown
         # in the LM Studio UI) so the OpenAI SDK targets the `/v1` routes. See #2922.
@@ -992,24 +920,8 @@ class OpenAICompatibleLLM(LLMInterface):
             self.api_key = "local"
 
         # Validate API key for cloud providers
-        if (
-            self.provider
-            in (
-                "openai",
-                "groq",
-                "minimax",
-                "deepseek",
-                "openrouter",
-                "requesty",
-                "zai",
-                "opencode-go",
-                "atlas",
-                "meta",
-                "ollama-cloud",
-            )
-            and not self.api_key
-        ):
-            raise ValueError(f"API key is required for {self.provider}")
+        if self.provider == "openai" and not self.api_key:
+            raise ValueError("API key is required for openai")
 
         # Service tier configuration (from config, not env vars)
         self.groq_service_tier = groq_service_tier

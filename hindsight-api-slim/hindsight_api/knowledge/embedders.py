@@ -5,10 +5,6 @@ which media types can be ingested: a model without video simply refuses video fi
 embedded from its text layer alone when the model has no images.
 
 * ``local`` — EmbeddingGemma 2 in-process (Apache-2.0, 768 dims, text/image/audio/video).
-* ``gemini`` — Gemini Embedding 2 over the Gemini API (text/image/audio/video).
-* ``vertex`` — the same model on Vertex AI, with the memory banks' Vertex project, region and key.
-* ``voyage`` — Voyage multimodal (text/image/video).
-* ``cohere`` — Cohere Embed v4 (text/image).
 * ``openai`` — any OpenAI-compatible ``/v1/embeddings`` server; its modalities are configured.
 * ``text`` — any memory-bank embeddings provider, text only: the memory banks' own embedder, or
   one configured with ``HINDSIGHT_API_KNOWLEDGE_TEXT_EMBEDDINGS_*`` (each a
@@ -22,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -216,92 +211,6 @@ def _release_device_cache() -> None:
         torch.mps.empty_cache()
 
 
-@dataclass(frozen=True)
-class VertexSettings:
-    project_id: str
-    region: str
-    service_account_key: str | None = None
-
-    def credentials(self) -> Any:
-        """A service account's credentials, or None for Application Default Credentials."""
-        if not self.service_account_key:
-            return None
-        from google.oauth2 import service_account
-
-        return service_account.Credentials.from_service_account_file(
-            self.service_account_key, scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-
-
-class GeminiEmbedder(KnowledgeEmbedder):
-    """Gemini Embedding 2: every passage is sent as its own bytes, one content per vector."""
-
-    provider = "gemini"
-    modalities = frozenset(ALL_MODALITIES)
-
-    def __init__(
-        self,
-        model: str,
-        *,
-        api_key: str | None,
-        dimensions: int | None,
-        batch_size: int,
-        vertex: VertexSettings | None = None,
-    ) -> None:
-        from google import genai
-
-        self.model = model
-        self.dimension = dimensions or 3072
-        self._dimensions = dimensions
-        self._batch_size = max(1, batch_size)
-        if vertex is not None:
-            self.provider = "vertex"
-            self._client = genai.Client(
-                vertexai=True,
-                project=vertex.project_id,
-                location=vertex.region,
-                credentials=vertex.credentials(),
-            )
-        else:
-            self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
-
-    def _content(self, item: EmbedInput) -> Any:
-        from google.genai import types
-
-        if item.modality == "text":
-            return types.Content(parts=[types.Part.from_text(text=_document_text(item.text or "", item.title))])
-        assert item.data is not None and item.mime is not None
-        return types.Content(parts=[types.Part.from_bytes(data=item.data, mime_type=item.mime)])
-
-    async def _embed(self, contents: list[Any]) -> list[list[float]]:
-        from google.genai import types
-
-        config = types.EmbedContentConfig(output_dimensionality=self._dimensions) if self._dimensions else None
-        out: list[list[float]] = []
-        for start in range(0, len(contents), self._batch_size):
-            response = await self._client.aio.models.embed_content(
-                model=self.model, contents=contents[start : start + self._batch_size], config=config
-            )
-            for embedding in response.embeddings or []:
-                out.append(media.l2_normalize(list(embedding.values or [])))
-        if len(out) != len(contents):
-            raise RuntimeError(f"Gemini returned {len(out)} embeddings for {len(contents)} inputs")
-        return out
-
-    async def embed_documents(self, items: list[EmbedInput]) -> list[list[float]]:
-        return await self._embed([self._content(item) for item in items])
-
-    async def embed_query(self, text: str | None, image: bytes | None = None) -> list[float]:
-        from google.genai import types
-
-        parts = []
-        if text:
-            parts.append(types.Part.from_text(text=f"{_QUERY_PREFIX}{text}"))
-        if image is not None:
-            parts.append(types.Part.from_bytes(data=image, mime_type=media.sniff_image_mime(image)))
-        return (await self._embed([types.Content(parts=parts)]))[0]
-
-
 _MEDIA_CONCURRENCY = 4  # media requests in flight per embed call (see OpenAIEmbedder.embed_documents)
 
 
@@ -445,120 +354,6 @@ class OpenAIEmbedder(_RemoteEmbedder):
         return (await self._post({"messages": [{"role": "user", "content": content}]}, 1))[0]
 
 
-class VoyageEmbedder(_RemoteEmbedder):
-    """Voyage multimodal embeddings: text, images and MP4 video, interleaved in one input.
-
-    https://docs.voyageai.com/reference/multimodal-embeddings-api. An asset's name and tags go in the
-    same input as its media, as for the other providers.
-    """
-
-    provider = "voyage"
-    modalities = frozenset({"text", "image", "video"})
-
-    def __init__(
-        self, model: str, *, api_key: str | None, base_url: str | None, dimensions: int | None, batch_size: int
-    ) -> None:
-        url = (base_url or "https://api.voyageai.com/v1").rstrip("/") + "/multimodalembeddings"
-        super().__init__(url=url, api_key=api_key, dimensions=dimensions, batch_size=batch_size)
-        self.model = model
-
-    def _content(self, item: EmbedInput) -> list[dict[str, Any]]:
-        if item.modality == "text":
-            return [{"type": "text", "text": _titled(item.text or "", item.title)}]
-        if item.modality not in self.modalities:
-            raise UnsupportedModalityError(f"{self.model} does not embed {item.modality}")
-        assert item.data is not None and item.mime is not None
-        kind = "video_base64" if item.modality == "video" else "image_base64"
-        content: list[dict[str, Any]] = [{"type": kind, kind: _data_url(item.data, item.mime)}]
-        caption = _media_caption(item)
-        if caption:
-            content.insert(0, {"type": "text", "text": caption})
-        return content
-
-    async def _embed(self, inputs: list[list[dict[str, Any]]], input_type: str) -> list[list[float]]:
-        out: list[list[float]] = []
-        for start in range(0, len(inputs), self._batch_size):
-            chunk = inputs[start : start + self._batch_size]
-            body: dict[str, Any] = {
-                "model": self.model,
-                "input_type": input_type,
-                "inputs": [{"content": c} for c in chunk],
-            }
-            if self._dimensions:
-                body["output_dimension"] = self._dimensions
-            payload = await self._request(body)
-            rows = sorted(payload["data"], key=lambda row: row["index"])
-            out.extend(self._vectors([row["embedding"] for row in rows], len(chunk)))
-        return out
-
-    async def embed_documents(self, items: list[EmbedInput]) -> list[list[float]]:
-        return await self._embed([self._content(item) for item in items], "document")
-
-    async def embed_query(self, text: str | None, image: bytes | None = None) -> list[float]:
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
-        if image is not None:
-            content.append({"type": "image_base64", "image_base64": _data_url(image, media.sniff_image_mime(image))})
-        return (await self._embed([content], "query"))[0]
-
-
-class CohereEmbedder(_RemoteEmbedder):
-    """Cohere Embed v4: texts, and images (with their name and tags) as mixed ``inputs``.
-
-    https://docs.cohere.com/reference/embed (v2).
-    """
-
-    provider = "cohere"
-    modalities = frozenset({"text", "image"})
-    _MAX_INPUTS = 96  # per request, for texts and for inputs alike
-
-    def __init__(
-        self, model: str, *, api_key: str | None, base_url: str | None, dimensions: int | None, batch_size: int
-    ) -> None:
-        url = (base_url or "https://api.cohere.com/v2").rstrip("/") + "/embed"
-        super().__init__(url=url, api_key=api_key, dimensions=dimensions, batch_size=batch_size)
-        self.model = model
-
-    def _input(self, item: EmbedInput) -> dict[str, Any]:
-        if item.modality == "text":
-            return {"content": [{"type": "text", "text": _titled(item.text or "", item.title)}]}
-        if item.modality not in self.modalities:
-            raise UnsupportedModalityError(f"{self.model} does not embed {item.modality}")
-        assert item.data is not None and item.mime is not None
-        content: list[dict[str, Any]] = [{"type": "image_url", "image_url": {"url": _data_url(item.data, item.mime)}}]
-        caption = _media_caption(item)
-        if caption:
-            content.insert(0, {"type": "text", "text": caption})
-        return {"content": content}
-
-    async def _embed(self, inputs: list[dict[str, Any]], input_type: str) -> list[list[float]]:
-        out: list[list[float]] = []
-        # Images make a request heavy (20MB per request at most), so a batch holding any stays small.
-        only_text = all(c["type"] == "text" for i in inputs for c in i["content"])
-        size = self._MAX_INPUTS if only_text else min(self._batch_size, self._MAX_INPUTS)
-        for start in range(0, len(inputs), size):
-            chunk = inputs[start : start + size]
-            body: dict[str, Any] = {
-                "model": self.model,
-                "input_type": input_type,
-                "embedding_types": ["float"],
-                "inputs": chunk,
-            }
-            if self._dimensions:
-                body["output_dimension"] = self._dimensions
-            payload = await self._request(body)
-            out.extend(self._vectors(payload["embeddings"]["float"], len(chunk)))
-        return out
-
-    async def embed_documents(self, items: list[EmbedInput]) -> list[list[float]]:
-        return await self._embed([self._input(item) for item in items], "search_document")
-
-    async def embed_query(self, text: str | None, image: bytes | None = None) -> list[float]:
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
-        if image is not None:
-            content.append({"type": "image_url", "image_url": {"url": _data_url(image, media.sniff_image_mime(image))}})
-        return (await self._embed([{"content": content}], "search_query"))[0]
-
-
 class TextEmbedder(KnowledgeEmbedder):
     """A memory-bank embeddings provider, text only: for servers without a multimodal model.
 
@@ -629,48 +424,6 @@ def create_knowledge_embedder(config: ConfigLike, memory_embeddings: Embeddings)
         )
     dimensions = config.knowledge_embeddings_dimensions
     batch_size = config.knowledge_embeddings_batch_size
-    if provider in ("gemini", "vertex"):
-        from ..config import DEFAULT_KNOWLEDGE_EMBEDDINGS_GEMINI_MODEL
-
-        vertex = None
-        if provider == "vertex":
-            if not config.embeddings_vertexai_project_id:
-                raise ValueError(
-                    "HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_PROVIDER=vertex needs HINDSIGHT_API_EMBEDDINGS_VERTEXAI_PROJECT_ID "
-                    "(or HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID)"
-                )
-            vertex = VertexSettings(
-                project_id=config.embeddings_vertexai_project_id,
-                region=config.embeddings_vertexai_region or "us-central1",
-                service_account_key=config.embeddings_vertexai_service_account_key,
-            )
-        return GeminiEmbedder(
-            config.knowledge_embeddings_model or DEFAULT_KNOWLEDGE_EMBEDDINGS_GEMINI_MODEL,
-            api_key=config.knowledge_embeddings_api_key or config.embeddings_gemini_api_key,
-            dimensions=dimensions,
-            batch_size=batch_size,
-            vertex=vertex,
-        )
-    if provider == "voyage":
-        from ..config import DEFAULT_KNOWLEDGE_EMBEDDINGS_VOYAGE_MODEL
-
-        return VoyageEmbedder(
-            config.knowledge_embeddings_model or DEFAULT_KNOWLEDGE_EMBEDDINGS_VOYAGE_MODEL,
-            api_key=_required_key(config.knowledge_embeddings_api_key or os.getenv("VOYAGE_API_KEY"), provider),
-            base_url=config.knowledge_embeddings_base_url,
-            dimensions=dimensions,
-            batch_size=batch_size,
-        )
-    if provider == "cohere":
-        from ..config import DEFAULT_KNOWLEDGE_EMBEDDINGS_COHERE_MODEL
-
-        return CohereEmbedder(
-            config.knowledge_embeddings_model or DEFAULT_KNOWLEDGE_EMBEDDINGS_COHERE_MODEL,
-            api_key=_required_key(config.knowledge_embeddings_api_key or config.embeddings_cohere_api_key, provider),
-            base_url=config.knowledge_embeddings_base_url,
-            dimensions=dimensions,
-            batch_size=batch_size,
-        )
     if provider == "openai":
         if not config.knowledge_embeddings_base_url or not config.knowledge_embeddings_model:
             raise ValueError(
@@ -691,15 +444,5 @@ def create_knowledge_embedder(config: ConfigLike, memory_embeddings: Embeddings)
     if provider == "text":
         return _text_embedder(config.knowledge_text_embeddings, memory_embeddings)
     raise ValueError(
-        f"Unknown HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_PROVIDER '{provider}'. "
-        "Expected local, gemini, vertex, voyage, cohere, openai or text."
+        f"Unknown HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_PROVIDER '{provider}'. Expected local, openai or text."
     )
-
-
-def _required_key(key: str | None, provider: str) -> str:
-    if not key:
-        raise ValueError(
-            f"HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_PROVIDER={provider} needs HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_API_KEY"
-            + (" (or VOYAGE_API_KEY)" if provider == "voyage" else " (or the memory banks' Cohere key)")
-        )
-    return key

@@ -37,11 +37,11 @@ describe("resolveHostMemory", () => {
   it("forwards every client setting the hosts used to pass by hand", async () => {
     // dsh and Prime Agent each hand-built their ClientOpts and both omitted maxParallelRetains, so
     // those two hosts silently ignored the setting. One builder is what stops that recurring.
-    writeConfig({ apiUrl: "http://server", apiToken: "k", maxParallelRetains: 3 });
+    writeConfig({ apiToken: "k", maxParallelRetains: 3 });
     const { resolveHostMemory } = await loadFactory();
 
     const { client } = resolveHostMemory("dsh", root);
-    expect(client.apiUrl).toBe("http://server");
+    expect(client.apiUrl).toBe("http://127.0.0.1:9077");
     expect(client.apiToken).toBe("k");
     expect(client.maxParallelRetains).toBe(3);
   });
@@ -87,11 +87,10 @@ describe("resolveHostMemory", () => {
     // `banks.<id>.apiToken` is a legitimate override (it is not stripped by BANK_OVERRIDE_EXCLUDED),
     // so a provider that re-read only the top level would hand back the wrong credential.
     const { resolveHostMemory: probe } = await loadFactory();
-    writeConfig({ apiUrl: "http://server", apiToken: "global" });
+    writeConfig({ apiToken: "global" });
     const bankId = probe("dsh", root).bankId;
 
     writeConfig({
-      apiUrl: "http://server",
       apiToken: "global",
       banks: { [bankId]: { apiToken: "per-bank" } },
     });

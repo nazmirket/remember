@@ -9,11 +9,9 @@ from aiohttp import web
 
 from hindsight_api.config import HindsightConfig, clear_config_cache
 from hindsight_api.knowledge.embedders import (
-    CohereEmbedder,
     EmbedInput,
     TextEmbedder,
     UnsupportedModalityError,
-    VoyageEmbedder,
     create_knowledge_embedder,
 )
 from tests.aiohttp_stub import stub_server
@@ -38,85 +36,7 @@ def _recorder(reply):
 # --- Voyage ----------------------------------------------------------------------------------------
 
 
-def _voyage_reply(body: dict) -> dict:
-    return {"data": [{"index": i, "embedding": [3.0, 4.0]} for i in range(len(body["inputs"]))]}
-
-
-async def test_voyage_sends_media_with_its_name_and_tags_in_one_input():
-    handler, seen = _recorder(_voyage_reply)
-    async with stub_server(handler) as base_url:
-        embedder = VoyageEmbedder(
-            "voyage-multimodal-3.5", api_key="k", base_url=base_url, dimensions=None, batch_size=8
-        )
-        vectors = await embedder.embed_documents(
-            [
-                EmbedInput(modality="text", text="Keys expire.", title="api keys"),
-                EmbedInput(modality="image", data=PNG, mime="image/png", title="red car", tags=("vehicle",)),
-                EmbedInput(modality="video", data=MP4, mime="video/mp4"),
-            ]
-        )
-        query = await embedder.embed_query("red car", PNG)
-    assert vectors == [[0.6, 0.8]] * 3 and query == [0.6, 0.8] and embedder.dimension == 2
-    path, body = seen[0]
-    assert path == "/multimodalembeddings" and body["input_type"] == "document"
-    text, image, video = (i["content"] for i in body["inputs"])
-    assert text == [{"type": "text", "text": "api keys\n\nKeys expire."}]
-    assert image[0] == {"type": "text", "text": "red car | vehicle"}
-    assert image[1]["type"] == "image_base64" and image[1]["image_base64"].startswith("data:image/png;base64,")
-    assert video[0]["type"] == "video_base64" and video[0]["video_base64"].startswith("data:video/mp4;base64,")
-    assert seen[1][1]["input_type"] == "query" and [c["type"] for c in seen[1][1]["inputs"][0]["content"]] == [
-        "text",
-        "image_base64",
-    ]
-
-
-async def test_voyage_refuses_audio_and_honours_the_dimensions():
-    handler, seen = _recorder(_voyage_reply)
-    async with stub_server(handler) as base_url:
-        embedder = VoyageEmbedder("m", api_key="k", base_url=base_url, dimensions=512, batch_size=8)
-        with pytest.raises(UnsupportedModalityError):
-            await embedder.embed_documents([EmbedInput(modality="audio", data=b"x", mime="audio/mp4")])
-        await embedder.embed_query("q")
-    assert seen[0][1]["output_dimension"] == 512 and embedder.modalities == {"text", "image", "video"}
-
-
 # --- Cohere ----------------------------------------------------------------------------------------
-
-
-def _cohere_reply(body: dict) -> dict:
-    return {"embeddings": {"float": [[0.0, 2.0] for _ in body["inputs"]]}}
-
-
-async def test_cohere_sends_texts_and_captioned_images_as_inputs():
-    handler, seen = _recorder(_cohere_reply)
-    async with stub_server(handler) as base_url:
-        embedder = CohereEmbedder("embed-v4.0", api_key="k", base_url=base_url, dimensions=None, batch_size=2)
-        texts = [EmbedInput(modality="text", text=f"t{n}") for n in range(100)]
-        assert len(await embedder.embed_documents(texts)) == 100
-        images = [EmbedInput(modality="image", data=PNG, mime="image/png", title="red") for _ in range(3)]
-        assert await embedder.embed_documents(images) == [[0.0, 1.0]] * 3
-        await embedder.embed_query("red")
-        with pytest.raises(UnsupportedModalityError):
-            await embedder.embed_documents([EmbedInput(modality="video", data=MP4, mime="video/mp4")])
-    # Texts go 96 to a request; images, which make a request heavy, the configured batch size.
-    assert [len(body["inputs"]) for _, body in seen[:4]] == [96, 4, 2, 1]
-    path, body = seen[2]
-    assert path == "/embed" and body["input_type"] == "search_document" and body["embedding_types"] == ["float"]
-    assert body["inputs"][0]["content"][0] == {"type": "text", "text": "red"}
-    assert body["inputs"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert seen[4][1]["input_type"] == "search_query"
-
-
-async def test_a_short_answer_from_a_provider_fails_the_call():
-    async def handler(request: web.Request) -> web.StreamResponse:
-        return web.json_response({"embeddings": {"float": [[1.0]]}})
-
-    async with stub_server(handler) as base_url:
-        embedder = CohereEmbedder("m", api_key="k", base_url=base_url, dimensions=None, batch_size=8)
-        with pytest.raises(RuntimeError, match="returned 1 embeddings for 2 inputs"):
-            await embedder.embed_documents(
-                [EmbedInput(modality="text", text="a"), EmbedInput(modality="text", text="b")]
-            )
 
 
 # --- choosing a provider ---------------------------------------------------------------------------
@@ -124,27 +44,6 @@ async def test_a_short_answer_from_a_provider_fails_the_call():
 
 def _config(**changes) -> HindsightConfig:
     return replace(HindsightConfig.from_env(), **changes)
-
-
-def test_each_provider_is_built_from_the_knowledge_settings(memory):
-    voyage = create_knowledge_embedder(
-        _config(knowledge_embeddings_provider="voyage", knowledge_embeddings_api_key="k"), memory.embeddings
-    )
-    assert isinstance(voyage, VoyageEmbedder) and voyage.model == "voyage-multimodal-3.5"
-    cohere = create_knowledge_embedder(
-        _config(knowledge_embeddings_provider="cohere", embeddings_cohere_api_key="memory-key"), memory.embeddings
-    )
-    assert isinstance(cohere, CohereEmbedder) and cohere.model == "embed-v4.0"  # the memory banks' Cohere key
-    with pytest.raises(ValueError, match="needs HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_API_KEY"):
-        create_knowledge_embedder(
-            _config(knowledge_embeddings_provider="voyage", knowledge_embeddings_api_key=None), memory.embeddings
-        )
-    with pytest.raises(ValueError, match="needs HINDSIGHT_API_EMBEDDINGS_VERTEXAI_PROJECT_ID"):
-        create_knowledge_embedder(
-            _config(knowledge_embeddings_provider="vertex", embeddings_vertexai_project_id=None), memory.embeddings
-        )
-    with pytest.raises(ValueError, match="Expected local, gemini, vertex, voyage, cohere, openai or text"):
-        create_knowledge_embedder(_config(knowledge_embeddings_provider="nope"), memory.embeddings)
 
 
 async def test_the_text_provider_reuses_the_memory_banks_embedder_by_default(memory):

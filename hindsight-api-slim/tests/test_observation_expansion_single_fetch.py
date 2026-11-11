@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hindsight_api.engine.db.ops import UpdatedWindow
-from hindsight_api.engine.db.ops_oracle import OracleOps
 from hindsight_api.engine.db.ops_postgresql import PostgreSQLOps
 
 
@@ -467,49 +466,3 @@ async def test_postgresql_candidates_probe_gin_once_per_connected_source():
     assert "m.source_memory_ids @> ARRAY[cs.source_id]" in probe
     assert "OFFSET 0" in probe, "the fence keeps fact_type from being pushed into the probe"
     assert "fact_type" not in probe
-
-
-@pytest.mark.asyncio
-async def test_oracle_fused_query_is_one_statement():
-    """Structural (no Oracle runtime): Oracle emits ONE statement, three arms.
-
-    Oracle instances are not available to every test run, so the fused shape
-    is pinned the way test_db_abstraction pins Oracle behaviour — by invoking
-    ``OracleOps.expand_observations`` against a mock connection and inspecting
-    the statement and binds it produces.
-    """
-    conn = AsyncMock()
-    conn.fetch.return_value = []
-
-    seeds = [uuid.uuid4()]
-    after, before = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 2, 1, tzinfo=timezone.utc)
-    await OracleOps().expand_observations(
-        conn,
-        "memory_units",
-        "unit_entities",
-        "memory_links",
-        seeds,
-        100,
-        200,
-        UpdatedWindow(after=after, before=before, first_param_index=3),
-    )
-
-    assert conn.fetch.await_count == 1, "the fused observation expansion must be one fetch"
-    sql = conn.fetch.await_args.args[0]
-    params = conn.fetch.await_args.args[1:]
-    normalized_sql = " ".join(sql.split())
-
-    # One statement, ending in the three-arm union behind source discriminators.
-    assert ";" not in sql, "the fused query must be a single statement"
-    assert (
-        "SELECT * FROM observation_entity_expanded UNION ALL SELECT * FROM semantic_expanded UNION ALL SELECT * FROM causal_expanded"
-        in normalized_sql
-    )
-    for discriminator in ("'entity' AS source", "'semantic' AS source", "'causal' AS source"):
-        assert discriminator in sql
-    # The entity arm is a CTE of the same statement, not a separate fetch.
-    assert sql.count("FETCH FIRST $2 ROWS ONLY") == 3, "each arm keeps its own budget limit"
-    assert "updated_at > $3" in sql and "updated_at < $4" in sql, "the window binds at $3/$4 in every arm"
-    # Bind order: seeds, budget, then the window bounds.
-    assert params == (seeds, 100, after, before)
-    assert sql.count("$1::uuid[]") >= 4, "the seed bind reaches every arm"

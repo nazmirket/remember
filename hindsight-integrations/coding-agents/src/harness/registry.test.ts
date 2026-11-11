@@ -12,7 +12,6 @@ describe("supported agent registry", () => {
   it.each(HARNESS_NAMES)("resolves %s", async (name) => {
     const adapter = await getHarness(name);
     expect(adapter.name).toBe(name);
-    expect(() => adapter.createRuntime({} as never)).toThrow();
   });
   it("rejects unsupported agents", async () => {
     await expect(getHarness("opencode")).rejects.toThrow("unknown harness");

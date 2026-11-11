@@ -5,7 +5,7 @@ parameter in the OpenAPI spec.
 
 Endpoint-level check
 --------------------
-For each ``operationId`` in ``hindsight-docs/static/openapi.json`` we require
+For each ``operationId`` in ``schemas/openapi.json`` we require
 that one of the following is true:
   1. A call of the form ``.<operation_id>(`` appears somewhere in
      ``hindsight-cli/src/**/*.rs``. The progenitor-generated Rust client
@@ -57,7 +57,7 @@ RUST_KEYWORD_ALIASES: dict[str, set[str]] = {
 def get_repo_root() -> Path:
     here = Path(__file__).resolve().parent
     for parent in (here, *here.parents):
-        if (parent / "hindsight-cli").is_dir() and (parent / "hindsight-docs").is_dir():
+        if (parent / "hindsight-cli").is_dir() and (parent / "schemas").is_dir():
             return parent
     raise RuntimeError(f"Could not locate repo root from {here}")
 
@@ -177,7 +177,7 @@ def field_covered(prop: str, main_src: str) -> bool:
 
 def main() -> None:
     root = get_repo_root()
-    spec_path = root / "hindsight-docs" / "static" / "openapi.json"
+    spec_path = root / "schemas" / "openapi.json"
     manifest_path = root / "hindsight-cli" / ".openapi-coverage.toml"
     cli_src_dir = root / "hindsight-cli" / "src"
     main_rs_path = cli_src_dir / "main.rs"

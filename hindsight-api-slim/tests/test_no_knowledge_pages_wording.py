@@ -15,10 +15,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 SCANNED = [
-    "hindsight-docs/docs",
-    "hindsight-docs/docs-integrations",
-    "hindsight-docs/src",
-    "hindsight-control-plane/src",
     "hindsight-cli/src",
     "hindsight-clients/python/hindsight_client",
     "hindsight-clients/typescript/src",

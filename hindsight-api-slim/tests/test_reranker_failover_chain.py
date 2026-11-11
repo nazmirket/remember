@@ -14,7 +14,6 @@ import pytest
 
 from hindsight_api.config import HindsightConfig
 from hindsight_api.engine.cross_encoder import (
-    CohereCrossEncoder,
     CrossEncoderModel,
     MultiCrossEncoder,
     RemoteTEICrossEncoder,
@@ -135,39 +134,6 @@ def test_member_with_a_bad_numeric_setting_fails_fast():
 
 
 # ── chain construction ─────────────────────────────────────────────────────────
-
-
-def test_factory_returns_a_single_encoder_without_members():
-    env = {
-        "HINDSIGHT_API_RERANKER_PROVIDER": "cohere",
-        "HINDSIGHT_API_RERANKER_COHERE_API_KEY": "k",
-    }
-    with patch.dict(os.environ, env, clear=False):
-        config = HindsightConfig.from_env()
-        with patch("hindsight_api.config.get_config", return_value=config):
-            encoder = create_cross_encoder_from_env()
-
-    assert isinstance(encoder, CohereCrossEncoder)
-
-
-def test_factory_builds_the_chain_when_members_are_configured():
-    env = {
-        "HINDSIGHT_API_RERANKER_PROVIDER": "cohere",
-        "HINDSIGHT_API_RERANKER_COHERE_API_KEY": "k",
-        "HINDSIGHT_API_RERANKER_1_PROVIDER": "tei",
-        "HINDSIGHT_API_RERANKER_1_TEI_URL": "http://backup:8080",
-        "HINDSIGHT_API_RERANKER_2_PROVIDER": "rrf",
-    }
-    with patch.dict(os.environ, env, clear=False):
-        config = HindsightConfig.from_env()
-        with patch("hindsight_api.config.get_config", return_value=config):
-            encoder = create_cross_encoder_from_env()
-
-    assert isinstance(encoder, MultiCrossEncoder)
-    members = encoder._members
-    assert isinstance(members[0], CohereCrossEncoder)
-    assert isinstance(members[1], RemoteTEICrossEncoder)
-    assert isinstance(members[2], RRFPassthroughCrossEncoder)
 
 
 def test_factory_builds_the_chain_through_the_real_config_proxy():

@@ -13,7 +13,6 @@ import re
 import pytest
 
 from hindsight_api.engine.db.ops import MEMORY_UNIT_COLUMNS, UpdatedWindow, memory_unit_columns
-from hindsight_api.engine.db.ops_oracle import OracleOps
 from hindsight_api.engine.db.ops_postgresql import PostgreSQLOps
 
 WINDOWS = [
@@ -52,7 +51,7 @@ def _arm_projections(sql: str) -> dict[str, list[str]]:
     return arms
 
 
-@pytest.mark.parametrize("ops", [PostgreSQLOps(), OracleOps()], ids=["pg", "oracle"])
+@pytest.mark.parametrize("ops", [PostgreSQLOps()], ids=["pg"])
 @pytest.mark.parametrize("window", WINDOWS, ids=["window_at_4", "window_at_1"])
 def test_expansion_arms_share_the_memory_unit_projection(ops, window):
     sql = ops.build_entity_expansion_cte("mu_t", "ue_t", 5, window) + ",\n"

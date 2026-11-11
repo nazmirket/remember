@@ -41,7 +41,6 @@ describe("loadConfig layering", () => {
 
   it("applies the requesting harness's section over the base", () => {
     writeJson(globalCfg, {
-      apiUrl: "http://x:1",
       bankId: "shared",
       harnesses: {
         "claude-code": { bankId: "claude-bank" },
@@ -49,7 +48,9 @@ describe("loadConfig layering", () => {
       },
     });
     expect(loadConfig({ path: globalCfg, harness: "claude-code" }).bankId).toBe("claude-bank");
-    expect(loadConfig({ path: globalCfg, harness: "claude-code" }).apiUrl).toBe("http://x:1");
+    expect(loadConfig({ path: globalCfg, harness: "claude-code" }).apiUrl).toBe(
+      "http://127.0.0.1:9077"
+    );
     expect(loadConfig({ path: globalCfg, harness: "opencode" }).disabled).toBe(true);
     expect(loadConfig({ path: globalCfg, harness: "opencode" }).bankId).toBe("shared");
     expect(loadConfig({ path: globalCfg }).bankId).toBe("shared"); // no harness: base only
@@ -200,9 +201,9 @@ describe("reflectToolTimeoutMs / reflectBudget", () => {
 // exfiltrate the user's token + prompts to its own server just by being opened.
 describe("loadConfig — untrusted project-local layer is sanitized (security)", () => {
   it("the user-global config CAN still set apiUrl/apiToken (only the project layer is restricted)", () => {
-    writeJson(globalCfg, { apiUrl: "https://real.example", apiToken: "REAL-TOKEN" });
+    writeJson(globalCfg, { apiToken: "REAL-TOKEN" });
     const cfg = loadConfig({ path: globalCfg });
-    expect(cfg.apiUrl).toBe("https://real.example");
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
     expect(cfg.apiToken).toBe("REAL-TOKEN");
   });
 });
@@ -367,24 +368,6 @@ describe("environment fallback", () => {
     process.env = { ...ENV };
   });
 
-  it("supplies apiUrl and apiToken when the file omits them", () => {
-    writeJson(globalCfg, { bankId: "b" }); // no apiUrl/apiToken
-    process.env.HINDSIGHT_API_URL = "http://localhost:8888";
-    process.env.HINDSIGHT_API_TOKEN = "tok-from-env";
-    const cfg = loadConfig({ path: globalCfg });
-    expect(cfg.apiUrl).toBe("http://localhost:8888");
-    expect(cfg.apiToken).toBe("tok-from-env");
-  });
-
-  it("the FILE wins over env — env is a fallback, not an override", () => {
-    writeJson(globalCfg, { apiUrl: "https://from-file", apiToken: "tok-from-file" });
-    process.env.HINDSIGHT_API_URL = "https://from-env";
-    process.env.HINDSIGHT_API_TOKEN = "tok-from-env";
-    const cfg = loadConfig({ path: globalCfg });
-    expect(cfg.apiUrl).toBe("https://from-file");
-    expect(cfg.apiToken).toBe("tok-from-file");
-  });
-
   it("autoInject: explicit mode wins, legacy autoReflect=false maps to none, junk falls back", () => {
     expect(resolveConfig({}).autoInject).toBe("reflect");
     expect(resolveConfig({ autoInject: "pages" }).autoInject).toBe("pages");
@@ -522,15 +505,6 @@ describe("environment fallback", () => {
     process.env.HINDSIGHT_REFLECT_TIMEOUT_MS = "soon";
     // NaN here would silently break the reflect timeout in a way that is very hard to trace.
     expect(loadConfig({ path: globalCfg }).reflectTimeoutMs).toBe(20000);
-  });
-
-  it("an empty env var does not mask the file or the default", () => {
-    writeJson(globalCfg, { apiUrl: "https://from-file" });
-    process.env.HINDSIGHT_API_URL = "";
-    process.env.HINDSIGHT_SURVEY_MODEL = "   ";
-    const cfg = loadConfig({ path: globalCfg });
-    expect(cfg.apiUrl).toBe("https://from-file");
-    expect(cfg.surveyModel).toBe("haiku");
   });
 });
 

@@ -23,7 +23,6 @@ from hindsight_api.config import LLM_STRATEGY_FAILOVER, LLMMemberConfig, LLMStra
 from hindsight_api.engine.llm_interface import PromptCachePrefix
 from hindsight_api.engine.llm_wrapper import LLMProvider
 from hindsight_api.engine.multi_llm import MultiLLMProvider
-from hindsight_api.engine.providers.litellm_llm import LiteLLMLLM
 from hindsight_api.engine.providers.llm_debug import _serialize_config
 from hindsight_api.extensions.llm_request import (
     LLMRequestExtension,
@@ -188,22 +187,6 @@ async def test_override_does_not_leak_into_the_next_call(install):
     ext.answer = None
     await _call_for_bank(llm, "bob")
     assert [r.headers["authorization"] for r in seen] == ["Bearer alice-key", "Bearer server-key"]
-
-
-async def test_litellm_puts_the_key_in_its_call_kwargs(install):
-    install(LLMRequestOverrides(api_key="alice-key", headers={"x-customer": "alice"}))
-    llm = LLMProvider(provider="litellm", api_key="server-key", base_url="", model="openai/m")
-    impl = llm._provider_impl
-    assert isinstance(impl, LiteLLMLLM)
-    bound = await bind_llm_request(llm)
-    try:
-        kwargs = impl._build_common_kwargs(messages=[{"role": "user", "content": "hi"}])
-    finally:
-        bound.reset()
-    assert kwargs["api_key"] == "alice-key"
-    assert kwargs["extra_headers"]["x-customer"] == "alice"
-    # And it is gone once the call's binding is.
-    assert impl._build_common_kwargs(messages=[])["api_key"] == "server-key"
 
 
 # ── a whole different LLM ─────────────────────────────────────────────────────
@@ -494,22 +477,6 @@ async def test_a_credential_header_the_answer_overrides_is_fine(install):
     assert seen[0].headers["x-portkey-api-key"] == "alice-gateway-key"
 
 
-@pytest.mark.parametrize(
-    ("model", "supported"),
-    [
-        ("openai/m", True),
-        ("anthropic/claude-x", True),
-        ("vertex_ai/gemini-x", False),
-        ("bedrock/anthropic.claude-x", False),
-        ("sagemaker/endpoint", False),
-    ],
-)
-def test_litellm_takes_a_key_only_for_keyed_backends(model, supported):
-    """Vertex, Bedrock, SageMaker ... ignore ``api_key`` and use the server's cloud credentials."""
-    llm = LLMProvider(provider="litellm", api_key="server-key", base_url="", model=model)
-    assert llm._provider_impl.supports_request_overrides() is supported
-
-
 # Which class answers supports_request_overrides for each provider class. A new
 # provider must be added here — and if it inherits True, its calls must go through
 # the client the override is applied to.
@@ -518,20 +485,12 @@ _OVERRIDE_ANSWERED_BY = {
     "ChatGPTLLM": "LLMInterface",
     "ClaudeCodeLLM": "LLMInterface",
     "CodexLLM": "LLMInterface",
-    "CursorLLM": "LLMInterface",
-    "FireworksLLM": "OpenAICompatibleLLM",
-    "GeminiLLM": "LLMInterface",
-    "GitHubCopilotLLM": "LLMInterface",
-    "LiteLLMLLM": "LiteLLMLLM",
-    "LiteLLMRouterLLM": "LiteLLMRouterLLM",
     "LlamaCppLLM": "LLMInterface",
     "MockLLM": "LLMInterface",
     "NoneLLM": "LLMInterface",
-    "NousLLM": "NousLLM",
     "OpenAICompatibleLLM": "OpenAICompatibleLLM",
     "OpenAIResponsesLLM": "LLMInterface",
     "UnavailableLLM": "LLMInterface",
-    "XaiOAuthLLM": "LLMInterface",
 }
 
 
@@ -567,13 +526,11 @@ def test_providers_that_take_credentials_send_through_the_overridden_client():
 
     direct = {
         name: re.findall(r"self\._client\.([\w.]+)\(", (Path(providers.__path__[0]) / f"{name}.py").read_text())
-        for name in ("openai_compatible_llm", "anthropic_llm", "fireworks_llm", "nous_llm")
+        for name in ("openai_compatible_llm", "anthropic_llm")
     }
     assert {name: sorted(set(calls)) for name, calls in direct.items()} == {
         "openai_compatible_llm": ["batches.create", "batches.retrieve", "close", "files.content", "files.create"],
         "anthropic_llm": ["close", "messages.batches.create", "messages.batches.results", "messages.batches.retrieve"],
-        "fireworks_llm": [],
-        "nous_llm": [],
     }
 
 

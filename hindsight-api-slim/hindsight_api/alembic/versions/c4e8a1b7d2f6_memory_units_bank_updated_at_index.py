@@ -98,20 +98,9 @@ def _pg_downgrade() -> None:
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {schema}{_PG_INDEX_NAME}")
 
 
-def _oracle_upgrade() -> None:
-    # Plain CREATE INDEX, as every other Oracle half in this tree does: online
-    # builds are an Enterprise-only option, so this takes the ordinary DDL lock,
-    # and re-runnability is alembic's version table rather than IF NOT EXISTS.
-    op.get_bind().exec_driver_sql(f"CREATE INDEX {_ORACLE_INDEX_NAME} ON memory_units(bank_id, updated_at DESC)")
-
-
-def _oracle_downgrade() -> None:
-    op.get_bind().exec_driver_sql(f"DROP INDEX {_ORACLE_INDEX_NAME}")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

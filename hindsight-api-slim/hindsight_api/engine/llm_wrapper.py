@@ -2,7 +2,6 @@
 LLM wrapper for unified configuration across providers.
 """
 
-import importlib.util
 import json
 import logging
 import re
@@ -14,15 +13,6 @@ from json_repair import repair_json
 from pydantic import BaseModel
 
 from .._cross_loop import CrossLoopSemaphore
-from .response_models import LLMCallResult, TokenUsage
-
-# Vertex AI credentials (for LLMProvider to pass to GeminiLLM). Only checked for
-# here; google-auth is imported where a key is actually loaded, not on every start.
-try:
-    VERTEXAI_AVAILABLE = importlib.util.find_spec("google.oauth2") is not None
-except ModuleNotFoundError:  # no `google` namespace package at all
-    VERTEXAI_AVAILABLE = False
-
 from ..config import (
     ENV_CONSOLIDATION_LLM_MAX_CONCURRENT,
     ENV_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT,
@@ -48,6 +38,7 @@ from .llm_interface import (
     OutputTooLongError as OutputTooLongError,
 )
 from .llm_transport import configure_http_logging
+from .response_models import LLMCallResult, TokenUsage
 
 if TYPE_CHECKING:
     from .multi_llm import MultiLLMProvider
@@ -626,12 +617,6 @@ def create_llm_provider(
         )
 
     provider_lower = provider.lower()
-    if provider_lower == "gemini":
-        from ..config import parse_gemini_service_tier
-
-        gemini_service_tier = parse_gemini_service_tier(gemini_service_tier)
-    else:
-        gemini_service_tier = None
 
     if provider_lower == "openai-codex":
         return providers.CodexLLM(
@@ -644,17 +629,6 @@ def create_llm_provider(
             codex_home=codex_home,
             timeout=timeout,
         )
-
-    elif provider_lower == "cursor":
-        return providers.CursorLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-        )
-
     elif provider_lower == "claude-code":
         return providers.ClaudeCodeLLM(
             provider=provider,
@@ -663,17 +637,6 @@ def create_llm_provider(
             model=model,
             reasoning_effort=reasoning_effort,
         )
-
-    elif provider_lower == "github-copilot":
-        return providers.GitHubCopilotLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-        )
-
     elif provider_lower == "mock":
         return providers.MockLLM(
             provider=provider,
@@ -682,7 +645,6 @@ def create_llm_provider(
             model=model,
             reasoning_effort=reasoning_effort,
         )
-
     elif provider_lower == "none":
         return providers.NoneLLM(
             provider=provider,
@@ -691,24 +653,6 @@ def create_llm_provider(
             model=model,
             reasoning_effort=reasoning_effort,
         )
-
-    elif provider_lower in ("gemini", "vertexai"):
-        return providers.GeminiLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-            vertexai_project_id=vertexai_project_id,
-            vertexai_region=vertexai_region,
-            vertexai_credentials=vertexai_credentials,
-            gemini_safety_settings=gemini_safety_settings,
-            gemini_service_tier=gemini_service_tier,
-            prompt_cache_enabled=prompt_cache_enabled,
-            extra_body=extra_body,
-        )
-
     elif provider_lower == "anthropic":
         return providers.AnthropicLLM(
             provider=provider,
@@ -720,57 +664,6 @@ def create_llm_provider(
             extra_body=extra_body,
             timeout=timeout,
         )
-
-    elif provider_lower == "litellm":
-        return providers.LiteLLMLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            extra_body=extra_body,
-            default_headers=default_headers,
-            timeout=timeout,
-            structured_output_in_prompt=structured_output_in_prompt,
-        )
-
-    elif provider_lower == "litellmrouter":
-        if not litellmrouter_config:
-            raise ValueError(
-                "Provider 'litellmrouter' requires a config object. "
-                "Set HINDSIGHT_API_LLM_LITELLMROUTER_CONFIG (or the per-op variant) "
-                "to a JSON object accepted by litellm.Router. "
-                "See https://docs.litellm.ai/docs/routing."
-            )
-        return providers.LiteLLMRouterLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            config=litellmrouter_config,
-            reasoning_effort=reasoning_effort,
-            extra_body=extra_body,
-            default_headers=default_headers,
-            timeout=timeout,
-            structured_output_in_prompt=structured_output_in_prompt,
-        )
-
-    elif provider_lower == "bedrock":
-        # Bedrock is a first-class alias backed by LiteLLM with auto-prefixed model names
-        bedrock_model = model if model.startswith("bedrock/") else f"bedrock/{model}"
-        return providers.LiteLLMLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=bedrock_model,
-            reasoning_effort=reasoning_effort,
-            extra_body=extra_body,
-            default_headers=default_headers,
-            bedrock_service_tier=bedrock_service_tier,
-            timeout=timeout,
-            structured_output_in_prompt=structured_output_in_prompt,
-        )
-
     elif provider_lower == "llamacpp":
         from ..config import get_config
 
@@ -790,60 +683,6 @@ def create_llm_provider(
             no_grammar=config.llamacpp_no_grammar,
             extra_args=config.llamacpp_extra_args,
         )
-
-    elif provider_lower == "fireworks":
-        # Fireworks online inference is OpenAI-compatible; FireworksLLM adds the
-        # native (non-OpenAI) batch API on top. The existing LiteLLM
-        # ``fireworks_ai/...`` online path (provider="litellm") is untouched.
-        return providers.FireworksLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            extra_body=extra_body,
-            default_headers=default_headers,
-            cache_affinity=cache_affinity,
-            timeout=timeout,
-        )
-
-    elif provider_lower == "nous":
-        # Nous Portal is OpenAI-compatible on the wire; NousLLM adds rotating
-        # inference:invoke JWT auth read natively from ~/.hermes/auth.json
-        # (no static api_key, no hermes_cli dependency — same shape as Codex).
-        # default_headers/cache_affinity ride NousLLM's **kwargs passthrough to
-        # OpenAICompatibleLLM.__init__ unchanged (see NousLLM.__init__).
-        from hindsight_api.engine.providers.nous_llm import NousLLM
-
-        return NousLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            extra_body=extra_body,
-            default_headers=default_headers,
-            cache_affinity=cache_affinity,
-            timeout=timeout,
-        )
-
-    elif provider_lower == "xai-oauth":
-        # SuperGrok subscription lane: api.x.ai spoken plainly, but the
-        # credential is a device-code OAuth grant with proactive/reactive
-        # refresh over a shared on-disk store, and xAI's 403 shapes need their
-        # own classification — neither fits the OpenAI SDK client, hence its
-        # own provider.
-        from hindsight_api.engine.providers.xai_oauth_llm import XaiOAuthLLM
-
-        return XaiOAuthLLM(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-        )
-
     elif provider_lower == "chatgpt":
         # The public Responses API billed to a ChatGPT plan through OpenAI's
         # Sign in with ChatGPT flow (credentials from `hindsight-admin chatgpt login`).
@@ -858,7 +697,6 @@ def create_llm_provider(
             extra_body=extra_body,
             timeout=timeout,
         )
-
     elif provider_lower == "openai-responses":
         # OpenAI Responses API (/v1/responses). Unlike chat/completions, it
         # supports reasoning + function tools together, so reflect's tool loop
@@ -874,23 +712,7 @@ def create_llm_provider(
             default_headers=default_headers,
             timeout=timeout,
         )
-
-    elif provider_lower in (
-        "openai",
-        "groq",
-        "ollama",
-        "ollama-cloud",
-        "lmstudio",
-        "minimax",
-        "deepseek",
-        "volcano",
-        "openrouter",
-        "requesty",
-        "zai",
-        "opencode-go",
-        "atlas",
-        "meta",
-    ):
+    elif provider_lower in ("openai", "ollama", "lmstudio"):
         return providers.OpenAICompatibleLLM(
             provider=provider,
             api_key=api_key,
@@ -905,9 +727,8 @@ def create_llm_provider(
             ollama_num_ctx=ollama_num_ctx,
             timeout=timeout,
         )
-
     else:
-        raise ValueError(f"Unknown provider: {provider}")
+        raise ValueError("Unsupported LLM provider: " + str(provider_lower))
 
 
 class LLMProvider:
@@ -1061,36 +882,15 @@ class LLMProvider:
         valid_providers = [
             "openai",
             "openai-responses",
-            "groq",
-            "ollama",
-            "ollama-cloud",
-            "gemini",
-            "anthropic",
-            "lmstudio",
-            "llamacpp",
-            "vertexai",
             "openai-codex",
             "chatgpt",
+            "anthropic",
             "claude-code",
-            "cursor",
-            "github-copilot",
+            "ollama",
+            "lmstudio",
+            "llamacpp",
             "mock",
             "none",
-            "minimax",
-            "deepseek",
-            "litellm",
-            "litellmrouter",
-            "bedrock",
-            "volcano",
-            "openrouter",
-            "requesty",
-            "zai",
-            "opencode-go",
-            "atlas",
-            "fireworks",
-            "nous",
-            "xai-oauth",
-            "meta",
         ]
         if self.provider not in valid_providers and not is_custom_llm_provider(self.provider):
             raise ValueError(
@@ -1100,81 +900,20 @@ class LLMProvider:
 
         # Set default base URLs
         if not self.base_url:
-            if self.provider == "groq":
-                self.base_url = "https://api.groq.com/openai/v1"
-            elif self.provider == "ollama":
+            if self.provider == "ollama":
                 self.base_url = "http://localhost:11434/v1"
-            elif self.provider == "ollama-cloud":
-                self.base_url = "https://ollama.com/v1"
             elif self.provider == "lmstudio":
                 self.base_url = "http://localhost:1234/v1"
-            elif self.provider == "minimax":
-                self.base_url = "https://api.minimax.io/v1"
-            elif self.provider == "deepseek":
-                self.base_url = "https://api.deepseek.com"
-            elif self.provider == "openrouter":
-                self.base_url = "https://openrouter.ai/api/v1"
-            elif self.provider == "requesty":
-                self.base_url = "https://router.requesty.ai/v1"
-            elif self.provider == "zai":
-                self.base_url = "https://api.z.ai/api/coding/paas/v4"
-            elif self.provider == "opencode-go":
-                self.base_url = "https://opencode.ai/zen/go/v1"
-            elif self.provider == "atlas":
-                self.base_url = "https://api.atlascloud.ai/v1"
-            elif self.provider == "meta":
-                self.base_url = "https://api.meta.ai/v1"
-            elif self.provider == "nous":
-                self.base_url = "https://inference-api.nousresearch.com/v1"
 
         # Prepare Vertex AI config (if applicable). Values are used as passed; the
         # caller resolves the global-config fallback (MemoryEngine builds /
         # _member_to_llm / from_env). The region keeps a constant default here.
         vertexai_credentials = None
 
-        if self.provider == "vertexai":
-            if not vertexai_project_id:
-                raise ValueError(
-                    "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID is required for Vertex AI provider. "
-                    "Set it to your GCP project ID."
-                )
-
-            vertexai_region = vertexai_region or "us-central1"
-            service_account_key = vertexai_service_account_key
-
-            # Load explicit service account credentials if provided
-            if service_account_key:
-                if not VERTEXAI_AVAILABLE:
-                    raise ValueError(
-                        "Vertex AI service account auth requires 'google-auth' package. "
-                        "Install with: pip install google-auth"
-                    )
-                from google.oauth2 import service_account
-
-                vertexai_credentials = service_account.Credentials.from_service_account_file(
-                    service_account_key,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-                logger.info(f"Vertex AI: Using service account key: {service_account_key}")
-
-            # Strip google/ prefix from model name — native SDK uses bare names
-            if self.model.startswith("google/"):
-                self.model = self.model[len("google/") :]
-
-            logger.info(
-                f"Vertex AI: project={vertexai_project_id}, region={vertexai_region}, "
-                f"model={self.model}, auth={'service_account' if service_account_key else 'ADC'}"
-            )
-
         # Normalize the Gemini service tier (pure: maps/validates the passed value,
         # no global config read). Non-Gemini providers never carry a tier. The
         # server-level default is resolved by the caller, like the other fields.
-        if self.provider == "gemini":
-            from ..config import parse_gemini_service_tier
-
-            self.gemini_service_tier = parse_gemini_service_tier(self.gemini_service_tier)
-        else:
-            self.gemini_service_tier = None
+        self.gemini_service_tier = None
 
         # gemini_safety_settings / prompt_cache_enabled / litellmrouter_config are
         # used as passed — the caller resolves the global-config fallback. Providers
@@ -1246,23 +985,6 @@ class LLMProvider:
         from .providers.openai_compatible_llm import OpenAICompatibleLLM
 
         if isinstance(self._provider_impl, OpenAICompatibleLLM):
-            return self._provider_impl._client
-        return None
-
-    @property
-    def _gemini_client(self) -> Any:
-        """
-        Get the Gemini client for Gemini/VertexAI providers.
-
-        This property provides backward compatibility for code that directly accesses
-        the _gemini_client attribute.
-
-        Returns:
-            genai.Client instance for Gemini/VertexAI providers, or None for other providers.
-        """
-        from .providers.gemini_llm import GeminiLLM
-
-        if isinstance(self._provider_impl, GeminiLLM):
             return self._provider_impl._client
         return None
 
@@ -2043,14 +1765,10 @@ class ConfiguredLLMProvider:
     # ── overridden call methods ────────────────────────────────────────────────
 
     async def call(self, messages: list[dict[str, Any]], **kwargs: Any) -> LLMCallResult:
-        from .providers.gemini_llm import _safety_settings_ctx
-
-        token = _safety_settings_ctx.set(object.__getattribute__(self, "_gemini_safety_settings"))
         trace_token = self._bind_trace_context()
         try:
             return await object.__getattribute__(self, "_provider").call(messages=messages, **kwargs)
         finally:
-            _safety_settings_ctx.reset(token)
             self._reset_trace_context(trace_token)
 
     async def call_with_tools(
@@ -2059,16 +1777,12 @@ class ConfiguredLLMProvider:
         tools: list[dict[str, Any]],
         **kwargs: Any,
     ) -> "LLMToolCallResult":
-        from .providers.gemini_llm import _safety_settings_ctx
-
-        token = _safety_settings_ctx.set(object.__getattribute__(self, "_gemini_safety_settings"))
         trace_token = self._bind_trace_context()
         try:
             return await object.__getattribute__(self, "_provider").call_with_tools(
                 messages=messages, tools=tools, **kwargs
             )
         finally:
-            _safety_settings_ctx.reset(token)
             self._reset_trace_context(trace_token)
 
     def route_for(self, metadata: dict[str, Any] | None) -> "ConfiguredLLMProvider":

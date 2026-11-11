@@ -107,13 +107,13 @@ fi
 
 # The Python packages import each other (hindsight-dev and hindsight-embed use
 # hindsight_api), so a change to any of them type-checks all three.
-PYTHON_PACKAGES=(hindsight-api-slim/ hindsight-api/ hindsight-dev/ hindsight-embed/ hindsight-clients/python/)
+PYTHON_PACKAGES=(hindsight-api-slim/ hindsight-dev/ hindsight-embed/ hindsight-clients/python/)
 if changed "${PYTHON_PACKAGES[@]}" hindsight-integrations/; then
     echo "  Syncing Python dependencies..."
     # Run uv sync first so the environment is complete before the tools run.
     # Keep pre-commit from rewriting uv.lock. Dependency changes should update
     # the lockfile explicitly before linting.
-    uv sync --frozen --quiet
+    uv sync --frozen --all-packages --extra embedded-db --extra test --quiet
     # Call the synced tools directly. Each task used to go through `uv run`, but
     # every `uv run` takes the same env lock, so the parallel tasks queued behind
     # each other. Node tools used to go through `npx`, which takes seconds to start.
@@ -125,13 +125,6 @@ fi
 echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
-if changed hindsight-clients/typescript/; then
-    run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "$(prettier_cmd "$REPO_ROOT/hindsight-clients/typescript")"
-fi
-if changed hindsight-all-npm/; then
-    run_task "prettier-all-npm" "$REPO_ROOT/hindsight-all-npm" "$(prettier_cmd "$REPO_ROOT/hindsight-all-npm")"
-fi
-
 if changed "${PYTHON_PACKAGES[@]}"; then
     # Python hindsight-api-slim tasks
     run_task "ruff-api-check" "$REPO_ROOT/hindsight-api-slim" "$VENV_BIN/ruff check --fix ."
@@ -141,7 +134,7 @@ if changed "${PYTHON_PACKAGES[@]}"; then
     # Python hindsight-dev tasks
     run_task "ruff-dev-check" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ruff check --fix ."
     run_task "ruff-dev-format" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ruff format ."
-    run_task "ty-dev" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ty check hindsight_dev benchmarks"
+    run_task "ty-dev" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ty check hindsight_dev"
 
     # Python hindsight-embed tasks
     run_task "ruff-embed-check" "$REPO_ROOT/hindsight-embed" "$VENV_BIN/ruff check --fix ."

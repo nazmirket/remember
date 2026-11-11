@@ -3,7 +3,7 @@
 Generate bank template JSON Schema from the Pydantic model.
 
 This script imports BankTemplateManifest and exports its JSON Schema to
-hindsight-docs/static/bank-template-schema.json.
+schemas/bank-template-schema.json.
 """
 
 import json
@@ -16,9 +16,9 @@ from hindsight_api.engine.bank_templates import BankTemplateManifest
 def generate_bank_template_schema(output_path: str | None = None) -> None:
     """Generate bank template JSON Schema and save to file."""
     if output_path is None:
-        # Default to hindsight-docs/static/bank-template-schema.json
+        # Default to schemas/bank-template-schema.json
         root_dir = Path(__file__).parent.parent.parent
-        output_path = str(root_dir / "hindsight-docs" / "static" / "bank-template-schema.json")
+        output_path = str(root_dir / "schemas" / "bank-template-schema.json")
 
     schema = BankTemplateManifest.model_json_schema()
 

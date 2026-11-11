@@ -4728,7 +4728,7 @@ def _instrument_app_for_tracing(app: FastAPI, config: HindsightConfig | StaticCo
     runs. The tracer it captures is a proxy that resolves lazily, so the provider
     installed later by initialize_tracing_from_config is picked up correctly.
     """
-    if not config.otel_traces_enabled or not config.otel_exporter_otlp_endpoint:
+    if not config.otel_traces_enabled:
         return
 
     try:

@@ -171,78 +171,9 @@ def _pg_downgrade() -> None:
     op.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_attachments_short_id ON {schema}attachments (bank_id, short_id)")
 
 
-def _oracle_upgrade() -> None:
-    op.execute("ALTER TABLE attachments ADD (document_id VARCHAR2(512), filename VARCHAR2(1024))")
-    op.execute("ALTER TABLE attachments DROP CONSTRAINT pk_attachments")
-    op.execute("DROP INDEX uq_attachments_short_id")
-
-    # MERGE rather than PG's UPDATE ... FROM, which Oracle does not have.
-    op.execute(
-        f"""
-        MERGE INTO attachments a
-        USING ({_FIRST_OWNER.format(schema="")}) owner
-        ON (a.bank_id = owner.bank_id AND a.attachment_hash = owner.attachment_hash)
-        WHEN MATCHED THEN UPDATE SET a.document_id = owner.document_id, a.filename = owner.filename
-        """
-    )
-    op.execute("DELETE FROM attachments WHERE document_id IS NULL")
-    op.execute(_EXTRA_OWNERS.format(schema=""))
-
-    op.execute("ALTER TABLE attachments MODIFY (document_id VARCHAR2(512) NOT NULL)")
-    op.execute(
-        "ALTER TABLE attachments ADD CONSTRAINT pk_attachments PRIMARY KEY (bank_id, document_id, attachment_hash)"
-    )
-    op.execute("CREATE UNIQUE INDEX uq_attachments_short_id ON attachments (bank_id, document_id, short_id)")
-
-    op.execute("DROP TABLE document_attachments CASCADE CONSTRAINTS")
-
-
-def _oracle_downgrade() -> None:
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS document_attachments (
-            bank_id VARCHAR2(256) NOT NULL,
-            document_id VARCHAR2(512) NOT NULL,
-            attachment_hash VARCHAR2(64) NOT NULL,
-            filename VARCHAR2(1024),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_document_attachments PRIMARY KEY (bank_id, document_id, attachment_hash),
-            CONSTRAINT fk_document_attachments_document FOREIGN KEY (document_id, bank_id)
-                REFERENCES documents(id, bank_id) ON DELETE CASCADE
-        )
-        """
-    )
-    op.execute(
-        """
-        INSERT INTO document_attachments (bank_id, document_id, attachment_hash, filename, created_at)
-        SELECT a.bank_id, a.document_id, a.attachment_hash, a.filename, a.created_at
-        FROM attachments a
-        JOIN documents d ON d.id = a.document_id AND d.bank_id = a.bank_id
-        ON CONFLICT DO NOTHING
-        """
-    )
-    op.execute("CREATE INDEX idx_document_attachments_bank_hash ON document_attachments (bank_id, attachment_hash)")
-
-    op.execute("ALTER TABLE attachments DROP CONSTRAINT pk_attachments")
-    op.execute("DROP INDEX uq_attachments_short_id")
-    op.execute(
-        f"""
-        DELETE FROM attachments a
-        WHERE EXISTS (
-            SELECT 1 FROM ({_FIRST_OWNER.format(schema="")}) owner
-            WHERE a.bank_id = owner.bank_id AND a.attachment_hash = owner.attachment_hash
-              AND a.document_id <> owner.document_id
-        )
-        """
-    )
-    op.execute("ALTER TABLE attachments DROP (document_id, filename)")
-    op.execute("ALTER TABLE attachments ADD CONSTRAINT pk_attachments PRIMARY KEY (bank_id, attachment_hash)")
-    op.execute("CREATE UNIQUE INDEX uq_attachments_short_id ON attachments (bank_id, short_id)")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

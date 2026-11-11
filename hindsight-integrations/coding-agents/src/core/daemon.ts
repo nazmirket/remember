@@ -50,35 +50,10 @@ export async function isPortOccupied(port: number): Promise<boolean> {
   });
 }
 
-/**
- * macOS needs a CURRENT Rust toolchain to install the daemon.
- *
- * litellm — pulled in transitively by the API — publishes wheels only for manylinux and Windows
- * (verified against PyPI for 1.95.0: cp310-cp314, no macOS build for any of them). Every macOS
- * install therefore compiles it from the sdist through maturin, and its dependency tree pins a
- * recent rustc (1.94.1 at the time of writing; observed failing on 1.93.1). Only presence is
- * checked here — the required version comes from litellm's transitive crates and moves on its own
- * schedule, so pinning a number here would just go stale. A too-old toolchain still fails, but the
- * error carries the exact version needed.
- */
-export function hasRustToolchain(): boolean {
-  if (process.platform !== "darwin") return true; // wheels cover linux + windows
+/** Is `uv` on PATH? The local daemon runs through it. */
+export function hasUv(): boolean {
   try {
-    execFileSync("cargo", ["--version"], {
-      stdio: "pipe",
-      timeout: 10_000,
-      windowsHide: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Is `uv`/`uvx` on PATH? The daemon is fetched and run through it. */
-export function hasUvx(): boolean {
-  try {
-    execFileSync("uvx", ["--version"], {
+    execFileSync("uv", ["--version"], {
       stdio: "pipe",
       timeout: 10_000,
       windowsHide: true,
@@ -102,8 +77,6 @@ interface ProviderProbe {
 const PROVIDER_PROBES: ProviderProbe[] = [
   { provider: "openai", keyEnv: "OPENAI_API_KEY" },
   { provider: "anthropic", keyEnv: "ANTHROPIC_API_KEY" },
-  { provider: "gemini", keyEnv: "GEMINI_API_KEY" },
-  { provider: "groq", keyEnv: "GROQ_API_KEY" },
 ];
 
 export interface LlmChoice {
@@ -135,6 +108,9 @@ export function detectLlm(env: NodeJS.ProcessEnv = process.env): LlmChoice | und
   }
   if (onPath("claude")) {
     return { provider: "claude-code", source: "the Claude Code CLI on PATH (no API key needed)" };
+  }
+  if (onPath("codex")) {
+    return { provider: "openai-codex", source: "the Codex CLI on PATH (no API key needed)" };
   }
   return undefined;
 }
@@ -196,7 +172,7 @@ export function hasForkEmbed(path: string | undefined): boolean {
 /**
  * Launch the starter as a DETACHED process, the way seeding and the codebase survey are launched.
  *
- * A cold start pays for a uvx download plus model load and routinely outlives any hook's timeout,
+ * A cold start pays for dependency setup and model load and routinely outlives any hook's timeout,
  * so it cannot be awaited inline: the harness would kill the hook mid-start and the daemon would
  * never come up. The child outlives this process and keeps going.
  *
@@ -337,18 +313,9 @@ export async function waitForHealth(
 
 /** The two things daemon mode cannot work without. Reported, never thrown. */
 export function preflightDaemon(cfg: Config, harness: string): boolean {
-  if (!hasUvx()) {
-    diag(harness, "daemon_uvx_missing", { apiUrl: cfg.apiUrl });
+  if (!hasUv()) {
+    diag(harness, "daemon_uv_missing", { apiUrl: cfg.apiUrl });
     log.warn(harness, "daemon mode needs `uv` on PATH — see https://docs.astral.sh/uv/");
-    return false;
-  }
-  if (!hasRustToolchain()) {
-    diag(harness, "daemon_rust_missing", { platform: process.platform });
-    log.warn(
-      harness,
-      "daemon mode on macOS needs a current Rust toolchain (litellm ships no macOS wheel) — " +
-        "install from https://rustup.rs, then `rustup default stable && rustup update`"
-    );
     return false;
   }
   if (!detectLlm()) {
@@ -356,7 +323,7 @@ export function preflightDaemon(cfg: Config, harness: string): boolean {
     log.warn(
       harness,
       "daemon mode needs an LLM for fact extraction — set OPENAI_API_KEY (or ANTHROPIC_API_KEY / " +
-        "GEMINI_API_KEY / HINDSIGHT_API_LLM_PROVIDER), or install the Claude Code CLI"
+        "HINDSIGHT_API_LLM_PROVIDER), or install the Claude Code or Codex CLI"
     );
     return false;
   }

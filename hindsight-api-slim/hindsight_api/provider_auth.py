@@ -21,16 +21,8 @@ _PROVIDERS_WITHOUT_API_KEY = frozenset(
         "openai-codex",
         "chatgpt",
         "claude-code",
-        "cursor",
-        "github-copilot",
         "mock",
         "none",
-        "vertexai",
-        "litellm",
-        "litellmrouter",
-        "bedrock",
-        "nous",
-        "xai-oauth",
     }
 )
 

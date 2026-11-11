@@ -45,19 +45,14 @@ def _pg_upgrade() -> None:
     op.execute(f"ALTER TABLE {schema}knowledge_pages ALTER COLUMN mental_model_id TYPE TEXT")
 
 
-def _oracle_upgrade() -> None:
-    # mental_model_history.mental_model_id is already VARCHAR2(256) on Oracle.
-    op.execute("ALTER TABLE knowledge_pages MODIFY (mental_model_id VARCHAR2(256))")
-
-
 def _noop_downgrade() -> None:
     # Narrowing back could truncate real ids and would bring the bug back.
     pass
 
 
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_noop_downgrade, oracle=_noop_downgrade)
+    run_for_dialect(pg=_noop_downgrade)

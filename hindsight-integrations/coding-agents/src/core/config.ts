@@ -49,15 +49,9 @@ export const DEFAULT_DAEMON_PROFILE = "coding-agent";
 /** Incremental git-sync settings (see core/sync.ts). */
 /** The config file's shape — every field optional; omitted fields take the documented default. */
 export interface RawConfig {
-  /** Where memory lives. All three modes speak the same HTTP API; they differ only in who runs it:
-   *   "cloud"       — Hindsight Cloud (the default `apiUrl`)
-   *   "self-hosted" — a Hindsight server you run; set `apiUrl` to it
-   *   "daemon"      — a local `hindsight-embed` daemon this plugin starts on demand, at
-   *                   127.0.0.1:{apiPort}. `apiUrl` is ignored in this mode.
-   * Omitted, it is inferred: "daemon" is never assumed, so an existing config keeps talking to
-   * whatever `apiUrl` it already names. */
+  /** Legacy connection fields are accepted only to reject unsupported remote configurations. */
   serverMode?: "cloud" | "self-hosted" | "daemon";
-  apiUrl?: string; // Hindsight API base URL (default https://api.hindsight.vectorize.io — Cloud; set to http://localhost:8888 for a local server)
+  apiUrl?: string;
   apiToken?: string; // bearer token (optional)
   /** Daemon mode: port the local daemon listens on (default 9077).
    *  NOT 8888 — that is the conventional port for a server you run yourself, and a daemon must
@@ -73,8 +67,6 @@ export interface RawConfig {
   /** Daemon mode: `hindsight-embed` profile name, i.e. which local database is used (default
    *  "coding-agent"). Separate profiles keep unrelated setups from sharing memory. */
   daemonProfile?: string;
-  /** Daemon mode: which `hindsight-embed` release to run via uvx (default "latest"). */
-  embedVersion?: string;
   /** Daemon mode: local `hindsight-embed` checkout to run instead of a published release (dev). */
   embedPackagePath?: string;
   bankId?: string; // EXPLICIT memory bank id — set = static bank; unset = per-repo dynamic (core/bank.ts)
@@ -218,7 +210,6 @@ export interface RawConfig {
    *  config, so a release that adds a NEW hook entry point still needs a manual `install`.
    *  Set false to pin the installed version (air-gapped machines, or a deliberate downgrade);
    *  updating is then `npx @vectorize-io/hindsight-coding-agents install` again, as before. */
-  autoUpdate?: boolean;
   surveyRefreshCommits?: number; // re-run the survey at SessionStart once this many commits have accrued since the last one, so structural pages track an evolving architecture (default 20; 0 = cold-seed only)
   /** How git history feeds memory — seeding AND keeping current use the same engine:
    *  "message" = commit messages only (cheap aggregated doc, re-upserted when HEAD moves);
@@ -302,7 +293,7 @@ export interface RawConfig {
 
 /** Fully-resolved config: every field present. */
 export interface Config {
-  serverMode: "cloud" | "self-hosted" | "daemon";
+  serverMode: "daemon";
   /** The EFFECTIVE base URL. In daemon mode this is already 127.0.0.1:{apiPort}, so every caller
    *  that builds a client keeps working without knowing which mode is active. */
   apiUrl: string;
@@ -311,7 +302,6 @@ export interface Config {
   /** Undefined = never told the daemon to auto-exit; see RawConfig above. */
   daemonIdleTimeout?: number;
   daemonProfile: string;
-  embedVersion?: string;
   embedPackagePath?: string;
   bankId?: string; // resolved per-directory via deriveBankIdOrSkip — see core/bank.ts
   dynamicBankId?: boolean;
@@ -354,7 +344,6 @@ export interface Config {
   banks: Record<string, Omit<RawConfig, "banks" | "harnesses"> & { bank?: string }>;
   paths: Record<string, Omit<RawConfig, "banks" | "harnesses" | "paths">>;
   logLevel: "debug" | "info" | "warn" | "error";
-  autoUpdate: boolean;
 }
 
 /**
@@ -587,27 +576,19 @@ function resolveAutoInject(raw: RawConfig): AutoInject {
 }
 
 export function resolveConfig(raw: RawConfig = {}): Config {
-  const serverMode = ["cloud", "self-hosted", "daemon"].includes(raw.serverMode as string)
-    ? (raw.serverMode as "cloud" | "self-hosted" | "daemon")
-    : raw.apiUrl
-      ? "self-hosted"
-      : "daemon";
+  if ((raw.serverMode && raw.serverMode !== "daemon") || raw.apiUrl) {
+    throw new Error("Only the local daemon is supported; use apiPort to change its port");
+  }
+  const serverMode = "daemon" as const;
   const apiPort = raw.apiPort || DEFAULT_DAEMON_PORT;
   const pageTrigger = resolvePageTrigger(raw);
   return {
     serverMode,
-    // Daemon mode resolves the URL HERE rather than at each call site: every entry point already
-    // builds its client from cfg.apiUrl, so collapsing the mode into that one field means the
-    // daemon needs no plumbing through eight separate constructors.
-    apiUrl:
-      serverMode === "daemon"
-        ? `http://127.0.0.1:${apiPort}`
-        : (raw.apiUrl ?? "https://api.hindsight.vectorize.io"),
+    apiUrl: `http://127.0.0.1:${apiPort}`,
     apiToken: raw.apiToken || undefined,
     apiPort,
     daemonIdleTimeout: raw.daemonIdleTimeout,
     daemonProfile: raw.daemonProfile || DEFAULT_DAEMON_PROFILE,
-    embedVersion: raw.embedVersion || undefined,
     embedPackagePath: raw.embedPackagePath || undefined,
     bankId: raw.bankId,
     dynamicBankId: raw.dynamicBankId,
@@ -692,8 +673,6 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     logLevel: ["debug", "info", "warn", "error"].includes(raw.logLevel as string)
       ? (raw.logLevel as "debug" | "info" | "warn" | "error")
       : "info",
-    // A published upstream update would replace the locally built fork runtime.
-    autoUpdate: false,
   };
 }
 
@@ -763,7 +742,6 @@ const ENV_KEYS = {
   // it can carry their existing environment over unchanged.
   apiPort: "HINDSIGHT_API_PORT",
   daemonIdleTimeout: "HINDSIGHT_DAEMON_IDLE_TIMEOUT",
-  embedVersion: "HINDSIGHT_EMBED_VERSION",
   embedPackagePath: "HINDSIGHT_EMBED_PACKAGE_PATH",
   daemonProfile: "HINDSIGHT_DAEMON_PROFILE",
   bankId: "HINDSIGHT_BANK_ID",
@@ -794,7 +772,6 @@ const ENV_KEYS = {
   surveyBudgetUsd: "HINDSIGHT_SURVEY_BUDGET_USD",
   surveyRefreshCommits: "HINDSIGHT_SURVEY_REFRESH_COMMITS",
   logLevel: "HINDSIGHT_LOG_LEVEL",
-  autoUpdate: "HINDSIGHT_AUTO_UPDATE",
   gitIngest: "HINDSIGHT_GIT_INGEST",
   // Scalar modes only ("shared", "combined", "per_tag", "all_combinations"). An explicit scope
   // list is a list OF lists, which does not survive flattening into one variable — file-only.
@@ -816,7 +793,6 @@ const ENV_BOOLEANS = new Set<keyof RawConfig>([
   "autoReflect",
   "autoSeed",
   "codebaseSurvey",
-  "autoUpdate",
   "manageBankConfig",
 ]);
 const ENV_LISTS = new Set<keyof RawConfig>(["retainTags", "optInPaths"]);
@@ -953,7 +929,7 @@ function resolvePartial(cfg: Config, patch: RawConfig): Partial<Config> {
     const conn = resolveConfig({
       serverMode: patch.serverMode ?? cfg.serverMode,
       apiPort: patch.apiPort ?? cfg.apiPort,
-      apiUrl: patch.apiUrl ?? (cfg.serverMode === "daemon" ? undefined : cfg.apiUrl),
+      apiUrl: patch.apiUrl,
     });
     out.serverMode = conn.serverMode;
     out.apiUrl = conn.apiUrl;

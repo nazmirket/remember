@@ -25,7 +25,6 @@ import type { RetainCursorStore } from "./retain-cursor";
 import { buildRetainStamp, type RetainStamp } from "./retain-stamp";
 import { fileCursorStore, fileUsageCursorStore, sessionRootDir } from "./session-cache";
 import { readClaudeTranscript } from "./transcript";
-import { appendJournalTurn, journalPath, readJournalTranscript } from "./turn-journal";
 import { stripInjectedMemory } from "./transcript-util";
 import { recordUsage, type UsageCursorStore } from "./usage";
 
@@ -68,18 +67,6 @@ export interface RetainHookSpec {
   readTranscript?: TranscriptReader;
   /** Harness-specific decoder for `lastAssistantMessage`. Defaults to identity. */
   readLastMessage?: LastMessageReader;
-  /**
-   * Hosts that expose no durable transcript retain from the plugin's OWN per-session journal
-   * (core/turn-journal.ts) instead of a host file: the prompt hook has already appended the user
-   * turn, and this closes the turn with the reply read out of the Stop event.
-   *
-   * Declaring it here rather than in `parse` is what keeps `parse` pure — resolving the reply is a
-   * read of the ephemeral transcript the host is about to delete, and closing the turn is a write.
-   */
-  journal?: {
-    /** The assistant reply for this turn, from the Stop event. "" when the host sent none. */
-    assistantText(event: Record<string, unknown>): string;
-  };
 }
 
 /** Minimal client shape `buildRetain` needs — `HindsightClient` satisfies it structurally. The
@@ -200,20 +187,6 @@ export async function runRetainHook(
   let cfg = loadConfig({ harness: spec.harness });
   setLogLevel(cfg.logLevel);
   if (cfg.disabled) return;
-
-  // A journal harness closes the turn HERE, at the first point past the kill switch: the host's
-  // copy of the reply is ephemeral (ZCode deletes its Stop transcript the moment this hook
-  // returns), so it has to be read before anything that can block or fail. Reading the journal
-  // back as the transcript is what makes the rest of this function identical to every other
-  // harness's — the same full conversation, planned against the same retain cursor.
-  if (spec.journal) {
-    transcriptPath = journalPath(spec.harness, sessionId);
-    readTranscript = readJournalTranscript;
-    appendJournalTurn(transcriptPath, {
-      role: "assistant",
-      content: spec.journal.assistantText(ev),
-    });
-  }
 
   if (!transcriptPath) return;
 

@@ -53,38 +53,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}invalidated_memory_units DROP COLUMN IF EXISTS causal_links")
 
 
-def _oracle_upgrade() -> None:
-    # Kept in sync with PG for schema parity (curation itself is PostgreSQL-only
-    # today — it introspects pg_attribute to move rows between the two tables).
-    # Swallow ORA-01430 (column already exists) so the migration is idempotent.
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE invalidated_memory_units ADD (causal_links CLOB DEFAULT ''[]''
-                CONSTRAINT imu_causal_links_json CHECK (causal_links IS JSON))';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -1430 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
-def _oracle_downgrade() -> None:
-    # Swallow ORA-00904 (column does not exist).
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE invalidated_memory_units DROP COLUMN causal_links';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -904 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

@@ -176,38 +176,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}entities DROP COLUMN IF EXISTS entity_kind")
 
 
-def _oracle_upgrade() -> None:
-    # Swallow ORA-01430 (column already exists) so a retry after a mid-run
-    # failure is idempotent — Oracle DDL auto-commits statement by statement.
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE entities ADD (entity_kind VARCHAR2(16) DEFAULT ''regular'' NOT NULL
-                CONSTRAINT chk_entities_entity_kind CHECK (entity_kind IN (''regular'', ''label'')))';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -1430 THEN RAISE; END IF;
-        END;
-        """
-    )
-    _backfill_entity_kind("")
-
-
-def _oracle_downgrade() -> None:
-    # Swallow ORA-00904 (column does not exist).
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE entities DROP COLUMN entity_kind';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -904 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

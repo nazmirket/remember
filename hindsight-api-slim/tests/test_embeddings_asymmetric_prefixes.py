@@ -25,11 +25,6 @@ from tests.aiohttp_stub import stub_server
 TEXT_IN_PROVIDERS = [
     ("tei", {"HINDSIGHT_API_EMBEDDINGS_TEI_URL": "http://localhost:8080"}, "RemoteTEIEmbeddings"),
     ("openai", {"HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "sk-test"}, "OpenAIEmbeddings"),
-    ("openrouter", {"HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY": "sk-or-test"}, "OpenAIEmbeddings"),
-    ("requesty", {"HINDSIGHT_API_EMBEDDINGS_REQUESTY_API_KEY": "sk-req-test"}, "OpenAIEmbeddings"),
-    ("hindsight", {"HINDSIGHT_API_EMBEDDINGS_HINDSIGHT_API_KEY": "hsk_test"}, "OpenAIEmbeddings"),
-    ("litellm", {}, "LiteLLMEmbeddings"),
-    ("litellm-sdk", {}, "LiteLLMSDKEmbeddings"),
 ]
 
 
@@ -180,22 +175,6 @@ def test_local_provider_ignores_the_prefixes():
 
     embeddings = create_embeddings_from_env()
     assert isinstance(embeddings, LocalSTEmbeddings)
-    assert embeddings.query_prefix == ""
-    assert embeddings.passage_prefix == ""
-
-
-def test_zeroentropy_provider_ignores_the_prefixes():
-    """`zeroentropy` sends a native input_type, so it must not also be prefixed."""
-    from hindsight_api.engine.embeddings import ZeroEntropyEmbeddings, create_embeddings_from_env
-
-    os.environ["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = "zeroentropy"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_API_KEY"] = "ze-test"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX"] = "query: "
-    os.environ["HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX"] = "passage: "
-
-    embeddings = create_embeddings_from_env()
-    assert isinstance(embeddings, ZeroEntropyEmbeddings)
     assert embeddings.query_prefix == ""
     assert embeddings.passage_prefix == ""
 

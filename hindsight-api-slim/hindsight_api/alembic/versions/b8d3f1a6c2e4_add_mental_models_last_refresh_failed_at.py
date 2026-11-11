@@ -42,17 +42,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}mental_models DROP COLUMN IF EXISTS last_refresh_failed_at")
 
 
-def _oracle_upgrade() -> None:
-    op.execute("ALTER TABLE mental_models ADD (last_refresh_failed_at TIMESTAMP WITH TIME ZONE)")
-
-
-def _oracle_downgrade() -> None:
-    op.execute("ALTER TABLE mental_models DROP COLUMN last_refresh_failed_at")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

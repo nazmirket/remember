@@ -8,13 +8,10 @@ model behaviour and skipped the forced retrieval step) instead of a retried requ
 
 from unittest.mock import AsyncMock, patch
 
-import litellm
 import pytest
-from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response import convert_to_model_response_object
 from openai._models import construct_type
 from openai.types.chat import ChatCompletion
 
-from hindsight_api.engine.providers.litellm_llm import LiteLLMLLM
 from hindsight_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM, ProviderResponseError
 from hindsight_api.tracing import LLMSpanRecorder, register_span_recorder, unregister_span_recorder
 
@@ -114,20 +111,3 @@ def test_span_carries_the_upstream_from_the_error():
     )
     (span,) = exporter.get_finished_spans()
     assert span.attributes["hindsight.provider.served_by"] == "SomeUpstream"
-
-
-def _litellm_completion(finish_reason: str) -> litellm.ModelResponse:
-    """Built the way LiteLLM builds it, which rewrites finish_reason "error" to "stop"."""
-    raw = _completion(finish_reason).model_dump(mode="json")
-    return convert_to_model_response_object(response_object=raw, model_response_object=litellm.ModelResponse())
-
-
-@pytest.mark.asyncio
-async def test_litellm_retries_an_error_finish_it_rewrote_to_stop():
-    llm = LiteLLMLLM(provider="litellm", api_key="unused", base_url="http://localhost:0/v1", model="m")
-    responses = [_litellm_completion("error")]
-    assert responses[0].choices[0].finish_reason == "stop"
-    llm._acompletion = AsyncMock(side_effect=responses)  # type: ignore[method-assign]
-    with pytest.raises(ProviderResponseError, match="served_by=SomeUpstream"):
-        await llm.call(messages=[{"role": "user", "content": "q"}], max_retries=0, initial_backoff=0)
-    assert llm._acompletion.await_count == 1

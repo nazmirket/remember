@@ -30,7 +30,6 @@ def _config(**overrides):
     """Raw config with tracing switched on unless a test says otherwise."""
     defaults = {
         "otel_traces_enabled": True,
-        "otel_exporter_otlp_endpoint": "http://localhost:4318",
     }
     return dataclasses.replace(_get_raw_config(), **{**defaults, **overrides})
 
@@ -105,13 +104,6 @@ def test_excluded_urls_are_configurable(monkeypatch):
 def test_app_is_not_instrumented_when_tracing_is_disabled():
     """No tracing configured means no instrumentation overhead."""
     app = _app_reporting_current_trace(_config(otel_traces_enabled=False))
-
-    assert getattr(app, "_is_instrumented_by_opentelemetry", False) is False
-
-
-def test_app_is_not_instrumented_without_an_endpoint():
-    """Enabled-but-unexportable tracing leaves the app alone, matching the bootstrap."""
-    app = _app_reporting_current_trace(_config(otel_exporter_otlp_endpoint=None))
 
     assert getattr(app, "_is_instrumented_by_opentelemetry", False) is False
 

@@ -60,8 +60,8 @@ def _pg_downgrade() -> None:
 def upgrade() -> None:
     # Oracle never had the constraint (its schema is built by a separate DDL
     # runner), so only Postgres has anything to drop.
-    run_for_dialect(pg=_pg_upgrade, oracle=None)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=None)
+    run_for_dialect(pg=_pg_downgrade)

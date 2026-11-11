@@ -10,14 +10,10 @@ from hindsight_api.engine.storage import bank_storage_prefix, key_segment
 
 @pytest.mark.parametrize("bank_id", [".", "..", "a/b", "a%2Fb", "user.name", "ü b"])
 def test_every_bank_id_is_one_key_segment_an_object_store_accepts(bank_id):
-    import obstore as obs
-    from obstore.store import MemoryStore
-
     prefix = bank_storage_prefix(bank_id)
     segments = prefix.rstrip("/").split("/")
     assert len(segments) == 4 and segments[2] == "banks"
     assert segments[3] not in (".", "..")
-    obs.put(MemoryStore(), f"{prefix}f", b"x")  # raises on a path it cannot parse
 
 
 def test_distinct_bank_ids_never_share_a_prefix():
@@ -40,21 +36,6 @@ def test_maximum_bank_id_stays_within_object_store_key_budget():
     # encoding, so this fails if the limit or the encoding grows past what a file key can hold.
     object_key = f"{bank_storage_prefix(bank_id, schema='tenant')}files/{uuid.uuid4()}/original-name.txt"
     assert len(object_key.encode()) < 1024
-
-
-@pytest.mark.asyncio
-async def test_object_store_delete_prefix_stops_at_the_prefix():
-    import obstore as obs
-    from obstore.store import MemoryStore
-
-    from hindsight_api.engine.storage.base import delete_object_store_prefix
-
-    store = MemoryStore()
-    for key in ("t/banks/a/1", "t/banks/a/x/2", "t/banks/ab/3"):
-        obs.put(store, key, b"x")
-
-    assert await delete_object_store_prefix(store, "t/banks/a/") == 2
-    assert [meta["path"] for page in obs.list(store) for meta in page] == ["t/banks/ab/3"]
 
 
 @pytest.mark.asyncio

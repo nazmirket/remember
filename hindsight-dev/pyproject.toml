@@ -8,7 +8,7 @@ version = "1.2.1"
 description = "Development utilities for Hindsight"
 requires-python = ">=3.11"
 dependencies = [
-    "hindsight-api==1.2.1",
+    "hindsight-api-slim==1.2.1",
     "openai>=1.0.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
@@ -24,26 +24,16 @@ test = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["hindsight_dev", "benchmarks", "upgrade_tests"]
+packages = ["hindsight_dev"]
 
 [tool.uv.sources]
-hindsight-api = { workspace = true }
+hindsight-api-slim = { workspace = true }
 
 [project.scripts]
 generate-openapi = "hindsight_dev.generate_openapi:generate_openapi_spec"
 generate-bank-template-schema = "hindsight_dev.generate_bank_template_schema:main"
-generate-changelog = "hindsight_dev.generate_changelog:main"
-sync-cookbook = "hindsight_dev.sync_cookbook:main"
-generate-llms-full = "hindsight_dev.generate_llms_full:main"
-check-openapi-compatibility = "hindsight_dev.check_openapi_compatibility:main"
 cli-coverage-check = "hindsight_dev.cli_coverage_check:main"
-client-coverage-check = "hindsight_dev.client_coverage_check:main"
-perf-test = "benchmarks.perf.system_perf:main"
-token-count-bench = "benchmarks.micro.token_counting:main"
-vector-serialization-bench = "benchmarks.micro.vector_serialization:main"
-semantic-within-batch-bench = "benchmarks.micro.semantic_within_batch:main"
-entity-resolver-bench = "benchmarks.micro.entity_resolver_bench:main"
-transfer-streaming-bench = "benchmarks.micro.transfer_streaming_bench:main"
+check-openapi-compatibility = "hindsight_dev.check_openapi_compatibility:main"
 find-duplicate-observations = "hindsight_dev.obs_dedup.cli:main"
 
 [dependency-groups]

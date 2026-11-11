@@ -46,37 +46,9 @@ def _pg_downgrade() -> None:
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {schema}idx_async_operations_terminal_cleanup")
 
 
-def _oracle_create_index(sql: str) -> None:
-    """Create an index idempotently for rerun-safe Oracle migrations."""
-    block = (
-        "BEGIN "
-        "EXECUTE IMMEDIATE :stmt; "
-        "EXCEPTION WHEN OTHERS THEN "
-        "IF SQLCODE = -955 THEN NULL; ELSE RAISE; END IF; "
-        "END;"
-    )
-    op.get_bind().exec_driver_sql(block, {"stmt": sql})
-
-
-def _oracle_upgrade() -> None:
-    # Oracle migrations run with CURRENT_SCHEMA set to each tenant, so table
-    # and index names intentionally remain unqualified here.
-    _oracle_create_index(
-        "CREATE INDEX idx_async_operations_terminal_cleanup ON async_operations (updated_at, operation_id, status)"
-    )
-    _oracle_create_index(
-        "CREATE INDEX idx_async_operations_bank_created_desc ON async_operations (bank_id, created_at DESC)"
-    )
-
-
-def _oracle_downgrade() -> None:
-    op.execute("DROP INDEX idx_async_operations_bank_created_desc")
-    op.execute("DROP INDEX idx_async_operations_terminal_cleanup")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

@@ -84,43 +84,9 @@ def _pg_downgrade() -> None:
     op.execute(f"DROP TABLE IF EXISTS {schema}knowledge_pages")
 
 
-def _oracle_upgrade() -> None:
-    # No case-insensitive unique index on Oracle: `name` is a CLOB and cannot be
-    # indexed with lower(); page-name uniqueness is enforced on PG only.
-    op.execute(
-        """
-        CREATE TABLE IF NOT EXISTS knowledge_pages (
-            id VARCHAR2(64) NOT NULL,
-            bank_id VARCHAR2(256) NOT NULL,
-            parent_id VARCHAR2(64),
-            kind VARCHAR2(16) NOT NULL,
-            name CLOB NOT NULL,
-            mental_model_id VARCHAR2(256),
-            sort_order NUMBER DEFAULT 0 NOT NULL,
-            managed NUMBER(1) DEFAULT 0 NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-            CONSTRAINT pk_knowledge_pages PRIMARY KEY (id),
-            CONSTRAINT ck_knowledge_pages_kind CHECK (kind IN ('folder', 'page')),
-            CONSTRAINT fk_kp_bank FOREIGN KEY (bank_id)
-                REFERENCES banks(bank_id) ON DELETE CASCADE,
-            CONSTRAINT fk_kp_parent FOREIGN KEY (parent_id)
-                REFERENCES knowledge_pages(id) ON DELETE CASCADE,
-            CONSTRAINT fk_kp_mm FOREIGN KEY (mental_model_id, bank_id)
-                REFERENCES mental_models(id, bank_id) ON DELETE CASCADE
-        )
-        """
-    )
-    op.execute("CREATE INDEX idx_kp_bank_parent ON knowledge_pages (bank_id, parent_id, sort_order)")
-
-
-def _oracle_downgrade() -> None:
-    op.execute("DROP TABLE knowledge_pages CASCADE CONSTRAINTS")
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

@@ -51,12 +51,11 @@ async function main(): Promise<void> {
       profileSettings[key] = value;
     }
   }
-  const { HindsightServer } = await import("@vectorize-io/hindsight-all");
+  const { HindsightServer } = await import("./core/local-server/server");
   const server = new HindsightServer({
     profile: cfg.daemonProfile,
     port: cfg.apiPort,
     env: profileSettings,
-    embedVersion: cfg.embedVersion,
     embedPackagePath: cfg.embedPackagePath,
     logger: {
       debug: (m) => log.debug(harness, m),

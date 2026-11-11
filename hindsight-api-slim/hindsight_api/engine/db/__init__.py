@@ -1,7 +1,6 @@
 """Database backend abstraction layer.
 
-Provides a uniform interface over different database drivers (asyncpg, oracledb, etc.)
-so that business logic is decoupled from any specific database platform.
+Provides a database interface for the PostgreSQL backend.
 
 Usage:
     from hindsight_api.engine.db import create_database_backend, DatabaseBackend
@@ -32,11 +31,7 @@ def _get_backend_class(backend_type: str) -> type[DatabaseBackend]:
         from .postgresql import PostgreSQLBackend
 
         return PostgreSQLBackend
-    if backend_type == "oracle":
-        from .oracle import OracleBackend
-
-        return OracleBackend
-    raise ValueError(f"Unknown database backend: {backend_type!r}. Supported: 'postgresql', 'oracle'.")
+    raise ValueError(f"Unknown database backend: {backend_type!r}. Supported: 'postgresql'.")
 
 
 def _get_ops_class(backend_type: str) -> type[DataAccessOps]:
@@ -45,11 +40,7 @@ def _get_ops_class(backend_type: str) -> type[DataAccessOps]:
         from .ops_postgresql import PostgreSQLOps
 
         return PostgreSQLOps
-    if backend_type == "oracle":
-        from .ops_oracle import OracleOps
-
-        return OracleOps
-    raise ValueError(f"Unknown data access ops: {backend_type!r}. Supported: 'postgresql', 'oracle'.")
+    raise ValueError(f"Unknown data access ops: {backend_type!r}. Supported: 'postgresql'.")
 
 
 def create_database_backend(backend_type: str) -> DatabaseBackend:

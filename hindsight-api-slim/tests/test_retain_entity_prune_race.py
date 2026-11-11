@@ -19,7 +19,6 @@ import asyncpg
 import pytest
 
 from hindsight_api.engine.db import create_database_backend
-from hindsight_api.engine.db.ops_oracle import OracleOps
 from hindsight_api.engine.db.ops_postgresql import PostgreSQLOps
 from hindsight_api.engine.db.postgresql import PostgresConnection
 from hindsight_api.engine.memories.pg.entity_resolver import EntityResolver
@@ -36,35 +35,9 @@ _ID_B = "00000000-0000-0000-0000-000000000002"
 
 
 @pytest.mark.asyncio
-async def test_oracle_reassert_locks_in_stable_order_then_reinserts():
-    """Oracle adapter: lock every parent (FOR UPDATE) in sorted id order, then
-    idempotently re-insert the same rows in that order."""
-    resolver = EntityResolver(pool=SimpleNamespace(ops=OracleOps()))
-    conn = AsyncMock()
-    # Deliberately out of order and duplicated on the way in. Bob is a label
-    # entity: the re-insert must carry each parent's entity_kind, or a pruned
-    # label row would resurrect as 'regular' and re-enter fuzzy matching.
-    resolved_entities = [
-        ResolvedEntity(entity_id=_ID_B, canonical_name="Bob", entity_kind="label"),
-        ResolvedEntity(entity_id=_ID_A, canonical_name="Alice"),
-        ResolvedEntity(entity_id=_ID_B, canonical_name="Bob", entity_kind="label"),
-    ]
-
-    await resolver.reassert_entities_batch("bank-1", resolved_entities, conn)
-
-    lock_ids = [call.args[1] for call in conn.fetchrow.await_args_list]
-    assert lock_ids == [_ID_A, _ID_B], "parents must be locked once each, in stable id order"
-    assert all("FOR UPDATE" in call.args[0] for call in conn.fetchrow.await_args_list)
-
-    insert_sql, rows = conn.executemany.await_args.args
-    assert "ON CONFLICT DO NOTHING" in insert_sql
-    assert rows == [(_ID_A, "bank-1", "Alice", "regular"), (_ID_B, "bank-1", "Bob", "label")]
-
-
-@pytest.mark.asyncio
 async def test_reassert_of_empty_batch_is_a_noop():
     """No resolved entities → no SQL issued (avoids a pointless round-trip)."""
-    resolver = EntityResolver(pool=SimpleNamespace(ops=OracleOps()))
+    resolver = EntityResolver(pool=SimpleNamespace(ops=PostgreSQLOps()))
     conn = AsyncMock()
 
     await resolver.reassert_entities_batch("bank-1", [], conn)

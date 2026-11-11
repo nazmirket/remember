@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -395,7 +395,7 @@ wheels = [
 
 [[package]]
 name = "hindsight-client"
-version = "1.2.0"
+version = "1.2.1"
 source = { editable = "../hindsight-clients/python" }
 dependencies = [
     { name = "aiohttp" },

@@ -44,12 +44,7 @@ def test_migration_uses_dialect_dispatcher(path: Path) -> None:
             f"{path.name}: {required}() must call run_for_dialect(...)."
         )
 
-    has_pg_slot = "_pg_upgrade" in top_level_fns
-    has_oracle_slot = "_oracle_upgrade" in top_level_fns
-    assert has_pg_slot or has_oracle_slot, (
-        f"{path.name}: migration defines neither _pg_upgrade nor _oracle_upgrade — "
-        "at least one dialect slot must be filled (set the other to None if intentional)."
-    )
+    assert "_pg_upgrade" in top_level_fns, f"{path.name}: missing PostgreSQL migration slot."
 
 
 def _calls_run_for_dialect(fn: ast.FunctionDef) -> bool:

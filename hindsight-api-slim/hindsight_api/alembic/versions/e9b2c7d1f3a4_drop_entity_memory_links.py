@@ -75,17 +75,9 @@ def _pg_downgrade() -> None:
     pass
 
 
-def _oracle_upgrade() -> None:
-    op.execute("DELETE FROM memory_links WHERE link_type = 'entity'")
-
-
-def _oracle_downgrade() -> None:
-    pass
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

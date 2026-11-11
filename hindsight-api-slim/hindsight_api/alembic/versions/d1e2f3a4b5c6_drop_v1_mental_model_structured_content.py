@@ -64,31 +64,9 @@ def _pg_downgrade() -> None:
     pass
 
 
-def _oracle_upgrade() -> None:
-    # ``structured_content`` is a CLOB with an ``IS JSON`` check, so the version
-    # is read with JSON_VALUE rather than PG's ``->>``. JSON_VALUE returns NULL
-    # both for a missing key and for unparseable JSON; either way it is not v2.
-    op.execute(
-        f"""
-        UPDATE mental_models
-        SET structured_content = NULL
-        WHERE structured_content IS NOT NULL
-          AND (
-              JSON_VALUE(structured_content, '$.version') IS NULL
-              OR JSON_VALUE(structured_content, '$.version') <> '{SCHEMA_VERSION}'
-          )
-        """
-    )
-
-
-def _oracle_downgrade() -> None:
-    # See _pg_downgrade.
-    pass
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

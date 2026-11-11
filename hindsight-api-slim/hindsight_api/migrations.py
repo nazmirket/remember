@@ -472,9 +472,9 @@ def run_migrations(
         return
 
     raw_url = migration_database_url or database_url
-    # Oracle URLs are passed through to SQLAlchemy unchanged; only PG URLs
-    # need the libpq normalization (asyncpg → psycopg2 driver, ssl → sslmode).
-    migration_url = raw_url if is_oracle_url(raw_url) else to_libpq_url(raw_url)
+    if is_oracle_url(raw_url):
+        raise ValueError("Only PostgreSQL migrations are supported")
+    migration_url = to_libpq_url(raw_url)
 
     try:
         # Determine script location
@@ -490,13 +490,6 @@ def run_migrations(
             raise FileNotFoundError(
                 f"Alembic script location not found at {script_location}. Database migrations cannot be run."
             )
-
-        # Oracle path: no advisory lock, no pgvector. DDL is autocommit on
-        # Oracle, ``IF NOT EXISTS`` (Oracle 23ai) and 955 swallowing make
-        # repeated runs from concurrent workers safe.
-        if is_oracle_url(migration_url):
-            _run_migrations_internal(migration_url, script_location, schema=schema)
-            return
 
         # Use schema-specific lock ID for multi-tenant isolation
         lock_id = _get_schema_lock_id(schema) if schema else MIGRATION_LOCK_ID

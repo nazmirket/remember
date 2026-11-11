@@ -57,7 +57,7 @@ async def test_a_failed_over_recall_names_its_reranker_and_joins_its_logs(
 
     # --- the failover warning joins this recall's own log lines ---------------
     logs = failover_server.logs()
-    warning = re.search(r"\[RECALL (\S+)\] Reranker member 0 \(siliconflow\) failed", logs)
+    warning = re.search(r"\[RECALL (\S+)\] Reranker member 0 \(tei\) failed", logs)
     assert warning, f"no failover warning with a recall id in the server log:\n{logs[-4000:]}"
     recall_id = warning.group(1)
     assert recall_id.startswith(bank_id[:8])

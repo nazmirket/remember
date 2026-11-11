@@ -8,65 +8,14 @@ import zlib
 from collections.abc import AsyncIterator
 
 import pytest
-from obstore.store import MemoryStore
-from starlette.responses import StreamingResponse
 
-from hindsight_api.engine.storage.azure import AzureFileStorage
-from hindsight_api.engine.storage.gcs import GCSFileStorage
 from hindsight_api.engine.storage.postgresql import _CHUNKED_MANIFEST_SIGNATURE, PG_STREAM_CHUNK_SIZE
-from hindsight_api.engine.storage.s3 import S3FileStorage
 from hindsight_api.engine.transfer.stream_archive import (
     CHUNK_SIZE,
     SIG_ZIP64_EOCD,
     SIG_ZIP64_LOCATOR,
     ZipStreamer,
 )
-
-BACKENDS = [GCSFileStorage, S3FileStorage, AzureFileStorage]
-PAYLOAD = b"Hello world! " * 1024 * 64  # ~832 KB payload
-
-
-def _backend_over_memory_store(cls):
-    fs = cls.__new__(cls)
-    fs._store = MemoryStore()
-    return fs
-
-
-@pytest.mark.parametrize("cls", BACKENDS, ids=lambda c: c.__name__)
-async def test_store_and_retrieve_stream_cloud(cls):
-    """Test store_stream and retrieve_stream across S3, GCS, and Azure."""
-    fs = _backend_over_memory_store(cls)
-
-    async def chunk_gen() -> AsyncIterator[bytes]:
-        for i in range(0, len(PAYLOAD), 65536):
-            yield PAYLOAD[i : i + 65536]
-
-    key = await fs.store_stream("test_stream.bin", chunk_gen())
-    assert key == "test_stream.bin"
-    assert await fs.exists(key)
-
-    # Read back via retrieve_stream
-    chunks = []
-    async for chunk in fs.retrieve_stream(key):
-        assert isinstance(chunk, bytes)
-        chunks.append(chunk)
-    assert b"".join(chunks) == PAYLOAD
-
-    # Also test retrieve() returns exact bytes
-    data = await fs.retrieve(key)
-    assert isinstance(data, bytes)
-    assert data == PAYLOAD
-
-    # Test streaming through Starlette StreamingResponse
-    resp = StreamingResponse(fs.retrieve_stream(key), media_type="application/octet-stream")
-    body_chunks = []
-    async for b in resp.body_iterator:
-        body_chunks.append(b if isinstance(b, bytes) else b.encode())
-    assert b"".join(body_chunks) == PAYLOAD
-
-    # Clean up
-    await fs.delete(key)
-    assert not await fs.exists(key)
 
 
 async def test_zip_streamer_roundtrip_and_deflate():
@@ -105,24 +54,6 @@ async def test_zip_streamer_roundtrip_and_deflate():
     assert zf.getinfo("images/photo.bin").compress_type == zipfile.ZIP_DEFLATED
 
 
-@pytest.mark.parametrize("cls", BACKENDS, ids=lambda c: c.__name__)
-async def test_store_and_retrieve_empty_file_cloud(cls):
-    """Empty files (0 bytes) can be stored, sized, and retrieved across cloud stores."""
-    fs = _backend_over_memory_store(cls)
-
-    async def empty_gen() -> AsyncIterator[bytes]:
-        if False:
-            yield b""
-
-    key = await fs.store_stream("empty.bin", empty_gen())
-    assert await fs.exists(key)
-    assert await fs.get_size(key) == 0
-    assert await fs.retrieve(key) == b""
-    assert b"".join([c async for c in fs.retrieve_stream(key)]) == b""
-    await fs.delete(key)
-    assert not await fs.exists(key)
-
-
 async def test_zip_streamer_empty_entries_and_zero_bytes():
     """ZipStreamer properly handles 0-byte files with and without compression."""
     zs = ZipStreamer()
@@ -142,23 +73,6 @@ async def test_zip_streamer_empty_entries_and_zero_bytes():
     assert zf.read("empty_deflated.txt") == b""
     assert zf.read("empty_stored.bin") == b""
     assert zf.testzip() is None
-
-
-@pytest.mark.parametrize("cls", BACKENDS, ids=lambda c: c.__name__)
-async def test_cloud_storage_cancellation_cleanup(cls):
-    """When a stream aborts with an exception, the incomplete upload is deleted."""
-    fs = _backend_over_memory_store(cls)
-
-    async def failing_gen():
-        yield b"chunk 1"
-        yield b"chunk 2"
-        raise RuntimeError("Stream aborted prematurely")
-
-    with pytest.raises(RuntimeError, match="Stream aborted prematurely"):
-        await fs.store_stream("aborted.bin", failing_gen())
-
-    # Key should have been cleaned up and not exist
-    assert not await fs.exists("aborted.bin")
 
 
 async def test_stream_export_bank_empty_bank_manifest():

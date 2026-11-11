@@ -7,7 +7,7 @@ Usage:
     from hindsight_api.engine.sql import create_sql_dialect, SQLDialect
 
     dialect = create_sql_dialect("postgresql")
-    placeholder = dialect.param(1)  # "$1" for PG, ":1" for Oracle
+    placeholder = dialect.param(1)  # "$1"
 """
 
 from .base import SQLDialect
@@ -22,7 +22,7 @@ def create_sql_dialect(backend_type: str) -> SQLDialect:
     """Factory: create a SQLDialect by backend name.
 
     Args:
-        backend_type: One of "postgresql" or "oracle".
+        backend_type: Currently "postgresql".
 
     Returns:
         A SQLDialect instance.
@@ -34,8 +34,4 @@ def create_sql_dialect(backend_type: str) -> SQLDialect:
         from .postgresql import PostgreSQLDialect
 
         return PostgreSQLDialect()
-    elif backend_type == "oracle":
-        from .oracle import OracleDialect
-
-        return OracleDialect()
-    raise ValueError(f"Unknown SQL dialect: {backend_type!r}. Supported dialects: 'postgresql', 'oracle'.")
+    raise ValueError(f"Unknown SQL dialect: {backend_type!r}. Supported dialects: 'postgresql'.")

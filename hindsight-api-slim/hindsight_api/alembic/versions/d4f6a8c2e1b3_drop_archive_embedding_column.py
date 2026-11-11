@@ -57,37 +57,9 @@ def _pg_downgrade() -> None:
     op.execute(f"ALTER TABLE {schema}invalidated_memory_units ADD COLUMN IF NOT EXISTS embedding vector")
 
 
-def _oracle_upgrade() -> None:
-    # Oracle has no `DROP COLUMN IF EXISTS`; swallow ORA-00904 (column does not
-    # exist) so the migration is idempotent and safe on a fresh schema whose
-    # baseline already omits the column.
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE invalidated_memory_units DROP COLUMN embedding';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -904 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
-def _oracle_downgrade() -> None:
-    # Swallow ORA-01430 (column already exists) for idempotency.
-    op.execute(
-        """
-        BEGIN
-            EXECUTE IMMEDIATE 'ALTER TABLE invalidated_memory_units ADD (embedding VECTOR)';
-        EXCEPTION WHEN OTHERS THEN
-            IF SQLCODE != -1430 THEN RAISE; END IF;
-        END;
-        """
-    )
-
-
 def upgrade() -> None:
-    run_for_dialect(pg=_pg_upgrade, oracle=_oracle_upgrade)
+    run_for_dialect(pg=_pg_upgrade)
 
 
 def downgrade() -> None:
-    run_for_dialect(pg=_pg_downgrade, oracle=_oracle_downgrade)
+    run_for_dialect(pg=_pg_downgrade)

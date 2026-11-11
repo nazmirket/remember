@@ -163,7 +163,6 @@ async def test_every_provider_that_owns_an_aiohttp_session_caps_its_connect_phas
     monkeypatch.delenv(ENV_LLM_CONNECT_TIMEOUT, raising=False)
 
     from hindsight_api.engine.providers.codex_llm import CodexLLM
-    from hindsight_api.engine.providers.xai_oauth_llm import XaiOAuthLLM
 
     # Codex reads OAuth credentials from disk at construction; stub them the way the
     # rest of the codex suite does so this runs on a machine that has never logged in.
@@ -172,10 +171,8 @@ async def test_every_provider_that_owns_an_aiohttp_session_caps_its_connect_phas
         patch.object(CodexLLM, "_load_codex_refresh_token", return_value=None),
     ):
         codex = CodexLLM(provider="openai-codex", api_key="k", base_url="", model="m", timeout=150.0)
-    # xai-oauth reads its credential store lazily, on the first call.
-    xai = XaiOAuthLLM(provider="xai-oauth", api_key="", base_url="", model="m", timeout=150.0)
 
-    for label, sessions in (("CodexLLM", codex._session), ("XaiOAuthLLM", xai._client)):
+    for label, sessions in (("CodexLLM", codex._session),):
         try:
             timeout = sessions.get().timeout
             assert timeout.total is None, f"{label} bounded the whole streamed body"
