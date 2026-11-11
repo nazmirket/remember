@@ -335,7 +335,7 @@ class CodexLLM(LLMInterface):
                 "2. Login: codex auth login\n"
                 f"3. Verify: ls {auth_file}\n\n"
                 "(Set CODEX_HOME to use a credentials directory other than ~/.codex.)\n\n"
-                "Or use a different provider (openai, anthropic, gemini) with API keys."
+                "Or use a different provider (openai, anthropic, ollama) with API keys."
             ) from e
 
         self._auth_manager = CodexAuthManager(

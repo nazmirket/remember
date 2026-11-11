@@ -216,19 +216,6 @@ async function isEndpointMissing(r: Response): Promise<boolean> {
   }
 }
 
-/**
- * A `/pages` sub-path as the URL to request. `legacy` gives its pre-rename `/knowledge-base` twin,
- * which a server from before the rename serves instead: there the page routes themselves sat
- * under `/knowledge-base/pages`, while tree/folders/search/export/nodes sat directly below
- * `/knowledge-base`. Remove in 2.x.
- */
-function pagesPath(sub: string, legacy = false): string {
-  if (!legacy) return `/pages${sub}`;
-  return /^\/(tree|folders|search|export|nodes)\b/.test(sub)
-    ? `/knowledge-base${sub}`
-    : `/knowledge-base/pages${sub}`;
-}
-
 const TERMINAL = new Set(["completed", "failed", "cancelled", "error"]);
 
 /** Default cap on concurrent retain-related requests; configurable via `maxParallelRetains`. */
@@ -893,22 +880,7 @@ export class HindsightClient {
     return (j.results ?? []).map((x) => (x.text ?? "").trim()).filter(Boolean);
   }
 
-  /** Set once a server answered on the deprecated `/knowledge-base/...` paths: one from before the
-   *  page routes moved to `/pages/...`. Remove in 2.x. */
-  private legacyPagesPaths = false;
-
-  /**
-   * Request a page endpoint by its `/pages` sub-path (`""`, `/tree`, `/<id>`, `/nodes/<id>`, …).
-   *
-   * Returns `null` — and latches `pagesSupported = false` — iff the endpoint is really absent: an
-   * unrouted 404 on the `/pages` path AND on its pre-rename `/knowledge-base` twin, which a server
-   * older than the rename still serves (tried once, then remembered). A bank-not-found 404 is NOT
-   * a capability verdict — it is the expected answer before the bank's first retain — so it is
-   * returned as-is and never caches a negative (#4607). A 404's body may already be consumed.
-   *
-   * Only 404 is tested: `req` throws on every other non-ok status it was not told to tolerate, so
-   * the 405/501 this used to check for never reach a caller in the first place.
-   */
+  /** Request a current Pages endpoint. A missing bank is not a missing endpoint. */
   private async pagesReq(
     method: string,
     sub: string,
@@ -916,17 +888,8 @@ export class HindsightClient {
     tolerate: number[] = [],
     timeoutMs?: number
   ): Promise<Response | null> {
-    const send = (legacy: boolean) =>
-      this.req(method, this.bankUrl(pagesPath(sub, legacy)), body, tolerate, timeoutMs);
-    let r = await send(this.legacyPagesPaths);
+    const r = await this.req(method, this.bankUrl(`/pages${sub}`), body, tolerate, timeoutMs);
     if (r.status !== 404 || !(await isEndpointMissing(r))) return r;
-    if (!this.legacyPagesPaths) {
-      r = await send(true);
-      if (r.status !== 404 || !(await isEndpointMissing(r))) {
-        this.legacyPagesPaths = true;
-        return r;
-      }
-    }
     this.pagesSupported = false;
     return null;
   }

@@ -57,7 +57,7 @@ class NoneLLM(LLMInterface):
         """Raise LLMNotAvailableError — no LLM is configured."""
         raise LLMNotAvailableError(
             "LLM provider is set to 'none'. This operation requires an LLM. "
-            "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, gemini)."
+            "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, ollama)."
         )
 
     async def cleanup(self) -> None:

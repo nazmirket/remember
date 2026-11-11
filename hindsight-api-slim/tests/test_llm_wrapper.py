@@ -3,60 +3,16 @@ import pytest
 from hindsight_api.engine.llm_wrapper import create_llm_provider, sanitize_llm_output
 
 
-def test_create_llm_provider_preserves_positional_timeout_compatibility():
-    """The new Ollama knob must not steal the old positional timeout slot."""
-    impl = create_llm_provider(
-        "ollama",
-        "",
-        "",
-        "llama3.2",
-        "low",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        False,
-        None,
-        None,
-        7.5,
-    )
-
-    assert impl.timeout == 7.5
-    assert impl.ollama_num_ctx is None
-
-
-def test_llm_provider_preserves_positional_timeout_compatibility():
-    """The new Ollama knob must not steal the old positional timeout slot."""
+def test_legacy_positional_settings_cannot_silently_change_timeout():
     from hindsight_api.engine.llm_wrapper import LLMProvider
+    from hindsight_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM
 
-    provider = LLMProvider(
-        "ollama",
-        "",
-        "",
-        "llama3.2",
-        "low",
-        None,
-        None,
-        None,
-        None,
-        False,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        7.5,
-    )
-
-    assert provider.timeout == 7.5
-    assert provider.ollama_num_ctx is None
+    with pytest.raises(TypeError):
+        LLMProvider("ollama", "", "", "llama3.2", "low", None)
+    with pytest.raises(TypeError):
+        create_llm_provider("ollama", "", "", "llama3.2", "low", None)
+    with pytest.raises(TypeError):
+        OpenAICompatibleLLM("ollama", "", "", "llama3.2", "low", 7.5, None)
 
 
 def test_llm_provider_threads_ollama_num_ctx_to_provider_impl():

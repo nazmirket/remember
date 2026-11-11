@@ -264,7 +264,7 @@ class ClaudeCodeLLM(LLMInterface):
                 "2. Login with your Pro/Max plan: claude auth login\n"
                 "   (or run 'claude setup-token' and set HINDSIGHT_API_LLM_API_KEY to the token)\n"
                 "3. Verify authentication: claude --version\n\n"
-                "Or use a different provider (anthropic, openai, gemini) with API keys."
+                "Or use a different provider (anthropic, openai, ollama) with API keys."
             ) from e
 
         # Metrics collector is imported at module level

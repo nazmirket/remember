@@ -55,7 +55,6 @@ function makeCtx(): InstallCtx & {
   claudeMcp: ReturnType<typeof vi.fn>;
   qwenMcp: ReturnType<typeof vi.fn>;
   clinePlugin: ReturnType<typeof vi.fn>;
-  dcodePlugin: ReturnType<typeof vi.fn>;
   nodeSqlite: ReturnType<typeof vi.fn>;
 } {
   const home = mkdtempSync(join(tmpdir(), "hindsight-installer-test-"));
@@ -70,7 +69,6 @@ function makeCtx(): InstallCtx & {
     // Stub it for the same reason: the suite must never execute a real host CLI.
     qwenMcp: vi.fn(() => true),
     clinePlugin: vi.fn(() => true),
-    dcodePlugin: vi.fn(() => true),
     // Stubbed like the CLI seams above, so the suite never depends on the Node running it.
     nodeSqlite: vi.fn(() => true),
     // Never let a developer's real ~/.hindsight/claude-code.json steer the tests.

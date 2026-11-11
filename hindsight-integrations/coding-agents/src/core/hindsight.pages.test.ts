@@ -437,35 +437,6 @@ describe("HindsightClient page reads", () => {
     const c = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
     await expect(c.getPage("missing")).rejects.toThrow("page not found: missing");
   });
-
-  it("falls back to the deprecated /knowledge-base paths on a server from before the rename", async () => {
-    const urls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        urls.push(url);
-        if (!url.includes("/knowledge-base/"))
-          return { ok: false, status: 404, json: async () => ({ detail: "Not Found" }) } as any;
-        if (url.endsWith("/knowledge-base/tree"))
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ roots: [{ id: "kp-1", kind: "page", name: "Core concepts" }] }),
-          } as any;
-        return { ok: true, status: 200, json: async () => ({ id: "kp-1", content: "x" }) } as any;
-      })
-    );
-    const c = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
-    expect(await c.listPages()).toEqual({ items: [{ id: "kp-1", name: "Core concepts" }] });
-    expect(c.pagesSupported).toBe(true);
-    await c.getPage("kp-1");
-    // The old path is remembered: the page read goes straight to it, under /knowledge-base/pages.
-    expect(urls).toEqual([
-      "http://x/v1/default/banks/repo-a/pages/tree",
-      "http://x/v1/default/banks/repo-a/knowledge-base/tree",
-      "http://x/v1/default/banks/repo-a/knowledge-base/pages/kp-1",
-    ]);
-  });
 });
 
 describe("HindsightClient.seedPages", () => {
@@ -526,7 +497,7 @@ describe("HindsightClient.seedPages", () => {
         calls.push({ url, method: init?.method });
         // Exactly what FastAPI answers for an unrouted path — the shape that identifies a server
         // without the pages API, as opposed to a 404 for a bank that does not exist yet.
-        if (url.endsWith("/pages/tree") || url.endsWith("/knowledge-base/tree"))
+        if (url.endsWith("/pages/tree"))
           return { ok: false, status: 404, json: async () => ({ detail: "Not Found" }) } as any;
         return { ok: true, status: 200, json: async () => ({}) } as any;
       }) as any
@@ -534,6 +505,7 @@ describe("HindsightClient.seedPages", () => {
     const c = new HindsightClient({ apiUrl: "http://x", bank: "repo-a" });
     await expect(c.configureBank()).resolves.toBeUndefined();
     expect(c.pagesSupported).toBe(false);
+    expect(calls.some((x) => x.url.includes("/knowledge-base"))).toBe(false);
     expect(calls.some((x) => x.url.endsWith("/import"))).toBe(true);
     expect(calls.some((x) => x.url.endsWith("/pages"))).toBe(false);
   });

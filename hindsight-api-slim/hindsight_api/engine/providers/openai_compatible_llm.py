@@ -858,9 +858,8 @@ class OpenAICompatibleLLM(LLMInterface):
         model: str,
         reasoning_effort: str | None = None,
         timeout: float | None = None,
-        groq_service_tier: str | None = None,
-        extra_body: dict[str, Any] | None = None,
         *,
+        extra_body: dict[str, Any] | None = None,
         default_headers: dict[str, str] | None = None,
         cache_affinity: str | None = None,
         ollama_num_ctx: int | None = None,
@@ -877,7 +876,6 @@ class OpenAICompatibleLLM(LLMInterface):
             reasoning_effort: Reasoning effort level for supported models
                 ("none", "low", "medium", "high").
             timeout: Request timeout in seconds (uses env var or 120s default).
-            groq_service_tier: Groq service tier ("on_demand", "flex", "auto").
             extra_body: Extra body params merged into every API call.
             default_headers: Custom headers passed to the AsyncOpenAI client (proxies,
                 request-tracing middleware). None sends no extra headers.

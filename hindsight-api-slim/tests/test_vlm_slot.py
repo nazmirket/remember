@@ -89,7 +89,8 @@ def test_a_base_url_follows_its_own_provider_not_the_retain_one():
     """
     from hindsight_api.engine.memory_engine import _provider_default_base_url
 
-    assert _provider_default_base_url("groq") == "https://api.groq.com/openai/v1"
+    assert _provider_default_base_url("groq") == ""  # removed providers have no implicit host
+    assert _provider_default_base_url("ollama-cloud") == ""
     assert _provider_default_base_url("ollama") == "http://localhost:11434/v1"
     assert _provider_default_base_url("openai") == ""
     assert _provider_default_base_url(None) == ""

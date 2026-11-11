@@ -539,9 +539,9 @@ class TestOpenAIEmbeddings:
 
         memory = MemoryEngine(
             db_url=db_url,
-            memory_llm_provider=os.getenv("HINDSIGHT_API_LLM_PROVIDER", "groq"),
+            memory_llm_provider=os.getenv("HINDSIGHT_API_LLM_PROVIDER", "openai"),
             memory_llm_api_key=os.getenv("HINDSIGHT_API_LLM_API_KEY"),
-            memory_llm_model=os.getenv("HINDSIGHT_API_LLM_MODEL", "openai/gpt-oss-120b"),
+            memory_llm_model=os.getenv("HINDSIGHT_API_LLM_MODEL", "gpt-4o-mini"),
             memory_llm_base_url=os.getenv("HINDSIGHT_API_LLM_BASE_URL") or None,
             embeddings=openai_embeddings,
             cross_encoder=cross_encoder,
@@ -609,9 +609,9 @@ class TestOpenAIEmbeddings:
 
         memory = MemoryEngine(
             db_url=db_url,
-            memory_llm_provider=os.getenv("HINDSIGHT_API_LLM_PROVIDER", "groq"),
+            memory_llm_provider=os.getenv("HINDSIGHT_API_LLM_PROVIDER", "openai"),
             memory_llm_api_key=os.getenv("HINDSIGHT_API_LLM_API_KEY"),
-            memory_llm_model=os.getenv("HINDSIGHT_API_LLM_MODEL", "openai/gpt-oss-120b"),
+            memory_llm_model=os.getenv("HINDSIGHT_API_LLM_MODEL", "gpt-4o-mini"),
             memory_llm_base_url=os.getenv("HINDSIGHT_API_LLM_BASE_URL") or None,
             embeddings=openai_embeddings,
             cross_encoder=cross_encoder,

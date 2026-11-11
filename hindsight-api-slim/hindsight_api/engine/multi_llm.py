@@ -328,7 +328,7 @@ class MultiLLMProvider:
         from .llm_wrapper import ConfiguredLLMProvider
 
         trace_ctx = operation_trace_context(bank_id, operation, metadata)
-        return ConfiguredLLMProvider(self, None, trace_ctx)
+        return ConfiguredLLMProvider(self, trace_ctx)
 
     # ── attribute passthrough ────────────────────────────────────────────────────
 

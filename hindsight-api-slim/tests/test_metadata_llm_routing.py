@@ -177,7 +177,7 @@ def test_route_for_rebinds_member_and_keeps_trace_context() -> None:
     """A routed call must stay attributed to the same operation and trace."""
     chain = _chain(("classification", "sensitive", 1))
     trace_ctx = object()
-    configured = ConfiguredLLMProvider(chain, None, trace_ctx)
+    configured = ConfiguredLLMProvider(chain, trace_ctx)
 
     routed = configured.route_for({"classification": "sensitive"})
     assert routed is not configured
@@ -189,7 +189,7 @@ def test_route_for_rebinds_member_and_keeps_trace_context() -> None:
 
 def test_route_for_is_a_noop_for_a_single_provider() -> None:
     configured = ConfiguredLLMProvider(
-        LLMProvider(provider="mock", api_key="sk-test", base_url=None, model="solo"), None, None
+        LLMProvider(provider="mock", api_key="sk-test", base_url=None, model="solo"), None
     )
     assert configured.route_for({"classification": "sensitive"}) is configured
 
@@ -217,7 +217,7 @@ async def _extract(metadata: dict[str, Any] | None, chain: MultiLLMProvider) -> 
         await fact_extraction.extract_facts_from_text(
             text="Quarterly revenue was up.",
             event_date=None,
-            llm_config=ConfiguredLLMProvider(chain, None, None),
+            llm_config=ConfiguredLLMProvider(chain, None),
             config=config,
             metadata=metadata,
         )

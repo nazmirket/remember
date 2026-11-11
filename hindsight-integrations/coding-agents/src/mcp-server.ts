@@ -72,25 +72,13 @@ export function resolveHarness(env: NodeJS.ProcessEnv = process.env): string {
   return harness;
 }
 
-/**
- * Directory this process should treat as the project.
- *
- * Survey sets `HINDSIGHT_MCP_PROJECT_CWD`. Cursor cannot: user-level mcp.json is spawned from
- * `~` and Cursor does not interpolate `cwd`. The installer therefore passes
- * `${workspaceFolder}` as argv[2], which Cursor does interpolate.
- */
+/** Resolve the survey's project override or use the process working directory. */
 export function resolveProjectCwd(
   env: NodeJS.ProcessEnv = process.env,
-  argv: readonly string[] = process.argv,
   fallbackCwd = process.cwd()
 ): string {
   const override = env.HINDSIGHT_MCP_PROJECT_CWD?.trim();
-  if (override && !override.includes("${")) return override;
-  if (env.HINDSIGHT_MCP_HARNESS === "cursor-cli") {
-    const folder = argv[2]?.trim();
-    if (folder && !folder.includes("${")) return folder;
-  }
-  return fallbackCwd;
+  return override && !override.includes("${") ? override : fallbackCwd;
 }
 
 /**

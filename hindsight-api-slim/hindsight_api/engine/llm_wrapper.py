@@ -524,33 +524,18 @@ def create_llm_provider(
     base_url: str,
     model: str,
     reasoning_effort: str | None,
-    groq_service_tier: str | None = None,
+    *,
     openai_service_tier: str | None = None,
-    bedrock_service_tier: str | None = None,
     extra_body: dict[str, Any] | None = None,
     default_headers: dict[str, str] | None = None,
-    vertexai_project_id: str | None = None,
-    vertexai_region: str | None = None,
-    vertexai_credentials: Any = None,
-    gemini_safety_settings: list | None = None,
-    prompt_cache_enabled: bool = False,
-    litellmrouter_config: dict[str, Any] | None = None,
-    gemini_service_tier: str | None = None,
     timeout: float | None = None,
     ollama_num_ctx: int | None = None,
     cache_affinity: str | None = None,
-    structured_output_in_prompt: bool = False,
-    # Appended rather than inserted: some callers still pass the older settings
-    # positionally (guarded by the positional-compatibility tests in
-    # tests/test_llm_wrapper.py), so a parameter added mid-list silently steals
-    # another one's slot. New parameters go at the end.
     codex_home: str | None = None,
 ) -> Any:  # Returns LLMInterface
     """Create a supported LLM implementation or a registered custom provider.
 
     The caller resolves credentials, model, timeout and per-operation settings.
-    Provider-specific parameters from removed adapters remain in the signature
-    for positional call compatibility and do not enable those adapters.
     """
     ollama_num_ctx = _validate_ollama_num_ctx(ollama_num_ctx)
 
@@ -697,36 +682,23 @@ class LLMProvider:
         base_url: str,
         model: str,
         reasoning_effort: str | None = None,
-        groq_service_tier: str | None = None,
+        *,
         openai_service_tier: str | None = None,
-        bedrock_service_tier: str | None = None,
-        gemini_safety_settings: list | None = None,
-        prompt_cache_enabled: bool = False,
         extra_body: dict[str, Any] | None = None,
         default_headers: dict[str, str] | None = None,
-        litellmrouter_config: dict[str, Any] | None = None,
-        gemini_service_tier: str | None = None,
-        vertexai_project_id: str | None = None,
-        vertexai_region: str | None = None,
-        vertexai_service_account_key: str | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
         initial_backoff: float | None = None,
         max_backoff: float | None = None,
         ollama_num_ctx: int | None = None,
         cache_affinity: str | None = None,
-        structured_output_in_prompt: bool = False,
-        # Appended rather than inserted — see the note on ``create_llm_provider``:
-        # callers that pass these positionally would otherwise have one argument
-        # land in the wrong slot.
         codex_home: str | None = None,
     ):
         """Initialize an LLM provider using settings resolved by the caller.
 
         OpenAI, Anthropic, Codex, Claude Code, local providers and custom
         implementations use the applicable model, timeout, headers and request
-        settings. Historical parameters for removed adapters remain accepted for
-        positional compatibility; they do not enable those providers.
+        settings.
         """
         # A custom provider is a class path, and class names are case-sensitive.
         self.provider = provider if is_custom_llm_provider(provider) else provider.lower()
@@ -1527,7 +1499,7 @@ class LLMProvider:
         from .llm_trace import operation_trace_context
 
         trace_ctx = operation_trace_context(bank_id, operation, metadata)
-        return ConfiguredLLMProvider(self, None, trace_ctx)
+        return ConfiguredLLMProvider(self, trace_ctx)
 
     async def cleanup(self) -> None:
         """Clean up resources (e.g. stop llamacpp subprocess)."""
@@ -1589,7 +1561,6 @@ class ConfiguredLLMProvider:
     def __init__(
         self,
         provider: "AnyLLMProvider",
-        gemini_safety_settings: list | None,
         trace_ctx: Any | None = None,
     ) -> None:
         # Use object.__setattr__ to avoid triggering __getattr__
@@ -1642,7 +1613,6 @@ class ConfiguredLLMProvider:
             return self
         return ConfiguredLLMProvider(
             member,
-            None,  # Legacy positional argument.
             object.__getattribute__(self, "_trace_ctx"),
         )
 

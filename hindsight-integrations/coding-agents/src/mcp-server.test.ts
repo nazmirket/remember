@@ -96,36 +96,15 @@ describe("resolveHarness", () => {
 });
 
 describe("resolveProjectCwd", () => {
-  it("uses HINDSIGHT_MCP_PROJECT_CWD when the survey set it", () => {
-    expect(
-      resolveProjectCwd({ HINDSIGHT_MCP_PROJECT_CWD: "/repo" }, ["node", "mcp.js"], "/home")
-    ).toBe("/repo");
+  it("uses the survey project override", () => {
+    expect(resolveProjectCwd({ HINDSIGHT_MCP_PROJECT_CWD: "/repo" }, "/home")).toBe("/repo");
   });
 
-  it("on cursor-cli, uses argv[2] — Cursor interpolates ${workspaceFolder} into args, not cwd", () => {
-    expect(
-      resolveProjectCwd(
-        { HINDSIGHT_MCP_HARNESS: "cursor-cli" },
-        ["node", "mcp.js", "/repo"],
-        "/home"
-      )
-    ).toBe("/repo");
-  });
-
-  it("ignores argv[2] on every other harness — only Cursor's installer passes it", () => {
-    expect(
-      resolveProjectCwd({ HINDSIGHT_MCP_HARNESS: "codex" }, ["node", "mcp.js", "/repo"], "/home")
-    ).toBe("/home");
-  });
-
-  it("ignores an uninterpolated ${workspaceFolder} argument", () => {
-    expect(
-      resolveProjectCwd(
-        { HINDSIGHT_MCP_HARNESS: "cursor-cli" },
-        ["node", "mcp.js", "${workspaceFolder}"],
-        "/home"
-      )
-    ).toBe("/home");
+  it("uses the working directory when the override is missing or uninterpolated", () => {
+    expect(resolveProjectCwd({}, "/home")).toBe("/home");
+    expect(resolveProjectCwd({ HINDSIGHT_MCP_PROJECT_CWD: "${workspaceFolder}" }, "/home")).toBe(
+      "/home"
+    );
   });
 });
 

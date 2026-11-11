@@ -51,7 +51,7 @@ export const MARKER = "coding-agents";
 
 export interface InstallCtx {
   home: string;
-  pkgRoot: string; // package root (opencode plugin entry)
+  pkgRoot: string; // package root
   dist: string; // built entry points
   /** Runs `claude mcp ...`; injectable for tests. Returns false when the CLI isn't usable. */
   claudeMcp?: (args: string[]) => boolean;
@@ -60,7 +60,6 @@ export interface InstallCtx {
   /** Runs `cline plugin ...`; injectable for tests. Returns false when the CLI isn't usable. */
   clinePlugin?: (args: string[]) => boolean;
   /** Runs native Dcode plugin commands; injectable for tests. Returns false when unusable. */
-  dcodePlugin?: (args: string[]) => boolean;
   /** Reports whether `node:sqlite` works in the node that runs hooks; injectable for tests. */
   nodeSqlite?: () => boolean;
   /** Whether stdin can be prompted. Defaults to the real TTY check at the CLI entry; tests set it

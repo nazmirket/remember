@@ -1082,7 +1082,7 @@ async def validate_retain_batch_support(retain_llm_config: "LLMConfig | MultiLLM
     raise RuntimeError(
         f"Configuration error: HINDSIGHT_API_RETAIN_BATCH_ENABLED=true but {cause}. "
         f"Either switch to a provider that supports batch operations "
-        f"(e.g. 'openai', 'groq', 'gemini') or set HINDSIGHT_API_RETAIN_BATCH_ENABLED=false."
+        f"(e.g. 'openai' or 'anthropic') or set HINDSIGHT_API_RETAIN_BATCH_ENABLED=false."
     )
 
 
@@ -2680,12 +2680,8 @@ def _provider_default_base_url(provider: str | None) -> str:
     host with someone else's key.
     """
     match (provider or "").lower():
-        case "groq":
-            return "https://api.groq.com/openai/v1"
         case "ollama":
             return "http://localhost:11434/v1"
-        case "ollama-cloud":
-            return "https://ollama.com/v1"
         case _:
             return ""
 
@@ -2962,7 +2958,7 @@ class MemoryEngine(MemoryEngineInterface):
         Args:
             db_url: PostgreSQL connection URL. Defaults to HINDSIGHT_API_DATABASE_URL env var or "pg0".
                     Also supports pg0 URLs: "pg0" or "pg0://instance-name" or "pg0://instance-name:port"
-            memory_llm_provider: LLM provider. Defaults to HINDSIGHT_API_LLM_PROVIDER env var or "groq".
+            memory_llm_provider: LLM provider. Defaults to the configured HINDSIGHT_API_LLM_PROVIDER.
             memory_llm_api_key: API key for the LLM provider. Defaults to HINDSIGHT_API_LLM_API_KEY env var.
             memory_llm_model: Model name. Defaults to HINDSIGHT_API_LLM_MODEL env var.
             memory_llm_base_url: Base URL for the LLM API. Defaults based on provider.
@@ -3035,12 +3031,8 @@ class MemoryEngine(MemoryEngineInterface):
 
         # Set default base URL if not provided
         if memory_llm_base_url is None:
-            if memory_llm_provider.lower() == "groq":
-                memory_llm_base_url = "https://api.groq.com/openai/v1"
-            elif memory_llm_provider.lower() == "ollama":
+            if memory_llm_provider.lower() == "ollama":
                 memory_llm_base_url = "http://localhost:11434/v1"
-            elif memory_llm_provider.lower() == "ollama-cloud":
-                memory_llm_base_url = "https://ollama.com/v1"
             else:
                 memory_llm_base_url = ""
 
@@ -3160,12 +3152,8 @@ class MemoryEngine(MemoryEngineInterface):
         retain_base_url = retain_llm_base_url or config.retain_llm_base_url or memory_llm_base_url
         # Apply provider-specific base URL defaults for retain
         if retain_base_url is None:
-            if retain_provider.lower() == "groq":
-                retain_base_url = "https://api.groq.com/openai/v1"
-            elif retain_provider.lower() == "ollama":
+            if retain_provider.lower() == "ollama":
                 retain_base_url = "http://localhost:11434/v1"
-            elif retain_provider.lower() == "ollama-cloud":
-                retain_base_url = "https://ollama.com/v1"
             else:
                 retain_base_url = ""
 
@@ -3251,12 +3239,8 @@ class MemoryEngine(MemoryEngineInterface):
         reflect_base_url = reflect_llm_base_url or config.reflect_llm_base_url or memory_llm_base_url
         # Apply provider-specific base URL defaults for reflect
         if reflect_base_url is None:
-            if reflect_provider.lower() == "groq":
-                reflect_base_url = "https://api.groq.com/openai/v1"
-            elif reflect_provider.lower() == "ollama":
+            if reflect_provider.lower() == "ollama":
                 reflect_base_url = "http://localhost:11434/v1"
-            elif reflect_provider.lower() == "ollama-cloud":
-                reflect_base_url = "https://ollama.com/v1"
             else:
                 reflect_base_url = ""
 
@@ -3302,12 +3286,8 @@ class MemoryEngine(MemoryEngineInterface):
             if refresh_base_url is None:
                 if config.mental_model_refresh_llm_provider is None:
                     refresh_base_url = reflect_base_url
-                elif refresh_provider.lower() == "groq":
-                    refresh_base_url = "https://api.groq.com/openai/v1"
                 elif refresh_provider.lower() == "ollama":
                     refresh_base_url = "http://localhost:11434/v1"
-                elif refresh_provider.lower() == "ollama-cloud":
-                    refresh_base_url = "https://ollama.com/v1"
                 else:
                     refresh_base_url = ""
 
@@ -3350,12 +3330,8 @@ class MemoryEngine(MemoryEngineInterface):
         consolidation_base_url = consolidation_llm_base_url or config.consolidation_llm_base_url or memory_llm_base_url
         # Apply provider-specific base URL defaults for consolidation
         if consolidation_base_url is None:
-            if consolidation_provider.lower() == "groq":
-                consolidation_base_url = "https://api.groq.com/openai/v1"
-            elif consolidation_provider.lower() == "ollama":
+            if consolidation_provider.lower() == "ollama":
                 consolidation_base_url = "http://localhost:11434/v1"
-            elif consolidation_provider.lower() == "ollama-cloud":
-                consolidation_base_url = "https://ollama.com/v1"
             else:
                 consolidation_base_url = ""
 
@@ -16038,7 +16014,7 @@ class MemoryEngine(MemoryEngineInterface):
 
             raise LLMNotAvailableError(
                 "Reflect requires an LLM provider. Current provider is set to 'none'. "
-                "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, gemini)."
+                "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, ollama)."
             )
 
         # Authenticate tenant and set schema in context (for fq_table())
@@ -24519,5 +24495,5 @@ class MemoryEngine(MemoryEngineInterface):
 
         raise LLMNotAvailableError(
             "Mental model refresh requires an LLM provider. Current provider is set to 'none'. "
-            "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, gemini)."
+            "Set HINDSIGHT_API_LLM_PROVIDER to a real provider (e.g., openai, anthropic, ollama)."
         )
