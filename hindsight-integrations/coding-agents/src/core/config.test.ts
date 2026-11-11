@@ -25,7 +25,7 @@ afterEach(() => {
 describe("loadConfig layering", () => {
   it("missing files yield defaults", () => {
     const cfg = loadConfig({ path: join(root, "nope.json") });
-    expect(cfg.apiUrl).toBe("https://api.hindsight.vectorize.io");
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
     expect(cfg.bankId).toBeUndefined();
     expect(cfg.disabled).toBe(false);
   });
@@ -34,7 +34,7 @@ describe("loadConfig layering", () => {
     writeFileSync(globalCfg, "{not json");
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const cfg = loadConfig({ path: globalCfg });
-    expect(cfg.apiUrl).toBe("https://api.hindsight.vectorize.io");
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
     expect(err).toHaveBeenCalledOnce();
     err.mockRestore();
   });

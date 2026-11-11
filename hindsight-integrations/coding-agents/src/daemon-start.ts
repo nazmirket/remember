@@ -7,7 +7,13 @@
  * daemon answers /health. It writes only to the plugin log, so its stdio can be discarded.
  */
 import { loadConfig } from "./core/config";
-import { daemonEnv, isServerHealthy, preflightDaemon } from "./core/daemon";
+import {
+  daemonEnv,
+  hasForkEmbed,
+  isPortOccupied,
+  isServerHealthy,
+  preflightDaemon,
+} from "./core/daemon";
 import { diag } from "./core/diag";
 import { log, setLogLevel } from "./core/log";
 
@@ -24,13 +30,32 @@ async function main(): Promise<void> {
   if (cfg.serverMode !== "daemon") return;
   // Several sessions can race to start one daemon; whoever loses simply finds it healthy.
   if (await isServerHealthy(cfg.apiUrl)) return;
+  if (await isPortOccupied(cfg.apiPort))
+    throw new Error(`Memory daemon port ${cfg.apiPort} is occupied`);
   if (!preflightDaemon(cfg, harness)) return;
+  if (!hasForkEmbed(cfg.embedPackagePath)) {
+    throw new Error("Set HINDSIGHT_EMBED_PACKAGE_PATH to this fork's hindsight-embed directory");
+  }
 
+  // An agent can start in any repository. Its .env must not override the local
+  // bind address, database, or provider settings inherited by the daemon.
+  process.env.PYTHON_DOTENV_DISABLED = "1";
+  // The lifecycle wrapper persists its `env` in the profile. Keep credentials in this
+  // starter's inherited environment instead of writing them into the profile file.
+  const daemonSettings = daemonEnv(cfg);
+  const profileSettings: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(daemonSettings)) {
+    if (/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)) {
+      if (value !== undefined) process.env[key] = value;
+    } else {
+      profileSettings[key] = value;
+    }
+  }
   const { HindsightServer } = await import("@vectorize-io/hindsight-all");
   const server = new HindsightServer({
     profile: cfg.daemonProfile,
     port: cfg.apiPort,
-    env: daemonEnv(cfg),
+    env: profileSettings,
     embedVersion: cfg.embedVersion,
     embedPackagePath: cfg.embedPackagePath,
     logger: {

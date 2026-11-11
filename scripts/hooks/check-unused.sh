@@ -38,9 +38,5 @@ for entry in \
   (cd "$REPO_ROOT/$pkg" && uvx vulture $srcs --min-confidence 80 2>&1) || true
 done
 
-# --- TypeScript: knip (unused files / exports / dependencies) -----------------
-section "knip: hindsight-control-plane"
-(cd "$REPO_ROOT/hindsight-control-plane" && npx --yes knip@5 --no-progress 2>&1) || true
-
 printf '\n\033[2m(advisory — informational only, does not fail the build)\033[0m\n'
 exit 0

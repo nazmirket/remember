@@ -4954,6 +4954,7 @@ def _register_routes(app: FastAPI):
     async def _readiness_response() -> JSONResponse:
         """Shared body of /health and /health/ready: 200 if healthy, 503 if not."""
         health = await app.state.memory.health_check()
+        health["fork_source"] = os.path.realpath(__file__)
         status_code = 200 if health.get("status") == "healthy" else 503
         return JSONResponse(content=health, status_code=status_code)
 

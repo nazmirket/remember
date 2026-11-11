@@ -1,25 +1,4 @@
-/**
- * Import a harness's PAST sessions from local disk — the migration path off the older per-agent
- * plugins.
- *
- * Day to day, conversations reach a bank through live write-back, so a fresh install starts from
- * git history alone and knows nothing of what you discussed last month. The old per-agent plugins
- * stored their memory in differently-scoped banks (`claude-code::<project>` vs this package's
- * per-repo `coding-agent::{gitProject}`), and the server's bank import restores a whole bank rather
- * than merging — so those banks cannot be folded together. Re-reading the transcripts the agent
- * already wrote to disk sidesteps that entirely: the same conversations are re-extracted into
- * whichever bank is current.
- *
- * Scoped to ONE repo on purpose. This machine has ~14k Claude sessions; importing all of them would
- * cost extraction on every unrelated project. Each harness below can answer "which sessions belong
- * to this directory" cheaply.
- *
- * Only file-based harnesses are supported. opencode, Kilo, Cursor, Cline, Copilot and Devin keep
- * history in SQLite (`opencode.db`, `store.db`, …) whose schemas are internal and unversioned;
- * reading them would break on any upstream change, so they report as unsupported rather than
- * silently importing nothing.
- */
-import { execFileSync } from "node:child_process";
+/** Import past Claude Code and Codex sessions for a single repository. */
 import {
   closeSync,
   existsSync,
@@ -29,20 +8,11 @@ import {
   readSync,
   statSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-// Namespace import on purpose: `zstdDecompressSync` only exists on Node 22.15+, and a NAMED import
-// of a missing builtin export is a load-time SyntaxError — which would break every entry point that
-// pulls this module in, not just the dsh backfill (guarded below).
-import * as zlib from "node:zlib";
 import type { ChatSession } from "./types";
 import { readClaudeTranscript } from "./transcript";
 import { readCodexTranscript } from "./transcript-codex";
-import { readDcodeTranscript } from "./transcript-dcode";
-import { readDshEvents, type DshSessionEvent } from "./transcript-dsh";
-import { readPiTranscript } from "./transcript-pi";
-import { zstdDecompressFrames } from "./zstd-frames";
 import type { TransportTurn } from "./chat";
 
 export interface HistoryImport {
@@ -63,19 +33,7 @@ export function claudeProjectDir(repoDir: string, home = homedir()): string {
   return join(home, ".claude", "projects", repoDir.replace(/[^a-zA-Z0-9]/g, "-"));
 }
 
-/** pi names a session folder after the working directory it was started in: one leading separator
- *  stripped, then `/`, `\` and `:` replaced by `-`, wrapped in `--`…`--`. Verified against pi
- *  0.84.2, whose SessionManager builds exactly
- *  `` `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--` ``.
- *
- *  Unlike Claude's encoding this keeps dots, spaces and case, but it is still NOT injective — `/a/b`
- *  and `/a-b` both give `--a-b--` — so it only narrows the search; attribution comes from the `cwd`
- *  recorded in each session's header line. */
-export function piSessionDir(repoDir: string): string {
-  return `--${repoDir.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-}
-
-/** Is `dir` the repo itself or somewhere inside it? */
+/** Whether a recorded session directory belongs to this repository. */
 export function withinRepo(dir: string | undefined, repoDir: string): boolean {
   return (
     !!dir && (dir === repoDir || dir.startsWith(repoDir.endsWith("/") ? repoDir : repoDir + "/"))
@@ -247,265 +205,18 @@ function codexHistory(repoDir: string, home: string): HistoryImport {
  * contract, not a schema leak: the payload is `{schema_version, command, data:[…]}` and each row
  * carries `thread_id` and `cwd`. Verified against deepagents-code 0.1.65.
  */
-export const DCODE_THREADS_SCHEMA_VERSION = 1;
-
-interface DcodeThread {
-  thread_id?: unknown;
-  cwd?: unknown;
-}
-
-/** Path Dcode materializes a thread's transcript at: a truncated readable prefix, `--`, and the
- *  sha256 of the FULL thread id (`hooks/transcript.py:_safe_component`). Only the digest is
- *  load-bearing, so match on it and let the prefix vary. */
-function dcodeTranscriptPath(root: string, threadId: string): string | undefined {
-  const digest = createHash("sha256").update(threadId, "utf8").digest("hex");
-  const suffix = `--${digest}.jsonl`;
-  try {
-    const match = readdirSync(root).find((entry) => entry.endsWith(suffix));
-    return match ? join(root, match) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function dcodeHistory(
-  repoDir: string,
-  home: string,
-  runCli: (args: string[]) => string
-): HistoryImport {
-  const root = join(process.env.DEEPAGENTS_HOME || join(home, ".deepagents"), "transcripts");
-  if (!existsSync(root)) return { supported: true, sessions: [] };
-
-  let listed: unknown;
-  try {
-    listed = JSON.parse(runCli(["threads", "list", "--json"]));
-  } catch {
-    // No dcode on PATH (or it failed): the transcripts are unattributable without it.
-    return {
-      supported: false,
-      reason:
-        "dcode transcripts record no working directory, so `dcode threads list --json` is the " +
-        "only way to tell which sessions belong to this repo — and the dcode CLI is not runnable " +
-        "here",
-      sessions: [],
-    };
-  }
-  const payload = listed as { schema_version?: unknown; data?: unknown };
-  if (payload?.schema_version !== DCODE_THREADS_SCHEMA_VERSION || !Array.isArray(payload.data)) {
-    return {
-      supported: false,
-      reason: `unrecognized \`dcode threads list --json\` schema (expected schema_version ${DCODE_THREADS_SCHEMA_VERSION})`,
-      sessions: [],
-    };
-  }
-
-  const sessions: ChatSession[] = [];
-  let unattributed = 0;
-  for (const row of payload.data as DcodeThread[]) {
-    const threadId = typeof row?.thread_id === "string" ? row.thread_id : undefined;
-    if (!threadId) continue;
-    if (typeof row.cwd !== "string") {
-      unattributed++;
-      continue;
-    }
-    if (!withinRepo(row.cwd, repoDir)) continue;
-    const file = dcodeTranscriptPath(root, threadId);
-    if (!file) continue; // listed thread whose projection was never materialized
-    try {
-      const session = toSession(threadId, readDcodeTranscript(file));
-      if (session) sessions.push(session);
-    } catch {
-      /* a single unreadable transcript must not abort the import */
-    }
-  }
-  return { supported: true, sessions, ...(unattributed ? { unattributed } : {}) };
-}
-
-/**
- * DeepSeek Harness: `$DSH_HOME/sessions/<project>/<encoded-id>/session.jsonl(.zstd)`.
- *
- * The project directory is a lossy, truncated rendering of the session's cwd, so it is used only to
- * narrow the walk — attribution still comes from the `cwd` in each log's header line, exactly like
- * the Claude reader. Logs are zstd by default (see core/zstd-frames.ts for why a plain decompress
- * of the whole file reads back only the header line).
- */
-function dshHistory(repoDir: string, home: string): HistoryImport {
-  const root = process.env.DSH_HOME
-    ? join(process.env.DSH_HOME, "sessions")
-    : join(home, ".dsh", "sessions");
-  if (!existsSync(root)) return { supported: true, sessions: [] };
-  if (typeof zlib.zstdDecompressSync !== "function") {
-    return {
-      supported: false,
-      reason:
-        "reading dsh session logs needs Node's built-in Zstandard support (Node 22.15+); " +
-        `this import is running on ${process.version}`,
-      sessions: [],
-    };
-  }
-  const sessions: ChatSession[] = [];
-  let unattributed = 0;
-  for (const dir of readdirSync(root).map((project) => join(root, project))) {
-    let sessionDirs: string[];
-    try {
-      sessionDirs = readdirSync(dir).map((id) => join(dir, id));
-    } catch {
-      continue; // a stray file where a project directory was expected
-    }
-    for (const sessionDir of sessionDirs) {
-      const file = ["session.jsonl.zstd", "session.jsonl"]
-        .map((name) => join(sessionDir, name))
-        .find((candidate) => existsSync(candidate));
-      if (!file) continue;
-      try {
-        const lines = readDshLog(file);
-        const header = JSON.parse(lines[0] ?? "{}") as { cwd?: string; id?: string };
-        if (!header.cwd) {
-          unattributed++;
-          continue;
-        }
-        if (!withinRepo(header.cwd, repoDir)) continue;
-        const events = lines.slice(1).flatMap((line) => {
-          try {
-            return [JSON.parse(line) as DshSessionEvent];
-          } catch {
-            return []; // a packed chunk row or a torn tail line: not conversation either way
-          }
-        });
-        const s = toSession(header.id ?? sessionDir, readDshEvents(events));
-        if (s) sessions.push(s);
-      } catch {
-        /* a single unreadable log must not abort the import */
-      }
-    }
-  }
-  return { supported: true, sessions, unattributed };
-}
-
-/** The logical JSONL lines of one dsh session log, decompressing when the artifact is zstd. */
-function readDshLog(file: string): string[] {
-  const bytes = readFileSync(file);
-  const text = file.endsWith(".zstd") ? zstdDecompressFrames(bytes) : bytes.toString("utf8");
-  return text.split("\n").filter((line) => line.trim());
-}
-
-/**
- * pi and its fork Prime Agent: a `{type:"session", id, cwd}` header line followed by
- * `{type:"message"}` entries — the same schema from both hosts, so one body reads either.
- *
- * Only the file layout differs, which is why the two callers below exist:
- *   pi           `sessions/--<encoded cwd>--/<timestamp>_<uuid>.jsonl`
- *   Prime Agent  `sessions/<uuid>.jsonl` — flat, no per-directory folder
- *
- * Attribution is the header's `cwd` in both cases. pi's folder name is a lossy rendering of that
- * same path (see piSessionDir), so it is used only to narrow the walk, never to decide ownership —
- * exactly the rule the Claude reader follows, and for the same reason: a wrong guess files someone
- * else's conversation into this repo's memory.
- */
-function piFamilySessions(files: string[], repoDir: string): HistoryImport {
-  const sessions: ChatSession[] = [];
-  let unattributed = 0;
-  for (const file of files) {
-    try {
-      const head = firstLine(file);
-      if (!head) continue;
-      const meta = JSON.parse(head) as { type?: string; cwd?: string; id?: string };
-      // A file whose first line is not the session header is not a session log (pi keeps other
-      // artifacts under the same tree), not a session we failed to attribute.
-      if (meta?.type !== "session") continue;
-      if (!meta.cwd) {
-        unattributed++;
-        continue;
-      }
-      if (!withinRepo(meta.cwd, repoDir)) continue;
-      const s = toSession(meta.id ?? file, readPiTranscript(file));
-      if (s) sessions.push(s);
-    } catch {
-      /* a single unreadable transcript must not abort the import */
-    }
-  }
-  return { supported: true, sessions, unattributed };
-}
-
-function piHistory(repoDir: string, home: string): HistoryImport {
-  const root = join(home, ".pi", "agent", "sessions");
-  if (!existsSync(root)) return { supported: true, sessions: [] };
-  // Starting pi from a subdirectory gives that subdirectory its own folder, so an exact match would
-  // silently miss that history. Prefilter on the encoded name — `--<repo>--` itself plus anything
-  // nested under `--<repo>-` — then let the header cwd confirm; a sibling repo whose name merely
-  // extends this one (`repo-other`) matches the prefix and is dropped by that check.
-  const exact = piSessionDir(repoDir);
-  const nested = `${exact.slice(0, -2)}-`;
-  const files: string[] = [];
-  // listDir at both levels: a stray FILE where either `sessions` itself or one of its session
-  // folders was expected must cost that one entry, not the run — importLocalHistory promises never
-  // to throw and its caller (installer.ts importConversations) has no catch of its own.
-  for (const dir of listDir(root).filter((d) => d === exact || d.startsWith(nested))) {
-    files.push(...jsonlFiles(join(root, dir)));
-  }
-  return piFamilySessions(files, repoDir);
-}
-
-function primeAgentHistory(repoDir: string, home: string): HistoryImport {
-  // Flat storage, so there is nothing to prefilter on and every header is read. That stays cheap
-  // because the directory holds one file per SESSION, where pi's holds one folder per working
-  // directory — the scale that made pi's prefilter necessary does not arise here.
-  const root = join(home, ".prime", "agent", "sessions");
-  if (!existsSync(root)) return { supported: true, sessions: [] };
-  return piFamilySessions(jsonlFiles(root), repoDir);
-}
-
-const SQLITE_HISTORY =
-  "keeps session history in an internal SQLite database, whose schema is unversioned and would " +
-  "break on any upstream change";
-
-/** Read a harness's past sessions for one repo. Never throws. */
+/** Read past sessions for one repository from either supported coding agent. */
 export function importLocalHistory(
   harness: string,
   repoDir: string,
-  home = homedir(),
-  /** Seam for tests: runs `dcode <args>` and returns stdout. */
-  runDcodeCli?: (args: string[]) => string
+  home = homedir()
 ): HistoryImport {
   switch (harness) {
     case "claude-code":
       return claudeHistory(repoDir, home);
     case "codex":
       return codexHistory(repoDir, home);
-    case "dcode":
-      return dcodeHistory(
-        repoDir,
-        home,
-        runDcodeCli ??
-          ((args) =>
-            execFileSync("dcode", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))
-      );
-    case "dsh":
-      return dshHistory(repoDir, home);
-    case "pi":
-      return piHistory(repoDir, home);
-    case "prime-agent":
-      return primeAgentHistory(repoDir, home);
-    case "opencode":
-    // opencode v2 keeps sessions in the SAME `opencode.db` v1 does.
-    case "opencode2":
-    case "kilo":
-    case "cursor-cli":
-    case "cline-cli":
-    case "copilot-cli":
-    case "devin-cli":
-      return { supported: false, reason: `${harness} ${SQLITE_HISTORY}`, sessions: [] };
-    // TraeCode has no reader for the same reason as ZCode below: no session files on disk at all
-    // (sessions live in an encrypted local DB / the cloud), which is why the plugin journals live
-    // sessions itself (core/turn-journal.ts) — and why there is no past history to backfill from.
-    case "traecode":
-    case "zcode":
-      return {
-        supported: false,
-        reason: `${harness} keeps no session transcripts on disk to import`,
-        sessions: [],
-      };
     default:
-      return { supported: false, reason: `no local history reader for ${harness}`, sessions: [] };
+      return { supported: false, reason: `Unsupported agent: ${harness}`, sessions: [] };
   }
 }

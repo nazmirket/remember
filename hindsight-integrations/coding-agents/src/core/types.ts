@@ -5,7 +5,6 @@
  *   2. how its live runtime hooks bind reflect+inject -> HarnessAdapter.createRuntime
  * A new harness = one file implementing this interface, registered in harness/registry.ts.
  */
-import type { RuntimeCore } from "./runtime";
 
 /** A normalized past session (harness-independent), as produced by a ChatReader for backfill. */
 export interface ChatSession {
@@ -35,5 +34,5 @@ export interface HarnessAdapter {
    * createRuntime always throws — the real opencode runtime is built by src/index.ts importing
    * opencodeAdapter directly, bypassing the registry (keeps backfill.js free of @opencode-ai/plugin).
    */
-  createRuntime(core: RuntimeCore): unknown;
+  createRuntime(core: unknown): unknown;
 }

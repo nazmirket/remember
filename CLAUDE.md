@@ -11,9 +11,9 @@ Hindsight is an agent memory system that provides long-term memory for AI agents
 
 ## Development Commands
 
-### Local Development (API + UI)
+### Local Development (API)
 ```bash
-# Start both API server and control plane UI
+# Start the local API server
 ./scripts/dev/start.sh
 ```
 
@@ -37,19 +37,6 @@ cd hindsight-api-slim && uv run ruff format .
 
 # Type checking (uses ty - extremely fast type checker from Astral)
 cd hindsight-api-slim && uv run ty check hindsight_api/
-```
-
-### Control Plane (Next.js)
-```bash
-./scripts/dev/start-control-plane.sh
-# Or manually:
-cd hindsight-control-plane && npm run dev
-
-# Run frontend unit tests
-cd hindsight-control-plane && npm test
-
-# Run frontend linter
-cd hindsight-control-plane && npm run lint
 ```
 
 ### CLI Tool (Rust)
@@ -110,12 +97,11 @@ uv run run-amb --dataset longmemeval --split s -- --category single-session-user
 - **hindsight-api/**: Published distribution package providing `hindsight-api`, `hindsight-worker`, `hindsight-local-mcp`, and `hindsight-admin` CLI entrypoints
 - **hindsight-all/** & **hindsight-all-slim/**: Full and slim standalone distribution bundle packages
 - **hindsight-all-npm/**: Node.js lifecycle manager embedding local daemon (published as `@vectorize-io/hindsight-all`)
-- **hindsight-control-plane/**: Admin UI (Next.js, npm)
 - **hindsight-cli/**: CLI tool (Rust, cargo, uses progenitor for API client)
 - **hindsight-clients/**: Generated SDK clients (Python, TypeScript, Rust, Go)
 - **hindsight-docs/**: Docusaurus documentation site
-- **hindsight-integrations/**: Framework integrations (LiteLLM, CrewAI, LangGraph, Pydantic AI, AG2, Claude Code, coding-agents, etc.)
-- **hindsight-embed/**: Embedded Python CLI and local daemon manager (connects to local API or falls back to uvx hindsight-api)
+- **hindsight-integrations/coding-agents/**: Claude Code and Codex hooks and MCP tools
+- **hindsight-embed/**: Embedded Python CLI and local daemon manager
 - **hindsight-system-tests/**: Blackbox end-to-end integration test suite driven through SDK against local stubs
 - **hindsight-system-evals/**: End-to-end quality evaluation suites scored by independent LLM judges against real providers
 - **hindsight-integration-tests/**: E2E and integration test suites requiring a running server (live API or docker-compose)
@@ -258,10 +244,8 @@ LINT_ALL=1 ./scripts/hooks/lint.sh # everything, as CI does
 
 Dead-code detection runs in CI (the `check-unused-code` job) at two levels:
 - **Blocking:** unused imports (ruff `F401`) and variables (`F841`) — `lint.sh` auto-removes
-  them and `verify-generated-files` fails on any leftover diff; and **knip** for orphaned
-  control-plane files / unused (or unlisted) `package.json` dependencies.
-- **Advisory:** whole unused Python functions (vulture) and unused control-plane *exports*
-  (the shadcn/ui surface is kept on purpose) — surfaced, not gated.
+  them and `verify-generated-files` fails on any leftover diff.
+- **Advisory:** whole unused Python functions (vulture) — surfaced, not gated.
 
 Run both locally with:
 ```bash

@@ -12,6 +12,10 @@ import { deriveBankId } from "./bank";
  * A hook runs after the fact, so the directory it reports can already be gone: an ephemeral
  * worktree removed once the task finished, or a checkout moved mid-session (#3110).
  */
+function defaultBank(prefix: string): RegExp {
+  return new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-[0-9a-f]{16}$`);
+}
+
 describe("project resolution when the working directory is gone", () => {
   let repo: string;
 
@@ -29,12 +33,16 @@ describe("project resolution when the working directory is gone", () => {
   it("names the repository rather than the deleted leaf directory", () => {
     // Never created: this is the state the hook actually observes once the worktree is removed.
     const gone = join(repo, ".agent", "worktrees", "agent-a33c4d63");
-    expect(deriveBankId({}, gone, "claude-code")).toBe(`coding-agent::${basename(repo)}`);
+    expect(deriveBankId({}, gone, "claude-code")).toMatch(
+      defaultBank(`coding-agent::${basename(repo)}`)
+    );
   });
 
   it("keeps the historical answer while the directory still exists", () => {
     // The walk is a no-op for a live directory, so no existing bank moves.
-    expect(deriveBankId({}, repo, "claude-code")).toBe(`coding-agent::${basename(repo)}`);
+    expect(deriveBankId({}, repo, "claude-code")).toMatch(
+      defaultBank(`coding-agent::${basename(repo)}`)
+    );
   });
 
   it("uses an exported project root when the walk lands outside the repository", () => {
@@ -42,7 +50,9 @@ describe("project resolution when the working directory is gone", () => {
     // only the harness's own variable still names the project.
     process.env.CLAUDE_PROJECT_DIR = repo;
     const goneSibling = join(tmpdir(), "hs-gone-linked-worktree-never-created");
-    expect(deriveBankId({}, goneSibling, "claude-code")).toBe(`coding-agent::${basename(repo)}`);
+    expect(deriveBankId({}, goneSibling, "claude-code")).toMatch(
+      defaultBank(`coding-agent::${basename(repo)}`)
+    );
   });
 
   it("prefers a resolvable directory over the exported root", () => {
@@ -50,7 +60,9 @@ describe("project resolution when the working directory is gone", () => {
     execFileSync("git", ["init", "-q"], { cwd: other });
     process.env.CLAUDE_PROJECT_DIR = other;
     try {
-      expect(deriveBankId({}, repo, "claude-code")).toBe(`coding-agent::${basename(repo)}`);
+      expect(deriveBankId({}, repo, "claude-code")).toMatch(
+        defaultBank(`coding-agent::${basename(repo)}`)
+      );
     } finally {
       rmSync(other, { recursive: true, force: true });
     }
@@ -58,14 +70,16 @@ describe("project resolution when the working directory is gone", () => {
 
   it("never yields an empty project name", () => {
     // basename("/") is "", which produced bank ids like `coding-agent::` that name nothing.
-    expect(deriveBankId({}, "/", "claude-code")).toBe("coding-agent::unknown");
+    expect(deriveBankId({}, "/", "claude-code")).toMatch(defaultBank("coding-agent::unknown"));
     expect(deriveBankId({ bankIdTemplate: "{project}" }, "/", "claude-code")).toBe("unknown");
   });
 
   it("still yields a name for a directory that is not a repository", () => {
     const plain = mkdtempSync(join(tmpdir(), "hs-plain-"));
     try {
-      expect(deriveBankId({}, plain, "claude-code")).toBe(`coding-agent::${basename(plain)}`);
+      expect(deriveBankId({}, plain, "claude-code")).toMatch(
+        defaultBank(`coding-agent::${basename(plain)}`)
+      );
     } finally {
       rmSync(plain, { recursive: true, force: true });
     }
@@ -79,8 +93,8 @@ describe("project resolution when the working directory is gone", () => {
     mkdirSync(sub, { recursive: true });
     try {
       for (const cwd of [plain, join(plain, "analysis"), sub]) {
-        expect(deriveBankId({}, cwd, "claude-code", plain)).toBe(
-          `coding-agent::${basename(plain)}`
+        expect(deriveBankId({}, cwd, "claude-code", plain)).toMatch(
+          defaultBank(`coding-agent::${basename(plain)}`)
         );
       }
     } finally {
@@ -93,7 +107,9 @@ describe("project resolution when the working directory is gone", () => {
     // in a plain directory that then works inside a repo still gets that repo's bank.
     const plain = mkdtempSync(join(tmpdir(), "hs-plain-"));
     try {
-      expect(deriveBankId({}, repo, "claude-code", plain)).toBe(`coding-agent::${basename(repo)}`);
+      expect(deriveBankId({}, repo, "claude-code", plain)).toMatch(
+        defaultBank(`coding-agent::${basename(repo)}`)
+      );
     } finally {
       rmSync(plain, { recursive: true, force: true });
     }
@@ -104,7 +120,9 @@ describe("project resolution when the working directory is gone", () => {
     // something must not rename the bank after the directory it landed in.
     const outside = mkdtempSync(join(tmpdir(), "hs-outside-"));
     try {
-      expect(deriveBankId({}, outside, "codex", repo)).toBe(`coding-agent::${basename(repo)}`);
+      expect(deriveBankId({}, outside, "codex", repo)).toMatch(
+        defaultBank(`coding-agent::${basename(repo)}`)
+      );
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }

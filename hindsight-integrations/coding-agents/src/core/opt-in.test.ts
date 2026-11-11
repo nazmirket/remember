@@ -47,7 +47,7 @@ describe("optInOnly", () => {
     // The whole point of not reusing mapPathToBank: you approve a tree, each repo still gets its
     // own bank rather than being merged into one.
     const cfg = resolveConfig({ optInOnly: true, optInPaths: [join(root, "work")] });
-    expect(deriveBankId(cfg, approved, "codex")).toBe("coding-agent::client-x");
+    expect(deriveBankId(cfg, approved, "codex")).toMatch(/^coding-agent::client-x-[a-f0-9]{16}$/);
   });
 
   it("treats a mapPathToBank entry as opted in", () => {
@@ -227,7 +227,7 @@ describe("optInOnly", () => {
       resolveWorktrees: false,
     });
     expect(isOptedIn(cfg, worktree)).toBe(false);
-    expect(deriveBankId(cfg, worktree, "codex")).toBe("coding-agent::client-x");
+    expect(deriveBankId(cfg, worktree, "codex")).toMatch(/^coding-agent::client-x-[a-f0-9]{16}$/);
   });
 
   it("does not let a bare bankId approve anything", () => {
@@ -244,7 +244,7 @@ describe("optInOnly", () => {
 
     const live = applyBankConfig(cfg, deriveBankId(cfg, approved, "codex"), approved);
     expect(live.cfg.disabled).toBe(false);
-    expect(live.bankId).toBe("coding-agent::client-x");
+    expect(live.bankId).toMatch(/^coding-agent::client-x-[a-f0-9]{16}$/);
   });
 
   it("stays inert when no directory is known and the switch is on", () => {

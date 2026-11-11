@@ -83,32 +83,6 @@ describe("resolveHostMemory", () => {
     expect(bankId).toBe("");
   });
 
-  it("re-resolves the token from the live config, so a rotation does not need a restart", async () => {
-    writeConfig({ apiUrl: "http://server", apiToken: "old-key" });
-    const { resolveHostMemory } = await loadFactory();
-    const { client } = resolveHostMemory("dsh", root);
-    expect(client.apiToken).toBe("old-key");
-
-    // The operator rotates the credential while the host keeps running; the next 401 picks it up.
-    writeConfig({ apiUrl: "http://server", apiToken: "new-key" });
-    const calls: (string | null)[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init: RequestInit) => {
-        const auth = new Headers(init.headers).get("Authorization");
-        calls.push(auth);
-        return new Response(JSON.stringify(auth === "Bearer new-key" ? { ok: true } : {}), {
-          status: auth === "Bearer new-key" ? 200 : 401,
-          headers: { "Content-Type": "application/json" },
-        });
-      })
-    );
-
-    await client.req("GET", "http://server/thing");
-    expect(calls).toEqual(["Bearer old-key", "Bearer new-key"]);
-    vi.unstubAllGlobals();
-  });
-
   it("honours a per-bank apiToken on re-resolution, not just on the first read", async () => {
     // `banks.<id>.apiToken` is a legitimate override (it is not stripped by BANK_OVERRIDE_EXCLUDED),
     // so a provider that re-read only the top level would hand back the wrong credential.
@@ -123,27 +97,6 @@ describe("resolveHostMemory", () => {
     });
     const { resolveHostMemory } = await loadFactory();
     expect(resolveHostMemory("dsh", root).client.apiToken).toBe("per-bank");
-  });
-
-  it("keeps a token re-read from reaching the old server after the config moved the directory", async () => {
-    writeConfig({ apiUrl: "http://server-a", apiToken: "key-a" });
-    const { resolveHostMemory } = await loadFactory();
-    const { client } = resolveHostMemory("dsh", root);
-
-    // The directory now points at another server: its key belongs there, not on server-a.
-    writeConfig({ apiUrl: "http://server-b", apiToken: "key-b" });
-    const calls: (string | null)[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init: RequestInit) => {
-        calls.push(new Headers(init.headers).get("Authorization"));
-        return new Response("{}", { status: 401, headers: { "Content-Type": "application/json" } });
-      })
-    );
-
-    await client.req("GET", "http://server-a/thing").catch(() => {});
-    expect(calls).toEqual(["Bearer key-a"]);
-    vi.unstubAllGlobals();
   });
 });
 

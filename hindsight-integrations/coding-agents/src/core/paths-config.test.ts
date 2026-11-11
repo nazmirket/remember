@@ -37,7 +37,7 @@ describe("paths.<prefix> overrides", () => {
     };
     const client = resolve(raw, join(clientRepo, "src"));
     expect(client.cfg.apiToken).toBe("work-key");
-    expect(client.bankId).toBe("coding-agent::client-x");
+    expect(client.bankId).toMatch(/^coding-agent::client-x-[a-f0-9]{16}$/);
     expect(resolve(raw, otherRepo).cfg.apiToken).toBe("default-key");
   });
 
@@ -46,7 +46,11 @@ describe("paths.<prefix> overrides", () => {
       apiToken: "cloud-key",
       paths: {
         [join(root, "oss")]: { serverMode: "daemon" as const, apiPort: 9177, apiToken: "" },
-        [join(root, "work")]: { apiUrl: "http://self-hosted:8888", apiToken: "work-key" },
+        [join(root, "work")]: {
+          serverMode: "self-hosted" as const,
+          apiUrl: "http://self-hosted:8888",
+          apiToken: "work-key",
+        },
       },
     };
     const local = resolve(raw, otherRepo).cfg;
@@ -56,9 +60,7 @@ describe("paths.<prefix> overrides", () => {
     const work = resolve(raw, clientRepo).cfg;
     expect(work.apiUrl).toBe("http://self-hosted:8888");
     expect(work.apiToken).toBe("work-key");
-    expect(resolve({ ...raw, paths: {} }, clientRepo).cfg.apiUrl).toBe(
-      "https://api.hindsight.vectorize.io"
-    );
+    expect(resolve({ ...raw, paths: {} }, clientRepo).cfg.apiUrl).toBe("http://127.0.0.1:9077");
   });
 
   it("moves a daemon-mode config to Cloud when a path entry leaves daemon mode", () => {
@@ -85,7 +87,7 @@ describe("paths.<prefix> overrides", () => {
     const raw = {
       apiToken: "default-key",
       paths: { [join(root, "work")]: { apiToken: "work-key", retainSessions: false } },
-      banks: { "coding-agent::client-x": { apiToken: "bank-key" } },
+      banks: { [deriveBankId(resolveConfig({}), clientRepo, "codex")]: { apiToken: "bank-key" } },
     };
     const { cfg } = resolve(raw, clientRepo);
     expect(cfg.apiToken).toBe("bank-key");
@@ -107,7 +109,7 @@ describe("paths.<prefix> overrides", () => {
       },
     };
     const client = resolve(raw, clientRepo);
-    expect(client.bankId).toBe("coding-agent::client-x");
+    expect(client.bankId).toMatch(/^coding-agent::client-x-[a-f0-9]{16}$/);
     expect(client.cfg.apiToken).toBe("k");
     expect(resolve(raw, otherRepo).cfg.disabled).toBe(true);
   });

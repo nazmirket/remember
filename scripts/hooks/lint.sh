@@ -125,36 +125,6 @@ fi
 echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
-CP_DIR="$REPO_ROOT/hindsight-control-plane"
-# eslint runs the package's own "lint" script, so CI keeps that script working.
-# It used to go through `npm run lint`; npm alone takes over a second to start,
-# so the script's command runs here the way npm runs it, with node_modules/.bin
-# on PATH.
-# With --fix, eslint re-lints every file that has warnings and ignores its cache,
-# so check from the cache first and only run --fix when there is something to fix.
-# "potentially fixable" is the summary line of eslint's default formatter.
-eslint_task() {
-    local package_json lint_script
-    package_json="$(< package.json)"
-    if [[ ! $package_json =~ \"lint\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
-        echo "hindsight-control-plane/package.json has no \"lint\" script"
-        return 1
-    fi
-    lint_script="${BASH_REMATCH[1]}"
-    local PATH="$PWD/node_modules/.bin:$REPO_ROOT/node_modules/.bin:$PATH"
-    # Content, not mtime: a branch switch rewrites mtimes but rarely the content.
-    local args="--cache --cache-strategy content --cache-location $CACHE_DIR/eslint/"
-    local out
-    if out=$(eval "$lint_script $args" 2>&1) && [[ $out != *"potentially fixable"* ]]; then
-        echo "$out"
-        return 0
-    fi
-    eval "$lint_script --fix $args"
-}
-if changed hindsight-control-plane/; then
-    run_task "eslint" "$CP_DIR" "eslint_task"
-    run_task "prettier" "$CP_DIR" "$(node_bin prettier "$CP_DIR") --write --cache --cache-location $CACHE_DIR/prettier/control-plane src/**/*.{ts,tsx}"
-fi
 if changed hindsight-clients/typescript/; then
     run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "$(prettier_cmd "$REPO_ROOT/hindsight-clients/typescript")"
 fi

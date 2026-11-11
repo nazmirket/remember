@@ -1,9 +1,10 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveConfig } from "./config";
-import { daemonEnv, detectLlm, ensureDaemon, startDaemonDetached } from "./daemon";
+import { daemonEnv, detectLlm, ensureDaemon, hasForkEmbed, startDaemonDetached } from "./daemon";
 
 // A daemon-mode ensure has to clear `preflightDaemon`, which shells out to `uvx` and `cargo`.
 // Neither is guaranteed on a test runner, so stub the subprocess layer; every
@@ -31,10 +32,11 @@ describe("connection modes", () => {
     );
   });
 
-  it("defaults to cloud, leaving today's behaviour unchanged", () => {
+  it("defaults to the local daemon and disables upstream automatic updates", () => {
     const cfg = resolveConfig({});
-    expect(cfg.serverMode).toBe("cloud");
-    expect(cfg.apiUrl).toBe("https://api.hindsight.vectorize.io");
+    expect(cfg.serverMode).toBe("daemon");
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
+    expect(cfg.autoUpdate).toBe(false);
   });
 
   it("self-hosted keeps the configured apiUrl", () => {
@@ -94,12 +96,34 @@ describe("daemonEnv", () => {
     expect(env.HINDSIGHT_API_EMBEDDINGS_PROVIDER).toBe("tei");
     expect(env.UNRELATED).toBeUndefined();
   });
+
+  it("binds locally even when the inherited environment requests a public host", () => {
+    expect(daemonEnv(cfg, { HINDSIGHT_API_HOST: "0.0.0.0" }).HINDSIGHT_API_HOST).toBe("127.0.0.1");
+  });
+});
+
+describe("fork checkout", () => {
+  it("requires both the embed package and the sibling API source", () => {
+    const root = mkdtempSync(join(tmpdir(), "hindsight-fork-"));
+    try {
+      const embed = join(root, "hindsight-embed");
+      mkdirSync(embed);
+      writeFileSync(join(embed, "pyproject.toml"), "");
+      expect(hasForkEmbed(undefined)).toBe(false);
+      expect(hasForkEmbed(embed)).toBe(false);
+      mkdirSync(join(root, "hindsight-api-slim"));
+      writeFileSync(join(root, "hindsight-api-slim", "pyproject.toml"), "");
+      expect(hasForkEmbed(embed)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ensureDaemon", () => {
   // Cloud and self-hosted must not so much as probe a local port.
   it("touches nothing outside daemon mode", async () => {
-    const cfg = resolveConfig({ apiUrl: "https://cloud.example" });
+    const cfg = resolveConfig({ serverMode: "self-hosted", apiUrl: "https://cloud.example" });
     const spawnFn = vi.fn(() => {
       throw new Error("must not spawn");
     });

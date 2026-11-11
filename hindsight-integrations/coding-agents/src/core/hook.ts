@@ -477,6 +477,7 @@ export async function runHook(
   }
   const client = makeClient({
     apiUrl: cfg.apiUrl,
+    forkEmbedPath: cfg.embedPackagePath ?? null,
     apiToken: cfg.apiToken,
     bank: bankId,
     maxParallelRetains: cfg.maxParallelRetains,

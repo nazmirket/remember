@@ -83,7 +83,7 @@ def test_forwarded_cli_uses_selected_config_and_endpoint(
     )
 
 
-@pytest.mark.parametrize("command", ["daemon", "ui"])
+@pytest.mark.parametrize("command", ["daemon"])
 @pytest.mark.parametrize(
     "env_profile,flag,expected",
     [
@@ -128,20 +128,6 @@ def test_daemon_status_displays_the_instance_it_probes(
     assert "http://127.0.0.1:18888" not in output
 
 
-def test_daemon_start_ui_uses_the_selected_profile(profiles: ProfileManager, monkeypatch: pytest.MonkeyPatch) -> None:
-    profiles.set_active_profile("work")
-    monkeypatch.setattr(daemon_client, "is_daemon_running", Mock(return_value=False))
-    ensure_running = Mock(return_value=True)
-    monkeypatch.setattr(daemon_client, "ensure_daemon_running", ensure_running)
-    start_ui = Mock(return_value=True)
-    monkeypatch.setattr(DaemonEmbedManager, "start_ui", start_ui)
-
-    invoke_cli(monkeypatch, ["daemon", "start", "--ui"])
-
-    assert ensure_running.call_args.args[1] == "work"
-    start_ui.assert_called_once_with("work", None, "0.0.0.0")
-
-
 def test_profile_show_honours_explicit_default(
     profiles: ProfileManager, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -153,19 +139,6 @@ def test_profile_show_honours_explicit_default(
     assert result["name"] == "default"
     assert result["source"] == "cli_flag"
     assert result["config"] == str(profiles.resolve_profile_paths("").config)
-
-
-def test_ui_status_uses_the_selected_profiles_port(
-    profiles: ProfileManager, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    profiles.set_active_profile("work")
-    is_running = Mock(return_value=True)
-    monkeypatch.setattr(daemon_client, "is_ui_running", is_running)
-
-    invoke_cli(monkeypatch, ["ui", "status"])
-
-    is_running.assert_called_once_with("work", 29100)
-    assert "29100" in capsys.readouterr().out
 
 
 def test_configure_uses_the_creation_target_even_with_an_env_profile(

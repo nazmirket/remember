@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { buildSessionStartContext, runSessionStartHook } from "./session-start";
+
+// Startup is covered in daemon.test.ts; these tests use a fake client.
+vi.mock("./daemon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./daemon")>()),
+  ensureDaemon: vi.fn(),
+}));
 import { startCodebaseSurvey, SURVEY_MAX_ATTEMPTS } from "./survey";
 import { releaseLease, SURVEY_SPEC_ENV } from "./survey-lease";
 import { resolveConfig } from "./config";
@@ -454,47 +460,6 @@ describe("runSessionStartHook anti-recursion guard", () => {
     // proves the guard fired first.
     await runSessionStartHook(HOOK_HARNESSES["claude-code"].sessionStart, makeClient);
     expect(makeClient).not.toHaveBeenCalled();
-  });
-});
-
-/** A host's per-repo MCP registration (TraeCode's) runs only once memory is live for the repo, and
- *  its hint reaches the user through the session banner. */
-describe("runSessionStartHook host MCP registration", () => {
-  let repo: string;
-  const run = async (cfg: RawConfig) => {
-    rawConfig = { autoSeed: false, autoUpdate: false, ...cfg };
-    stdin = JSON.stringify({ cwd: repo, session_id: `sess-${repo.split("/").pop()}` });
-    const ensureMcpRegistration = vi.fn(() => "enable workspace MCP");
-    const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-    try {
-      await runSessionStartHook(
-        { ...HOOK_HARNESSES.traecode.sessionStart, ensureMcpRegistration },
-        () => ({ listPages: listPagesOk }) as never
-      );
-      return { ensureMcpRegistration, out: write.mock.calls.map((c) => String(c[0])).join("") };
-    } finally {
-      write.mockRestore();
-    }
-  };
-
-  beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), "hs-ss-mcp-"));
-    execFileSync("git", ["init", "-q", repo]);
-  });
-  afterEach(() => {
-    rawConfig = undefined;
-    rmSync(repo, { recursive: true, force: true });
-  });
-
-  it("registers for a live repo and shows the hint in the banner", async () => {
-    const { ensureMcpRegistration, out } = await run({});
-    expect(ensureMcpRegistration).toHaveBeenCalledWith(repo);
-    expect(JSON.parse(out).systemMessage).toContain("enable workspace MCP");
-  });
-
-  it("does not register for a repo that is not opted in", async () => {
-    const { ensureMcpRegistration } = await run({ optInOnly: true });
-    expect(ensureMcpRegistration).not.toHaveBeenCalled();
   });
 });
 

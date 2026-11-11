@@ -12,6 +12,10 @@ const mockProbe = vi.mocked(probeGitLayout);
 const inRepo = (commonDir: string, bare = false) =>
   ({ status: "resolved", commonDir, bare }) as const;
 
+function defaultBank(prefix: string): RegExp {
+  return new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-[0-9a-f]{16}$`);
+}
+
 describe("deriveBankId", () => {
   beforeEach(() => {
     mockProbe.mockReturnValue({ status: "absent" }); // default: not in a git repo
@@ -23,40 +27,48 @@ describe("deriveBankId", () => {
   // The default template is harness-neutral `coding-agent::{gitProject}` (every coding agent shares
   // one bank per repo), so the default cases below carry that prefix.
   it("defaults to coding-agent::<directory basename> outside git", () => {
-    expect(deriveBankId({}, "/home/me/scratch")).toBe("coding-agent::scratch");
+    expect(deriveBankId({}, "/home/me/scratch")).toMatch(defaultBank("coding-agent::scratch"));
   });
 
   it("resolves the MAIN worktree root inside git (worktrees share one bank)", () => {
     mockProbe.mockReturnValue(inRepo("/home/me/dev/myrepo/.git"));
-    expect(deriveBankId({}, "/home/me/dev/myrepo-feature-wt")).toBe("coding-agent::myrepo");
+    expect(deriveBankId({}, "/home/me/dev/myrepo-feature-wt")).toMatch(
+      defaultBank("coding-agent::myrepo")
+    );
   });
 
   it("uses the bare-repo directory name when common-dir is not .git", () => {
     mockProbe.mockReturnValue(inRepo("/srv/git/myrepo.git", true));
-    expect(deriveBankId({}, "/srv/git/myrepo.git")).toBe("coding-agent::myrepo.git");
+    expect(deriveBankId({}, "/srv/git/myrepo.git")).toMatch(
+      defaultBank("coding-agent::myrepo.git")
+    );
   });
 
   it("uses the hub name for a hidden bare repository shared by worktrees", () => {
     mockProbe.mockReturnValue(inRepo("/home/me/myrepo/.bare", true));
-    expect(deriveBankId({}, "/home/me/myrepo/main")).toBe("coding-agent::myrepo");
+    expect(deriveBankId({}, "/home/me/myrepo/main")).toMatch(defaultBank("coding-agent::myrepo"));
   });
 
   it("keeps a hidden non-bare common directory unchanged", () => {
     mockProbe.mockReturnValue(inRepo("/home/me/project/.git-bare", false));
-    expect(deriveBankId({}, "/home/me/project")).toBe("coding-agent::.git-bare");
+    expect(deriveBankId({}, "/home/me/project")).toMatch(defaultBank("coding-agent::.git-bare"));
   });
 
   it("resolveWorktrees=false skips git and uses the directory basename", () => {
     mockProbe.mockReturnValue(inRepo("/home/me/dev/myrepo/.git"));
-    expect(deriveBankId({ resolveWorktrees: false }, "/home/me/dev/myrepo-wt")).toBe(
-      "coding-agent::myrepo-wt"
+    expect(deriveBankId({ resolveWorktrees: false }, "/home/me/dev/myrepo-wt")).toMatch(
+      defaultBank("coding-agent::myrepo-wt")
     );
     expect(mockProbe).not.toHaveBeenCalled();
   });
 
   it("the default bank is harness-neutral — same id regardless of the harness arg", () => {
-    expect(deriveBankId({}, "/home/me/scratch", "claude-code")).toBe("coding-agent::scratch");
-    expect(deriveBankId({}, "/home/me/scratch", "codex")).toBe("coding-agent::scratch");
+    expect(deriveBankId({}, "/home/me/scratch", "claude-code")).toMatch(
+      defaultBank("coding-agent::scratch")
+    );
+    expect(deriveBankId({}, "/home/me/scratch", "codex")).toMatch(
+      defaultBank("coding-agent::scratch")
+    );
   });
 
   it("explicit bankId means static", () => {
@@ -64,8 +76,8 @@ describe("deriveBankId", () => {
   });
 
   it("dynamicBankId=true overrides an explicit bankId", () => {
-    expect(deriveBankId({ bankId: "pinned", dynamicBankId: true }, "/home/me/proj")).toBe(
-      "coding-agent::proj"
+    expect(deriveBankId({ bankId: "pinned", dynamicBankId: true }, "/home/me/proj")).toMatch(
+      defaultBank("coding-agent::proj")
     );
   });
 
@@ -116,8 +128,8 @@ describe("deriveBankId", () => {
     });
 
     it("does not match sibling directories sharing a name prefix", () => {
-      expect(deriveBankId({ mapPathToBank: { [WT]: "mapped" } }, `${WT}-other`)).toBe(
-        "coding-agent::myrepo-other"
+      expect(deriveBankId({ mapPathToBank: { [WT]: "mapped" } }, `${WT}-other`)).toMatch(
+        defaultBank("coding-agent::myrepo-other")
       );
     });
 

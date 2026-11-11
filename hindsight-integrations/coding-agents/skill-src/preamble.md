@@ -12,7 +12,7 @@ explains what happens automatically, which tools you have, and how to configure 
 ## What happens automatically (no action needed)
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
-  `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
+  `↳ memory bank “coding-agent::<repo>-<hash>”`). Worktrees share the main repo's bank.
 - **Ingestion builds itself**: on first open, the bank is seeded from recent commit messages and a
   read-only codebase survey; every session start, a background engine tops it up (new commits, new
   conversations) and keeps 5 pages current. There is NO ingest command to run.
@@ -21,7 +21,7 @@ explains what happens automatically, which tools you have, and how to configure 
   search hits), `recall` (recalled observations), or `none` (nothing injected; the agent
   searches the pages first and reflects only when they are too shallow).
 - **Write-back**: the session transcript is retained into the bank automatically at session end
-  (per-turn on opencode). The user never needs to "save" a conversation.
+  . The user never needs to "save" a conversation.
 
 ## Storing things deliberately
 

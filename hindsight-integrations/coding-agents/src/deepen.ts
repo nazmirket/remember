@@ -122,6 +122,7 @@ async function main() {
     const harness = await getHarness(HARNESS);
     const client = new HindsightClient({
       apiUrl: API_URL,
+      forkEmbedPath: cfg.embedPackagePath ?? null,
       apiToken: API_TOKEN,
       bank: FINAL_BANK!,
       // Names the repository in every seeded page's query, so page synthesis can tell this

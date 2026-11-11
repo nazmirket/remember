@@ -79,7 +79,7 @@ export interface RawConfig {
   embedPackagePath?: string;
   bankId?: string; // EXPLICIT memory bank id — set = static bank; unset = per-repo dynamic (core/bank.ts)
   dynamicBankId?: boolean; // force dynamic resolution even when bankId is set (default: dynamic iff no bankId)
-  bankIdTemplate?: string; // dynamic bank id format (default "coding-agent::{gitProject}" — harness-neutral) —
+  bankIdTemplate?: string; // custom bank ID template; default includes the canonical project identity —
   //   placeholders: {gitProject} {project} {harness} {channel} {user} (see core/bank.ts)
   mapPathToBank?: Record<string, string>; // absolute path -> bank; longest prefix wins; overrides everything
   resolveWorktrees?: boolean; // {gitProject}: worktrees share the main repo's bank (default true)
@@ -589,7 +589,9 @@ function resolveAutoInject(raw: RawConfig): AutoInject {
 export function resolveConfig(raw: RawConfig = {}): Config {
   const serverMode = ["cloud", "self-hosted", "daemon"].includes(raw.serverMode as string)
     ? (raw.serverMode as "cloud" | "self-hosted" | "daemon")
-    : "cloud";
+    : raw.apiUrl
+      ? "self-hosted"
+      : "daemon";
   const apiPort = raw.apiPort || DEFAULT_DAEMON_PORT;
   const pageTrigger = resolvePageTrigger(raw);
   return {
@@ -617,7 +619,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     optInPaths: Array.isArray(raw.optInPaths)
       ? raw.optInPaths.filter((p): p is string => typeof p === "string" && p.trim() !== "")
       : [],
-    harness: raw.harness ?? "opencode",
+    harness: raw.harness ?? "claude-code",
     disabled: raw.disabled ?? false,
     retainSessions: raw.retainSessions ?? true, // write sessions back by default, every harness
     manageBankConfig: raw.manageBankConfig ?? true,
@@ -690,7 +692,8 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     logLevel: ["debug", "info", "warn", "error"].includes(raw.logLevel as string)
       ? (raw.logLevel as "debug" | "info" | "warn" | "error")
       : "info",
-    autoUpdate: raw.autoUpdate ?? true,
+    // A published upstream update would replace the locally built fork runtime.
+    autoUpdate: false,
   };
 }
 

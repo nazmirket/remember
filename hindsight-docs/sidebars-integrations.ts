@@ -32,7 +32,6 @@ const internal = integrations
 // Superseded pages sit in their own section at the end rather than mixed in alphabetically, so the
 // main list is only things we would recommend today. Each one carries a migration banner.
 const current = internal.filter((entry) => entry.category !== 'legacy');
-const legacy = internal.filter((entry) => entry.category === 'legacy');
 
 const docItem = (entry: IntegrationEntry) => ({
   type: 'doc' as const,
@@ -58,13 +57,7 @@ const sidebars: SidebarsConfig = {
         },
       ],
     },
-    {
-      type: 'category',
-      label: 'Legacy',
-      collapsible: true,
-      collapsed: true,
-      items: legacy.map(docItem),
-    },
+
   ],
 };
 

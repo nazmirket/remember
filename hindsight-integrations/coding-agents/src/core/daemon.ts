@@ -1,44 +1,9 @@
-/**
- * Local daemon mode — memory with no server and no Cloud account.
- *
- * `serverMode: "daemon"` runs `hindsight-embed` on this machine and points the plugin at it.
- * Lifecycle is delegated to `@vectorize-io/hindsight-all`, which owns the uvx invocation, profile
- * creation, readiness polling and the macOS Metal/MPS workaround. This module only decides WHEN to
- * start it, and with what environment.
- *
- * Three connection modes, resolved in this order (the same priority the old per-agent Claude Code
- * plugin used in `scripts/lib/daemon.py`):
- *   1. an external API — Cloud or self-hosted; `serverMode` is not "daemon" and nothing here runs
- *   2. a healthy server already on the port — adopted as-is, never restarted, so a daemon started
- *      by an earlier session (or a server the user runs themselves) is reused
- *   3. start the daemon
- *
- * TIMING IS THE CONSTRAINT. A cold start pays for a uvx download plus model load and can take tens
- * of seconds, while the prompt hook has to return in time to not stall the user's turn. Only two
- * points therefore ensure a daemon: SessionStart, before the user has typed anything, and the Stop
- * hook, which has the longest budget and nothing waiting on its result. The prompt path does
- * nothing here at all.
- *
- * EVERY HARNESS NEEDS BOTH POINTS, not just the fresh-process hook ones. The persistent-plugin
- * hosts (opencode, Kilo, Cline, Prime Agent, dsh) run no hook binaries, so they reach these through
- * `RuntimeCore`: `seedIfCold` is their SessionStart and the write-back is their Stop. Missing that
- * is what #3524 reported — dsh in daemon mode never started a daemon, so every `hindsight_*` call
- * failed with ECONNREFUSED until the user ran `daemon-start.js` by hand. `daemon.test.ts` now fails
- * if a harness entrypoint builds a client without reaching one of the two.
- *
- * A daemon that is down is NOT special-cased anywhere downstream. Once the URL is resolved, every
- * mode uses the identical client and the identical error handling: an unreachable local daemon
- * surfaces as the same connection failure (and the same `retain_failed` diagnostic) as an
- * unreachable Cloud or self-hosted server. Skipping work because a local port was closed would have
- * made daemon mode behave differently from the other two for no benefit.
- *
- * There is no stop. One daemon serves every agent and repo on the machine, so ending one session
- * must not cut memory out from under another. Nothing retires it either: the server's idle timeout
- * was removed after it killed in-flight requests (#3903), so `daemonIdleTimeout` is inert.
- */
+/** On-demand lifecycle for the fork-local memory daemon. */
 import { execFileSync, spawn as realSpawn } from "node:child_process";
 import { dirname, join } from "node:path";
+import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import type { Config } from "./config";
 import { USER_AGENT } from "./hindsight";
 import { diag } from "./diag";
@@ -63,6 +28,26 @@ export async function isServerHealthy(baseUrl: string, timeoutMs = 2_000): Promi
   } catch {
     return false;
   }
+}
+
+/** Refuse to reclaim an occupied port, even if the listener is unhealthy. */
+export async function isPortOccupied(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    socket.setTimeout(1000);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(true);
+    });
+  });
 }
 
 /**
@@ -185,12 +170,27 @@ export function daemonEnv(
   for (const [key, value] of Object.entries(env)) {
     if (key.startsWith("HINDSIGHT_API_") && value) out[key] = value;
   }
+  // The local memory service must not inherit an externally exposed bind address.
+  out.HINDSIGHT_API_HOST = "127.0.0.1";
+  // Ignore inherited remote database settings: this profile owns a local pg0 database.
+  const db = `pg0://hindsight-embed-${cfg.daemonProfile.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  out.HINDSIGHT_API_DATABASE_URL = db;
+  out.HINDSIGHT_EMBED_API_DATABASE_URL = db;
   const llm = detectLlm(env);
   if (llm) {
     out.HINDSIGHT_API_LLM_PROVIDER = llm.provider;
     if (llm.apiKey) out.HINDSIGHT_API_LLM_API_KEY = llm.apiKey;
   }
   return out;
+}
+
+/** Require the fork checkout so uv cannot silently launch a published upstream daemon. */
+export function hasForkEmbed(path: string | undefined): boolean {
+  return (
+    !!path &&
+    existsSync(join(path, "pyproject.toml")) &&
+    existsSync(join(path, "..", "hindsight-api-slim", "pyproject.toml"))
+  );
 }
 
 /**
@@ -305,6 +305,10 @@ export async function ensureDaemon(
   }
 
   const attempt = (async () => {
+    if (await isPortOccupied(cfg.apiPort)) {
+      log.warn(harness, `Memory daemon port ${cfg.apiPort} is occupied; not starting`);
+      return;
+    }
     startDaemonDetached(cfg, harness, opts.spawnFn);
     await waitForHealth(cfg.apiUrl, waitMs);
   })();

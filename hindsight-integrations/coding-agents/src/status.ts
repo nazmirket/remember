@@ -33,6 +33,7 @@ const cfg = resolved0.cfg;
 const FINAL_BANK = resolved0.bankId ?? BANK;
 const client = new HindsightClient({
   apiUrl: arg("api-url") ?? cfg.apiUrl,
+  forkEmbedPath: cfg.embedPackagePath ?? null,
   apiToken: arg("api-token") ?? cfg.apiToken,
   bank: FINAL_BANK!,
   maxParallelRetains: cfg.maxParallelRetains,

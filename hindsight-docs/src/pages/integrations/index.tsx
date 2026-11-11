@@ -15,13 +15,8 @@ import {
 } from '@site/src/lib/coding-agent-harnesses';
 import styles from './index.module.css';
 
-/**
- * Pinned above the grid. These three are the ones we want a first-time visitor to see: the umbrella
- * coding-agent plugin, and the two agent harnesses that ship Hindsight as a first-class memory
- * provider — Hermes lists it in its own plugin catalog, so `hermes plugins install hindsight` is
- * the whole setup.
- */
-const FEATURED_IDS = ['coding-agents', 'hermes', 'openclaw'];
+/** Supported coding-agent integration. */
+const FEATURED_IDS = ['coding-agents'];
 
 const SUBMIT_INTEGRATION_URL =
   'https://github.com/vectorize-io/hindsight/issues/new?template=feature_request.yml&title=Integration%3A+';

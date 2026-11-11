@@ -68,7 +68,7 @@ describe("README agent roster", () => {
     const sections = readme();
     const missing = docsRoster()
       .map((h) => h.label)
-      .filter((label) => !sections.includes(`/> ${label}\n`));
+      .filter((label) => !sections.includes(`### ${label}\n`));
     expect(missing).toEqual([]);
   });
 });

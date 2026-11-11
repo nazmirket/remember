@@ -20,7 +20,6 @@ Environment variables:
     HINDSIGHT_EMBED_API_VERSION: Optional. hindsight-api version to use (default: matches embed version).
                                  Note: Only applies when starting daemon. To change version, stop daemon first.
     HINDSIGHT_EMBED_CLI_VERSION: Optional. hindsight CLI version to install (default: {embed_version}).
-    HINDSIGHT_EMBED_CONTROL_PORT: Optional. Port for the control center web app (default: 7878).
 """
 
 import argparse
@@ -507,21 +506,6 @@ def do_daemon(args, config: dict, logger):
             return 0
 
         if daemon_client.ensure_daemon_running(config, profile):
-            # Start UI if --ui flag was passed
-            if getattr(args, "ui", False):
-                from .daemon_embed_manager import DaemonEmbedManager
-
-                # main() already resolved the profile the daemon was started with
-                manager = DaemonEmbedManager()
-                ui_started = manager.start_ui(profile, None, "0.0.0.0")
-                if not ui_started:
-                    console.print(
-                        Panel(
-                            Text("Daemon is running but UI failed to start", style="yellow"),
-                            title="[bold yellow]UI Warning[/bold yellow]",
-                            border_style="yellow",
-                        )
-                    )
             return 0
         else:
             console.print(
@@ -670,168 +654,6 @@ def do_daemon(args, config: dict, logger):
         return 1
 
 
-def do_ui(args, config: dict, logger):
-    """Handle UI subcommands."""
-    from . import daemon_client
-    from .profile_manager import ProfileManager
-
-    profile = args.profile
-    ui_port = getattr(args, "port", None)
-    hostname = getattr(args, "hostname", "0.0.0.0")
-
-    # Resolve default UI port (from the profile's .env, else API + offset)
-    pm = ProfileManager()
-    paths = pm.resolve_profile_paths(profile)
-    default_ui_port = paths.ui_port
-
-    if args.ui_command == "start":
-        from rich.console import Console
-        from rich.panel import Panel
-        from rich.text import Text
-
-        console = Console()
-
-        effective_port = ui_port or default_ui_port
-
-        if daemon_client.is_ui_running(profile, effective_port):
-            title = (
-                f"[bold yellow]UI Already Running[/bold yellow] [dim]({profile or 'default'} @ :{effective_port})[/dim]"
-            )
-            console.print(
-                Panel(
-                    Text("UI is already running", style="yellow"),
-                    title=title,
-                    border_style="yellow",
-                )
-            )
-            return 0
-
-        # Ensure daemon is running first
-        if not daemon_client.is_daemon_running(profile):
-            console.print("[dim]Daemon not running, starting it first...[/dim]")
-            if not daemon_client.ensure_daemon_running(config, profile):
-                console.print(
-                    Panel(
-                        Text("Failed to start daemon (required for UI)", style="red"),
-                        title="[bold red]✗ Error[/bold red]",
-                        border_style="red",
-                    )
-                )
-                return 1
-
-        if daemon_client.start_ui(profile, ui_port, hostname):
-            return 0
-        else:
-            return 1
-
-    elif args.ui_command == "stop":
-        from rich.console import Console
-        from rich.panel import Panel
-        from rich.text import Text
-
-        console = Console()
-        effective_port = ui_port or default_ui_port
-
-        if not daemon_client.is_ui_running(profile, effective_port):
-            title = f"[bold]UI Status[/bold] [dim]({profile or 'default'})[/dim]"
-            console.print(
-                Panel(
-                    Text("UI is not running", style="dim"),
-                    title=title,
-                    border_style="dim",
-                )
-            )
-            return 0
-
-        if daemon_client.stop_ui(profile, ui_port):
-            title = f"[bold green]✓ UI Stopped[/bold green] [dim]({profile or 'default'})[/dim]"
-            console.print(
-                Panel(
-                    Text("UI stopped successfully", style="green"),
-                    title=title,
-                    border_style="green",
-                )
-            )
-            return 0
-        else:
-            console.print(
-                Panel(
-                    Text("Failed to stop UI", style="red"),
-                    title="[bold red]✗ Error[/bold red]",
-                    border_style="red",
-                )
-            )
-            return 1
-
-    elif args.ui_command == "status":
-        from rich.console import Console
-        from rich.panel import Panel
-        from rich.text import Text
-
-        console = Console()
-        effective_port = ui_port or default_ui_port
-
-        if daemon_client.is_ui_running(profile, effective_port):
-            status_text = Text()
-            status_text.append("UI is running\n\n", style="green bold")
-            status_text.append("  URL: ", style="dim")
-            # localhost, not a loopback literal: the UI can be bound to ::1 only.
-            status_text.append(f"http://localhost:{effective_port}\n", style="cyan")
-            status_text.append("  Logs: ", style="dim")
-            status_text.append(f"{paths.ui_log}", style="")
-
-            title = f"[bold green]✓ UI Running[/bold green] [dim]({profile or 'default'} @ :{effective_port})[/dim]"
-            console.print(
-                Panel(
-                    status_text,
-                    title=title,
-                    border_style="green",
-                    padding=(1, 2),
-                )
-            )
-            return 0
-        else:
-            title = f"[bold]UI Status[/bold] [dim]({profile or 'default'})[/dim]"
-            console.print(
-                Panel(
-                    Text("UI is not running", style="dim"),
-                    title=title,
-                    border_style="dim",
-                )
-            )
-            return 1
-
-    elif args.ui_command == "logs":
-        ui_log_path = paths.ui_log
-        if not ui_log_path.exists():
-            print("No UI logs found", file=sys.stderr)
-            print(f"  Expected at: {ui_log_path}")
-            return 1
-
-        if args.follow:
-            import subprocess
-
-            try:
-                subprocess.run(["tail", "-f", str(ui_log_path)])
-            except KeyboardInterrupt:
-                pass
-            return 0
-        else:
-            try:
-                with open(ui_log_path, encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-                    for line in lines[-args.lines :]:
-                        print(line, end="")
-                return 0
-            except Exception as e:
-                print(f"Error reading logs: {e}", file=sys.stderr)
-                return 1
-
-    else:
-        print("Usage: hindsight-embed ui {start|stop|status|logs}", file=sys.stderr)
-        return 1
-
-
 def _do_configure_profile_with_env(profile_name: str, port: int | None, env_vars: list[str]) -> int:
     """Configure a named profile with environment variables (non-interactive).
 
@@ -926,124 +748,6 @@ def _do_configure_profile_interactive(profile_name: str, port: int | None) -> in
 
     # Use the same interactive flow as default profile but save to named profile
     return _do_configure_interactive(profile_name, port)
-
-
-def do_control(args) -> int:
-    """Handle control-center subcommands (start/stop/status/logs).
-
-    The control center is a persistent, localhost-only web app that writes
-    profile config (the LLM wizard) and supervises the daemon. It runs as its
-    own detached process, so it survives daemon restarts.
-    """
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.text import Text
-
-    from .control_center import (
-        control_status,
-        resolve_control_port,
-        start_control_center,
-        stop_control_center,
-    )
-    from .control_center.lifecycle import log_file
-
-    console = Console()
-    port = getattr(args, "port", None) or resolve_control_port()
-    command = args.control_command
-
-    if command == "start":
-        result = start_control_center(port, open_browser=not getattr(args, "no_open", False))
-        if not result.ok:
-            console.print(
-                Panel(
-                    Text(result.message, style="red"), title="[bold red]✗ Control Center[/bold red]", border_style="red"
-                )
-            )
-            return 1
-        body = Text()
-        body.append(
-            "Control center already running\n\n" if result.already_running else "Control center started\n\n",
-            style="green bold",
-        )
-        body.append("  Open: ", style="dim")
-        body.append(f"{result.url}\n", style="cyan")
-        body.append("  Logs: ", style="dim")
-        body.append(str(log_file()), style="")
-        console.print(
-            Panel(
-                body,
-                title=f"[bold green]✓ Control Center[/bold green] [dim](:{port})[/dim]",
-                border_style="green",
-                padding=(1, 2),
-            )
-        )
-        return 0
-
-    if command == "stop":
-        if stop_control_center(port):
-            console.print(
-                Panel(
-                    Text("Control center stopped", style="green"),
-                    title="[bold green]✓ Control Center[/bold green]",
-                    border_style="green",
-                )
-            )
-            return 0
-        console.print(
-            Panel(
-                Text("Failed to stop control center", style="red"),
-                title="[bold red]✗ Error[/bold red]",
-                border_style="red",
-            )
-        )
-        return 1
-
-    if command == "status":
-        status = control_status(port)
-        if status.running:
-            body = Text()
-            body.append("Control center is running\n\n", style="green bold")
-            body.append("  URL: ", style="dim")
-            body.append(f"http://localhost:{status.port}\n", style="cyan")
-            console.print(
-                Panel(
-                    body,
-                    title=f"[bold green]✓ Control Center[/bold green] [dim](:{status.port})[/dim]",
-                    border_style="green",
-                    padding=(1, 2),
-                )
-            )
-            return 0
-        console.print(
-            Panel(
-                Text("Control center is not running", style="dim"),
-                title="[bold]Control Center[/bold]",
-                border_style="dim",
-            )
-        )
-        return 1
-
-    if command == "logs":
-        log_path = log_file()
-        if not log_path.exists():
-            print("No control center logs found", file=sys.stderr)
-            print(f"  Expected at: {log_path}")
-            return 1
-        if getattr(args, "follow", False):
-            import subprocess
-
-            try:
-                subprocess.run(["tail", "-f", str(log_path)])
-            except KeyboardInterrupt:
-                pass
-            return 0
-        with open(log_path, encoding="utf-8", errors="replace") as f:
-            for line in f.readlines()[-getattr(args, "lines", 50) :]:
-                print(line, end="")
-        return 0
-
-    print("Usage: hindsight-embed control {start|stop|status|logs}", file=sys.stderr)
-    return 1
 
 
 def do_profile_command(args: list[str]) -> int:
@@ -1471,11 +1175,6 @@ def main() -> None:
                 action="append",
                 help="Environment variable (KEY=VALUE, can be repeated)",
             )
-            parser.add_argument(
-                "--web",
-                action="store_true",
-                help="Launch the browser-based control center wizard instead of the terminal prompts",
-            )
             args = parser.parse_args(remaining_args[1:])  # Skip 'configure' itself
 
             # If --profile was consumed by parent_parser, use global_profile
@@ -1483,11 +1182,6 @@ def main() -> None:
                 args.profile = global_profile
 
             logger = setup_logging(False)
-            if getattr(args, "web", False):
-                # Delegate to the control center: a persistent local web UI
-                # that writes config and supervises the daemon.
-                control_args = argparse.Namespace(control_command="start", port=None, no_open=False)
-                sys.exit(do_control(control_args))
             exit_code = do_configure(args)
             sys.exit(exit_code)
 
@@ -1507,8 +1201,7 @@ def main() -> None:
             # Parse daemon subcommand (profile already extracted globally)
             parser = argparse.ArgumentParser(prog="hindsight-embed daemon")
             subparsers = parser.add_subparsers(dest="daemon_command")
-            start_parser = subparsers.add_parser("start", help="Start the daemon")
-            start_parser.add_argument("--ui", action="store_true", help="Also start the web UI after daemon is ready")
+            subparsers.add_parser("start", help="Start the daemon")
             subparsers.add_parser("stop", help="Stop the daemon")
             subparsers.add_parser("status", help="Check daemon status")
             logs_parser = subparsers.add_parser("logs", help="View daemon logs")
@@ -1521,52 +1214,6 @@ def main() -> None:
             config = get_config()
             exit_code = do_daemon(args, config, logger)
             sys.exit(exit_code)
-
-        # Handle UI subcommands
-        if command == "ui":
-            parser = argparse.ArgumentParser(prog="hindsight-embed ui")
-            subparsers = parser.add_subparsers(dest="ui_command")
-            start_parser = subparsers.add_parser("start", help="Start the UI")
-            start_parser.add_argument("--port", type=int, help="Port for the UI (default: daemon_port + 10000)")
-            start_parser.add_argument(
-                "--hostname", "-H", default="0.0.0.0", help="Hostname to bind to (default: 0.0.0.0)"
-            )
-            stop_parser = subparsers.add_parser("stop", help="Stop the UI")
-            stop_parser.add_argument("--port", type=int, help="Port the UI is running on")
-            status_parser = subparsers.add_parser("status", help="Check UI status")
-            status_parser.add_argument("--port", type=int, help="Port to check")
-            logs_parser = subparsers.add_parser("logs", help="View UI logs")
-            logs_parser.add_argument("--follow", "-f", action="store_true")
-            logs_parser.add_argument("--lines", "-n", type=int, default=50)
-
-            args = parser.parse_args(remaining_args[1:])
-            args.profile = resolved_profile
-            logger = setup_logging(False)
-            config = get_config()
-            exit_code = do_ui(args, config, logger)
-            sys.exit(exit_code)
-
-        # Handle control-center subcommands
-        if command == "control":
-            parser = argparse.ArgumentParser(prog="hindsight-embed control")
-            subparsers = parser.add_subparsers(dest="control_command")
-            start_parser = subparsers.add_parser("start", help="Start the control center web app")
-            start_parser.add_argument("--port", type=int, help="Port for the control center (default: 7878)")
-            start_parser.add_argument("--no-open", action="store_true", help="Don't open the browser automatically")
-            stop_parser = subparsers.add_parser("stop", help="Stop the control center")
-            stop_parser.add_argument("--port", type=int, help="Port the control center is running on")
-            status_parser = subparsers.add_parser("status", help="Check control center status")
-            status_parser.add_argument("--port", type=int, help="Port to check")
-            logs_parser = subparsers.add_parser("logs", help="View control center logs")
-            logs_parser.add_argument("--follow", "-f", action="store_true")
-            logs_parser.add_argument("--lines", "-n", type=int, default=50)
-
-            args = parser.parse_args(remaining_args[1:])
-            if not args.control_command:
-                parser.print_help()
-                sys.exit(1)
-            setup_logging(False)
-            sys.exit(do_control(args))
 
         # Handle --help / -h
         if command in ("--help", "-h"):
@@ -1617,18 +1264,6 @@ Daemon management:
     daemon stop            Stop the daemon
     daemon status          Check daemon status
     daemon logs [-f] [-n]  View daemon logs
-
-UI (control plane):
-    ui start [--port PORT] [--hostname HOST]  Start the web UI (default port: daemon_port + 10000)
-    ui stop [--port PORT]                     Stop the web UI
-    ui status [--port PORT]                   Check UI status
-    ui logs [-f] [-n]                         View UI logs
-
-Control center (config wizard + daemon supervisor):
-    control start [--port PORT] [--no-open]   Start the local control center (default port: 7878)
-    control stop [--port PORT]                Stop the control center
-    control status [--port PORT]              Check control center status
-    control logs [-f] [-n]                    View control center logs
 
 CLI commands (forwarded to hindsight-cli):
     memory retain <bank> <content>   Store a memory

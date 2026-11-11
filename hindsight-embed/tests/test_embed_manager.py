@@ -307,37 +307,8 @@ def test_register_profile_calls_create_when_api_keys_present():
     manager._profile_manager.create_profile.assert_called_once_with(
         "myprofile",
         8100,
-        {"HINDSIGHT_API_LLM_PROVIDER": "openai", "HINDSIGHT_API_LLM_API_KEY": "sk-123"},
+        {"HINDSIGHT_API_LLM_PROVIDER": "openai"},
     )
-
-
-def test_find_ui_command_uses_npx_yes_flag_when_npx_not_on_path(monkeypatch):
-    """When npx is not on PATH, fall back to a bare `npx -y` command so the
-    surrounding FileNotFoundError handler can report a clean install hint."""
-    manager = DaemonEmbedManager()
-
-    with patch("pathlib.Path.exists", return_value=False), patch("shutil.which", return_value=None):
-        assert manager._find_ui_command("9.9.9") == [
-            "npx",
-            "-y",
-            "@vectorize-io/hindsight-control-plane@9.9.9",
-        ]
-
-
-def test_find_ui_command_resolves_npx_absolute_path_with_yes_flag(monkeypatch):
-    """When npx is on PATH, use the resolved absolute path (Windows detached
-    processes don't always inherit PATH — see embed_manager._find_ui_command).
-    Either way, `-y` must be set so first-run installs don't block on a prompt."""
-    manager = DaemonEmbedManager()
-
-    with patch("pathlib.Path.exists", return_value=False), patch("shutil.which", return_value="/usr/local/bin/npx"):
-        cmd = manager._find_ui_command("9.9.9")
-
-    assert cmd == [
-        "/usr/local/bin/npx",
-        "-y",
-        "@vectorize-io/hindsight-control-plane@9.9.9",
-    ]
 
 
 def test_find_api_command_prefers_installed_binary_over_uvx(tmp_path, monkeypatch):
@@ -685,37 +656,6 @@ def test_listening_pids_windows_hides_netstat_console(monkeypatch):
     assert calls[0][1]["creationflags"] == 0x08000000
 
 
-def test_stop_ui_kills_recorded_and_configured_ports(tmp_path, monkeypatch):
-    """After a UI-port change, stop_ui must kill BOTH the recorded (old, actually
-    running) port and the configured (new) port — otherwise the old UI orphans."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-
-    manager = DaemonEmbedManager()
-    paths = manager._profile_manager.resolve_profile_paths("")  # default profile
-    manager._record_ui_port(paths, 9000)  # UI was actually started on 9000
-    assert manager._ui_port_file(paths).exists()
-
-    killed = []
-    monkeypatch.setattr(
-        DaemonEmbedManager,
-        "_listening_pids",
-        staticmethod(lambda port: {9000: [111], 9001: [222]}.get(port, [])),
-    )
-    monkeypatch.setattr(
-        DaemonEmbedManager,
-        "_process_command_line",
-        staticmethod(lambda pid: "next-server (v16.2.11)"),
-    )
-    monkeypatch.setattr(DaemonEmbedManager, "_kill_process", staticmethod(lambda pid: killed.append(pid) or True))
-    monkeypatch.setattr(manager, "_is_port_in_use", lambda port: False)
-
-    # configured port is now 9001 (changed); recorded is still 9000
-    assert manager.stop_ui("", ui_port=9001) is True
-    assert sorted(killed) == [111, 222]  # both old and new killed
-    assert not manager._ui_port_file(paths).exists()
-
-
 def test_register_profile_preserves_existing_embed_keys(tmp_path, monkeypatch):
     """_register_profile rewrites the .env on daemon start; it must merge the
     existing non-API keys (UI port, idle timeout, ...) forward instead of
@@ -734,7 +674,7 @@ def test_register_profile_preserves_existing_embed_keys(tmp_path, monkeypatch):
 
     env = (tmp_path / ".hindsight" / "profiles" / "p.env").read_text()
     assert "HINDSIGHT_EMBED_CP_PORT=25000" in env  # preserved, not wiped
-    assert "HINDSIGHT_API_LLM_API_KEY=sk-x" in env
+    assert "HINDSIGHT_API_LLM_API_KEY=sk-x" not in env
 
 
 def test_component_version_resolution(tmp_path, monkeypatch):
@@ -759,56 +699,6 @@ def test_component_version_resolution(tmp_path, monkeypatch):
         "p", {"HINDSIGHT_API_LLM_PROVIDER": "openai", "HINDSIGHT_EMBED_CP_VERSION": "1.2.3"}
     )
     assert manager._component_version("p", "HINDSIGHT_EMBED_CP_VERSION") == "1.2.3"
-
-
-def test_is_ui_running_detects_ipv6_only_ui(tmp_path, monkeypatch):
-    """Regression for #3527: `--hostname localhost` binds ::1 only.
-
-    The old IPv4-only probe got ECONNREFUSED and reported a healthy control
-    plane as down, so `ui start` always timed out and `ui status` lied.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    manager = DaemonEmbedManager()
-
-    requested = []
-
-    # A ::1 listener is not guaranteed on CI hosts, so the probe is stood in for
-    # here; the probe's own transport is covered by test_http_probe.py.
-    def fake_probe(url, **kwargs):
-        requested.append(url)
-        if url.startswith("http://[::1]:"):
-            return ProbeResponse(status_code=200, text="")
-        return None  # connection refused
-
-    monkeypatch.setattr("hindsight_embed.daemon_embed_manager.probe_get", fake_probe)
-
-    assert manager.is_ui_running("hermes", 19177) is True
-    assert requested == [
-        "http://127.0.0.1:19177/api/health",
-        "http://[::1]:19177/api/health",
-    ]
-
-
-def test_is_ui_running_false_when_no_loopback_answers(tmp_path, monkeypatch):
-    """Both families refused — the UI really is down."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    manager = DaemonEmbedManager()
-
-    requested = []
-
-    def refused(url, **kwargs):
-        requested.append(url)
-        return None
-
-    monkeypatch.setattr("hindsight_embed.daemon_embed_manager.probe_get", refused)
-
-    assert manager.is_ui_running("hermes", 19177) is False
-    assert requested == [
-        "http://127.0.0.1:19177/api/health",
-        "http://[::1]:19177/api/health",
-    ]
 
 
 def test_is_port_in_use_checks_both_loopback_families(monkeypatch):
@@ -872,12 +762,7 @@ def test_reclaim_probe_waits_long_enough_for_a_busy_daemon(monkeypatch):
 
 
 def test_liveness_probes_stay_short(tmp_path, monkeypatch):
-    """The "is it up?" probes must not inherit the reclaim budget.
-
-    The control center's delete handler asks is_running once and the UI probe
-    once per loopback family. At the 10s reclaim budget that path exceeded the
-    5s default client timeout on Windows and the request never came back.
-    """
+    """The daemon liveness probe must not inherit the longer reclaim budget."""
     from hindsight_embed import daemon_embed_manager
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -888,17 +773,10 @@ def test_liveness_probes_stay_short(tmp_path, monkeypatch):
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.probe_get", probe)
 
     assert manager.is_running("hermes") is True
-    assert manager.is_ui_running("hermes", 19177) is True
-
-    assert probe.reads == [2.0, 2.0]
+    assert probe.reads == [2.0]
     assert all(c == daemon_embed_manager.PROBE_CONNECT_TIMEOUT for c in probe.connects)
 
-    # An address that swallows the SYN hangs in connect, not in read, so the
-    # connect cap is what bounds the delete handler's three serial probes
-    # (daemon + one per loopback family). At 1s each that is 3s, below the 5s
-    # default client timeout — and below the 4s the two uncapped 2s probes
-    # could reach before this change.
-    assert daemon_embed_manager.PROBE_CONNECT_TIMEOUT * 3 < 5.0
+    assert daemon_embed_manager.PROBE_CONNECT_TIMEOUT < 5.0
 
 
 # ── #4344: the probe's decode is pinned, not left to the locale ──────────────

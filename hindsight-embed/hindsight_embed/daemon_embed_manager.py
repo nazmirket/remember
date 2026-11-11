@@ -121,11 +121,6 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 # ours. Selecting the victim purely by "who holds the port" killed unrelated
 # services that happened to be on the same port (issue #3520).
 DAEMON_PROCESS_MARKERS = ("hindsight-api", "hindsight_api")
-# The control plane runs as `npx @vectorize-io/hindsight-control-plane` (or
-# `node .../hindsight-control-plane/bin/cli.js` in the monorepo), but Next.js
-# rewrites argv to "next-server (vX.Y.Z)" once it is serving, so the package
-# name is not always still visible in the command line.
-UI_PROCESS_MARKERS = ("hindsight-control-plane", "next-server", "next start")
 
 # Deadline for the short read-only probes (netstat, ps, wmic, PowerShell) used to
 # identify processes. Five seconds is ample for the POSIX ones, which read procfs
@@ -1206,11 +1201,16 @@ class DaemonEmbedManager(EmbedManager):
     def _register_profile(self, profile: str, port: int, config: dict) -> None:
         """Register a named profile in metadata so it's discoverable by the CLI.
 
-        Only saves HINDSIGHT_API_* config keys (not internal daemon keys).
+        Saves non-secret HINDSIGHT_API_* settings. Credentials remain in the
+        process environment unless explicitly configured in the profile.
         Silently ignores errors to avoid blocking daemon startup.
         """
         try:
-            api_config = {k: v for k, v in config.items() if k.startswith("HINDSIGHT_API_")}
+            api_config = {
+                k: v
+                for k, v in config.items()
+                if k.startswith("HINDSIGHT_API_") and not re.search(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", k, re.I)
+            }
             if not api_config:
                 return
             # Additive: seed keys the profile doesn't have yet, never overwrite
@@ -1227,243 +1227,6 @@ class DaemonEmbedManager(EmbedManager):
             self._profile_manager.create_profile(profile, port, merged)
         except Exception as e:
             logger.debug(f"Failed to register profile '{profile}' in metadata: {e}")
-
-    def _find_ui_command(self, cp_version: str) -> list[str]:
-        """Find the command to run the control plane UI (cp_version used only for the npx fallback)."""
-        import shutil
-
-        # Check if we're in development mode (monorepo)
-        dev_cp_path = Path(__file__).parent.parent.parent / "hindsight-control-plane"
-        cli_js = dev_cp_path / "bin" / "cli.js"
-        if cli_js.exists():
-            return ["node", str(cli_js)]
-
-        # Use npx to run the published control plane package (version resolved by the caller).
-        # `npx` prompts before installing missing packages on first run unless `-y` is set.
-        # The UI starts in the background with stdout/stderr redirected to a log file, so an
-        # interactive prompt would be invisible to users and the health-check loop would time out.
-        # On Windows, detached processes may not inherit the parent's PATH, so resolve the
-        # absolute path to npx to avoid "Command not found" errors.
-        npx_path = shutil.which("npx")
-        if npx_path is None:
-            # Fallback to bare command so the FileNotFoundError handler can report it cleanly
-            return ["npx", "-y", f"@vectorize-io/hindsight-control-plane@{cp_version}"]
-        return [npx_path, "-y", f"@vectorize-io/hindsight-control-plane@{cp_version}"]
-
-    def get_ui_url(self, profile: str, ui_port: int | None = None) -> str:
-        """Get the URL for the UI serving this profile (callers render it for display)."""
-        if ui_port is None:
-            paths = self._profile_manager.resolve_profile_paths(profile)
-            ui_port = paths.ui_port
-        return f"http://0.0.0.0:{ui_port}"
-
-    def is_ui_running(self, profile: str, ui_port: int | None = None) -> bool:
-        """Check if the UI is running and responsive."""
-        return self._reachable_ui_host(profile, ui_port) is not None
-
-    def _reachable_ui_host(self, profile: str, ui_port: int | None = None) -> str | None:
-        """Loopback host on which the UI answers /api/health, or None.
-
-        The UI is probed on every loopback family rather than on 127.0.0.1
-        alone: Next.js started with `--hostname localhost` binds ::1 only, so
-        the IPv4 probe refused the connection and `ui start`/`ui status`
-        reported a healthy control plane as down (issue #3527).
-        """
-        if ui_port is None:
-            ui_port = self._profile_manager.resolve_profile_paths(profile).ui_port
-        for host in LOOPBACK_HOSTS:
-            # IPv6 literals have to be bracketed in a URL authority.
-            base = f"http://[{host}]:{ui_port}" if ":" in host else f"http://{host}:{ui_port}"
-            response = _probe(f"{base}/api/health", LIVENESS_PROBE_TIMEOUT)
-            if response is not None and response.status_code == 200:
-                return host
-        return None
-
-    @staticmethod
-    def _ui_port_file(paths) -> Path:
-        """Path of the file recording the UI's actually-bound port (so stop/restart
-        can find it even after the configured port changed). e.g. <name>.ui.port."""
-        return paths.ui_log.with_suffix(".port")
-
-    def _read_recorded_ui_port(self, paths) -> int | None:
-        f = self._ui_port_file(paths)
-        if not f.exists():
-            return None
-        try:
-            return int(f.read_text().strip())
-        except (ValueError, OSError):
-            return None
-
-    def _record_ui_port(self, paths, port: int) -> None:
-        try:
-            self._ui_port_file(paths).write_text(str(port))
-        except OSError:
-            pass
-
-    def start_ui(self, profile: str, ui_port: int | None = None, hostname: str = "0.0.0.0") -> bool:
-        """Start the control plane UI in background.
-
-        Args:
-            profile: Profile name.
-            ui_port: Port for the UI. Defaults to daemon_port + 10000.
-            hostname: Hostname to bind to. Defaults to 0.0.0.0.
-
-        Returns:
-            True if UI started successfully.
-        """
-        paths = self._profile_manager.resolve_profile_paths(profile)
-        if ui_port is None:
-            ui_port = paths.ui_port
-
-        if self.is_ui_running(profile, ui_port):
-            logger.debug(f"UI already running for profile '{profile}' on port {ui_port}")
-            self._record_ui_port(paths, ui_port)
-            return True
-
-        profile_label = f"profile '{profile}'" if profile else "default profile"
-        api_url = self.get_url(profile)
-        ui_log = paths.ui_log
-
-        # Build environment
-        env = os.environ.copy()
-        env["PORT"] = str(ui_port)
-        env["HOSTNAME"] = hostname
-        env["HINDSIGHT_CP_DATAPLANE_API_URL"] = api_url
-
-        # Create log directory
-        ui_log.parent.mkdir(parents=True, exist_ok=True)
-
-        # Build command
-        cmd = self._find_ui_command(self._component_version(profile, "HINDSIGHT_EMBED_CP_VERSION")) + [
-            "--port",
-            str(ui_port),
-            "--hostname",
-            hostname,
-            "--api-url",
-            api_url,
-        ]
-
-        try:
-            with open(ui_log, "wb") as log_file:
-                subprocess.Popen(cmd, env=env, **_detach_popen_kwargs(log_file))
-
-            # Wait for UI to be ready
-            start_time = time.time()
-            title = f"[bold cyan]Starting UI[/bold cyan] [dim]({profile or 'default'} @ :{ui_port})[/dim]"
-            log_lines = [f"Starting UI for {profile_label}...", ""]
-
-            with Live(console=console, auto_refresh=False) as live:
-                content = Text("\n".join(log_lines), style="dim")
-                panel = Panel(content, title=title, border_style="cyan", padding=(1, 2))
-                live.update(panel)
-                live.refresh()
-
-                while time.time() - start_time < 30:
-                    if self._reachable_ui_host(profile, ui_port) is not None:
-                        self._record_ui_port(paths, ui_port)
-                        # "localhost" rather than a loopback literal: the UI may
-                        # have bound ::1 only (issue #3527), and name resolution
-                        # covers both families for whoever opens the link.
-                        log_lines.append(f"✓ UI started at http://localhost:{ui_port}")
-                        log_lines.append(f"Logs: {ui_log}")
-                        content = Text("\n".join(log_lines), style="dim")
-                        success_title = (
-                            f"[bold green]✓ UI Started[/bold green] [dim]({profile or 'default'} @ :{ui_port})[/dim]"
-                        )
-                        panel = Panel(content, title=success_title, border_style="green", padding=(1, 2))
-                        live.update(panel)
-                        live.refresh()
-                        console.print()
-                        return True
-
-                    elapsed = int(time.time() - start_time)
-                    status_msg = f"⏳ Waiting for UI... ({elapsed}s elapsed)"
-                    if log_lines and log_lines[-1].startswith("⏳"):
-                        log_lines[-1] = status_msg
-                    else:
-                        log_lines.append(status_msg)
-
-                    content = Text("\n".join(log_lines), style="dim")
-                    panel = Panel(content, title=title, border_style="cyan", padding=(1, 2))
-                    live.update(panel)
-                    live.refresh()
-                    time.sleep(0.5)
-
-            # Timeout
-            console.print(
-                Panel(
-                    Text(f"UI failed to start (timeout)\n\nSee full log: {ui_log}", style="dim"),
-                    title=f"[bold red]✗ UI Failed (Timeout)[/bold red] [dim](:{ui_port})[/dim]",
-                    border_style="red",
-                    padding=(1, 2),
-                )
-            )
-            console.print()
-            return False
-
-        except FileNotFoundError:
-            error_msg = (
-                f"Command not found: {cmd[0]}\nFull command: {' '.join(cmd)}\n\nInstall Node.js and npx to run the UI."
-            )
-            console.print(
-                Panel(
-                    Text(error_msg, style="red"),
-                    title="[bold red]✗ Command Not Found[/bold red]",
-                    border_style="red",
-                    padding=(1, 2),
-                )
-            )
-            console.print()
-            return False
-        except Exception as e:
-            error_msg = f"Failed to start UI: {e}\n\nCommand: {' '.join(cmd)}\nLog file: {ui_log}"
-            console.print(
-                Panel(
-                    Text(error_msg, style="red"),
-                    title="[bold red]✗ UI Startup Error[/bold red]",
-                    border_style="red",
-                    padding=(1, 2),
-                )
-            )
-            console.print()
-            return False
-
-    def stop_ui(self, profile: str, ui_port: int | None = None) -> bool:
-        """Stop the UI for this profile.
-
-        Args:
-            profile: Profile name.
-            ui_port: Port the UI is running on. Defaults to daemon_port + 10000.
-
-        Returns:
-            True if stopped successfully.
-        """
-        paths = self._profile_manager.resolve_profile_paths(profile)
-        configured = paths.ui_port if ui_port is None else ui_port
-
-        # Kill the UI on both the configured port AND the actually-recorded port.
-        # They differ when the UI port was changed while the old UI kept running
-        # on the previous port — otherwise that old process is orphaned.
-        recorded = self._read_recorded_ui_port(paths)
-        targets = {configured}
-        if recorded is not None:
-            targets.add(recorded)
-
-        for port in targets:
-            pid = self._owned_pid_on_port(port, UI_PROCESS_MARKERS, "control plane UI")
-            if pid is not None:
-                logger.debug(f"Found UI PID {pid} on port {port}")
-                self._kill_process(pid)
-
-        self._ui_port_file(paths).unlink(missing_ok=True)
-
-        # Wait until nothing on any target port is still listening.
-        for _ in range(30):
-            if not any(self._is_port_in_use(p) for p in targets):
-                return True
-            time.sleep(0.1)
-
-        return not any(self._is_port_in_use(p) for p in targets)
 
     def ensure_running(self, config: dict, profile: str, extra_args: list[str] | None = None) -> bool:
         """

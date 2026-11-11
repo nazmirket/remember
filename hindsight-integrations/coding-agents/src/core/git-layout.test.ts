@@ -69,7 +69,9 @@ describe("git layout resolution", () => {
     const path = process.env.PATH;
     process.env.PATH = "";
     try {
-      expect(deriveBankId({}, worktree)).toBe(`coding-agent::${basename(realpathSync(repo))}`);
+      expect(deriveBankId({}, worktree)).toMatch(
+        new RegExp(`^coding-agent::${basename(realpathSync(repo))}-[a-f0-9]{16}$`)
+      );
     } finally {
       process.env.PATH = path;
     }

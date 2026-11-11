@@ -242,6 +242,7 @@ export async function runRetainHook(
     await ensureDaemon(cfg, spec.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
     client = makeClient({
       apiUrl: cfg.apiUrl,
+      forkEmbedPath: cfg.embedPackagePath ?? null,
       apiToken: cfg.apiToken,
       bank: bankId,
       maxParallelRetains: cfg.maxParallelRetains,

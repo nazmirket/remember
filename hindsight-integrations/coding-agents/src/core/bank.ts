@@ -3,7 +3,8 @@
  *
  * Coding memory is per-REPOSITORY: by default the bank id is derived from the git repo the
  * working directory lives in, worktree-aware — every linked worktree of a repo resolves to the
- * main worktree's basename and therefore shares one bank.
+ * main worktree's canonical path and therefore shares one bank without colliding with
+ * another repository of the same name.
  *
  * Resolution order:
  *   1. `mapPathToBank` — absolute path -> bank; LONGEST matching prefix wins, so mapping a
@@ -11,7 +12,8 @@
  *      Overrides everything, including an explicit bankId.
  *   2. static — when `dynamicBankId` is false, or left unset WITH an explicit `bankId`
  *      (the benchmark harness and single-bank setups).
- *   3. dynamic — `bankIdTemplate` (default "coding-agent::{gitProject}") with placeholders:
+ *   3. dynamic — the default combines the project name with a hash of its canonical root;
+ *      an explicit `bankIdTemplate` can use these placeholders:
  *        {gitProject}  worktree-aware repo name (all worktrees share it; outside a repo: the
  *                      basename of the directory the SESSION started in, not the agent's live cwd)
  *        {project}     working-directory basename (no git involved)
@@ -19,7 +21,7 @@
  *        {channel}     $HINDSIGHT_CHANNEL_ID or "default"
  *        {user}        $HINDSIGHT_USER_ID or "anonymous"
  *      e.g. "hindsight-{gitProject}" or "{harness}-{gitProject}" to split per agent. The default
- *      is harness-neutral "coding-agent::{gitProject}" so every coding agent shares ONE memory per repo.
+ *      is harness-neutral so both coding agents share one memory per repository.
  *
  * The repository probe (core/git-layout.ts) reads the repository layout off disk and answers one
  * of three things: this repo, no repo, or "could not tell". Only "no repo" reaches the basename
@@ -27,9 +29,10 @@
  * hooks skip the session (`deriveBankIdOrSkip`). Guessing there is how a linked worktree ended up
  * with a permanent bank of its own (#3950): a skipped session is recoverable, a scattered one is not.
  */
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, normalize, sep } from "node:path";
+import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import { diag } from "./diag";
 import { probeGitLayout } from "./git-layout";
 import { log } from "./log";
@@ -46,12 +49,8 @@ export interface BankConfig {
 }
 
 const DEFAULT_BANK_NAME = "coding";
-// Harness-NEUTRAL default so every coding agent (Claude, Codex, Cursor, opencode) shares ONE bank
-// per repo — switch agents, keep your memory. Namespaced with `coding-agent::` to identify these
-// banks and avoid collisions with other Hindsight banks. Deliberately NOT `{harness}::…` (that would
-// split memory per agent, defeating cross-agent sharing).
+// Used to decide whether a bank is scoped to a single repository for page context.
 const DEFAULT_TEMPLATE = "coding-agent::{gitProject}";
-
 /**
  * The repository a directory belongs to — or WHY there is no answer.
  *
@@ -314,6 +313,26 @@ export function deriveBankId(
   const dynamic = config.dynamicBankId ?? !config.bankId;
   if (!dynamic) return config.bankId || DEFAULT_BANK_NAME;
 
+  // Basenames alone collide for unrelated repositories. Use the canonical main worktree
+  // path for the default bank, while leaving explicit templates and mappings untouched.
+  if (!config.bankIdTemplate) {
+    const project = gitProjectName(directory, config.resolveWorktrees ?? true, sessionRoot);
+    const root =
+      (config.resolveWorktrees ?? true)
+        ? mainWorktreeRoot(directory, sessionRoot)
+        : { status: "absent" as const };
+    if (root.status === "failed") throw new BankResolutionError(root.reason);
+    const path = resolve(root.status === "resolved" ? root.root : sessionRoot || directory);
+    let canonical = path;
+    try {
+      canonical = realpathSync(path);
+    } catch {
+      // A vanished worktree can still be identified by its remembered session root.
+    }
+    const suffix = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+    return `coding-agent::${project}-${suffix}`;
+  }
+
   const resolvers: Record<string, () => string> = {
     harness: () => harness,
     project: () => dirName(directory),
@@ -321,7 +340,7 @@ export function deriveBankId(
     channel: () => process.env.HINDSIGHT_CHANNEL_ID || "default",
     user: () => process.env.HINDSIGHT_USER_ID || "anonymous",
   };
-  return applyTemplate(config.bankIdTemplate || DEFAULT_TEMPLATE, resolvers, "bankIdTemplate");
+  return applyTemplate(config.bankIdTemplate, resolvers, "bankIdTemplate");
 }
 
 /**

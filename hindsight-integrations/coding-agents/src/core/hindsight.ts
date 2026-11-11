@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 /**
  * Harness-agnostic Hindsight HTTP client (raw fetch, no SDK dep).
  *
@@ -46,12 +48,7 @@ export interface PageNode {
  * retain API). The scalar modes are the server's; a `string[][]` declares the scopes explicitly.
  */
 export type ObservationScopes =
-  | "shared"
-  | "combined"
-  | "per_tag"
-  | "all_combinations"
-  | "per_source"
-  | string[][];
+  "shared" | "combined" | "per_tag" | "all_combinations" | "per_source" | string[][];
 
 /**
  * `per_source` is resolved HERE, per document, and never reaches the server: it expands to the
@@ -101,6 +98,8 @@ export function resolveRetainScopes(
 export const DEFAULT_OBSERVATION_SCOPES: ObservationScopes = "shared";
 
 export interface ClientOpts {
+  /** Require the local daemon from this checkout; null fails closed when unconfigured. */
+  forkEmbedPath?: string | null;
   apiUrl: string;
   apiToken?: string;
   bank: string;
@@ -362,8 +361,7 @@ function signalOnlyDispatcher(): unknown {
   // global loads it; touching `fetch` does not (it is a wrapper until first called).
   void globalThis.Headers;
   const d = (globalThis as Record<symbol, unknown>)[GLOBAL_DISPATCHER] as
-    | { compose?: (interceptor: unknown) => unknown }
-    | undefined;
+    { compose?: (interceptor: unknown) => unknown } | undefined;
   if (typeof d?.compose !== "function") return undefined; // Node 18's undici predates compose()
   type Dispatch = (opts: Record<string, unknown>, handler: unknown) => boolean;
   return d.compose(
@@ -391,9 +389,11 @@ export class HindsightClient {
   readonly pageSearchLimit: number;
   readonly recallOptions: Record<string, unknown>;
   private readonly rateLimitPatienceMs: number;
+  private readonly forkEmbedPath: string | null | undefined;
 
   constructor(o: ClientOpts) {
     this.apiUrl = o.apiUrl.replace(/\/$/, "");
+    this.forkEmbedPath = o.forkEmbedPath;
     this.token = o.apiToken;
     this.tokenProvider = o.tokenProvider;
     this.bank = o.bank;
@@ -454,6 +454,24 @@ export class HindsightClient {
    * bounds the whole call.
    */
   private async fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
+    if (this.forkEmbedPath !== undefined) {
+      const target = new URL(this.apiUrl);
+      if (
+        target.protocol !== "http:" ||
+        target.hostname !== "127.0.0.1" ||
+        new URL(url).origin !== target.origin ||
+        !this.forkEmbedPath
+      ) {
+        throw new Error("Memory requires this fork's local daemon");
+      }
+      const expected = realpathSync(
+        join(this.forkEmbedPath, "..", "hindsight-api-slim", "hindsight_api", "api", "http.py")
+      );
+      const health = await fetch(`${this.apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
+      const body = health.ok ? ((await health.json()) as { fork_source?: string }) : undefined;
+      if (body?.fork_source !== expected)
+        throw new Error("Memory daemon does not belong to this fork");
+    }
     // Only a request with its own deadline drops undici's timeouts; the drain poll has none.
     const dispatcher = init.signal ? signalOnlyDispatcher() : undefined;
     const send = () =>
@@ -1260,8 +1278,7 @@ export class HindsightClient {
     try {
       const r = await this.pagesReq("GET", "/tree");
       const tree = (await r?.json()) as
-        | { roots?: { id?: string; kind?: string; name?: string }[] }
-        | undefined;
+        { roots?: { id?: string; kind?: string; name?: string }[] } | undefined;
       const hit = (tree?.roots || []).find(
         (n) => n.kind === "folder" && (n.name || "").toLowerCase() === name.toLowerCase()
       );

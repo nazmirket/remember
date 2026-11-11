@@ -3,7 +3,7 @@
  * window — and a run whose lease was taken over stops instead of ingesting alongside the new one.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -36,7 +36,27 @@ const children: ChildProcess[] = [];
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "deepen-lease-"));
   // An API that never answers keeps the first run busy — and holding its lease — indefinitely.
-  server = createServer(() => {});
+  server = createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          fork_source: realpathSync(
+            join(
+              __dirname,
+              "..",
+              "..",
+              "..",
+              "hindsight-api-slim",
+              "hindsight_api",
+              "api",
+              "http.py"
+            )
+          ),
+        })
+      );
+    }
+  });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   apiUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -57,9 +77,27 @@ function runDeepen(): {
   let out = "";
   const child = spawn(
     process.execPath,
-    [deepen, "--repo", __dirname, "--bank", "lease-test", "--api-url", apiUrl],
+    [
+      deepen,
+      "--repo",
+      __dirname,
+      "--bank",
+      "lease-test",
+      "--harness",
+      "claude-code",
+      "--api-url",
+      apiUrl,
+    ],
     // TMPDIR holds the lease root, HOME the config/logs: both isolated per test.
-    { env: { ...process.env, TMPDIR: home, HOME: home }, stdio: ["ignore", "pipe", "pipe"] }
+    {
+      env: {
+        ...process.env,
+        TMPDIR: home,
+        HOME: home,
+        HINDSIGHT_EMBED_PACKAGE_PATH: join(__dirname, "..", "..", "..", "hindsight-embed"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    }
   );
   children.push(child);
   child.stdout.on("data", (d) => (out += d));

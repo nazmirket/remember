@@ -10,7 +10,6 @@ import time
 import pytest
 
 from hindsight_embed._http_probe import ProbeResponse, aprobe_get, probe_get
-from hindsight_embed.control_center import lifecycle
 from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
 from hindsight_embed.profile_manager import ProfileManager
 
@@ -111,27 +110,6 @@ class TestPortHealthOk:
 
     def test_nothing_listening(self):
         assert DaemonEmbedManager._port_health_ok(closed_port()) is False
-
-
-class TestControlCenterHealth:
-    """lifecycle._health_ok: 200 with {"status": "ok"} and nothing else."""
-
-    def test_ok(self):
-        with serve(reply(200, {"status": "ok"})) as stub:
-            assert lifecycle._health_ok(stub.port) is True
-            assert stub.paths == ["/api/health"]
-
-    @pytest.mark.parametrize(
-        "handler",
-        [reply(200, {"status": "starting"}), reply(200, text="nope"), reply(200, [1]), reply(500, {"status": "ok"})],
-        ids=["wrong-status", "not-json", "json-array", "500"],
-    )
-    def test_not_ok(self, handler):
-        with serve(handler) as stub:
-            assert lifecycle._health_ok(stub.port) is False
-
-    def test_down(self):
-        assert lifecycle._health_ok(closed_port()) is False
 
 
 class TestProfileDaemonCheck:

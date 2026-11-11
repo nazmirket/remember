@@ -1,6 +1,0 @@
-node_modules/
-*.log
-.DS_Store
-
-# Local scaffold written by `hindsight-zed init` when pointed at this dir
-/settings.json

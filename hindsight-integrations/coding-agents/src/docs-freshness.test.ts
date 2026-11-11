@@ -79,7 +79,7 @@ describe("configuration reference", () => {
 
   it("documents the per-bank section's own `bank` rename field", () => {
     expect(readme()).toMatch(/`banks\.<bankId>`|`banks`/);
-    expect(readme()).toContain('"bank": "team::shared"');
+    expect(readme()).toContain("rename a bank with `bank`");
   });
 });
 

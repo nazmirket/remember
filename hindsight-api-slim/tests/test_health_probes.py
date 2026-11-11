@@ -9,6 +9,7 @@ pin the split — ``/health/live`` answers without touching the database, while
 """
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -134,6 +135,9 @@ def test_api_health_and_ready_return_the_same_payload():
 
     assert health.status_code == ready.status_code == 200
     assert health.json() == ready.json()
+    from hindsight_api.api import http
+
+    assert health.json()["fork_source"] == str(Path(http.__file__).resolve())
 
 
 def test_worker_health_and_ready_return_the_same_payload():

@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "hindsight": {
-      "url": "https://api.hindsight.vectorize.io/mcp"
-    }
-  }
-}

@@ -19,6 +19,10 @@ const inRepo = (commonDir: string, bare = false) =>
  *
  * The name may therefore only be answered when the BANK and the REPOSITORY are the same unit.
  */
+function defaultBank(prefix: string): RegExp {
+  return new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-[0-9a-f]{16}$`);
+}
+
 describe("bankProjectName", () => {
   beforeEach(() => {
     mockProbe.mockReturnValue({ status: "absent" }); // default: not in a git repo
@@ -31,7 +35,7 @@ describe("bankProjectName", () => {
     it("names the repo under the default template, matching the bank id's own {gitProject}", () => {
       mockProbe.mockReturnValue(inRepo("/home/me/dev/myrepo/.git"));
       expect(bankProjectName({}, "/home/me/dev/myrepo")).toBe("myrepo");
-      expect(deriveBankId({}, "/home/me/dev/myrepo")).toBe("coding-agent::myrepo");
+      expect(deriveBankId({}, "/home/me/dev/myrepo")).toMatch(defaultBank("coding-agent::myrepo"));
     });
 
     it("gives every linked worktree the same name, as the shared bank id does", () => {
@@ -54,7 +58,9 @@ describe("bankProjectName", () => {
       // The bank is per-WORKTREE here, so the page scope must be too, or a bank named after the
       // worktree would carry a sentence naming the main repo.
       expect(bankProjectName(cfg, "/home/me/dev/myrepo-wt")).toBe("myrepo-wt");
-      expect(deriveBankId(cfg, "/home/me/dev/myrepo-wt")).toBe("coding-agent::myrepo-wt");
+      expect(deriveBankId(cfg, "/home/me/dev/myrepo-wt")).toMatch(
+        defaultBank("coding-agent::myrepo-wt")
+      );
       expect(mockProbe).not.toHaveBeenCalled();
     });
 

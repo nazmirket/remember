@@ -47,7 +47,7 @@ describe("syncCompanionSkill", () => {
     // `dsh plugin add @vectorize-io/…` / `cline plugin install` wire the plugin without ever
     // running our installer, so the persistent-plugin hosts pass `install` at seed time (#4406).
     const { home, src } = setup(undefined);
-    syncCompanionSkill("dsh", { home, srcDir: src, install: true });
+    syncCompanionSkill("codex", { home, srcDir: src, install: true });
     expect(
       readFileSync(join(home, ".agents", "skills", "hindsight-coding-agent", "SKILL.md"), "utf8")
     ).toBe("NEW CONTENT v2");
