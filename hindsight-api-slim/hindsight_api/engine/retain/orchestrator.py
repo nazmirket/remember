@@ -69,45 +69,6 @@ class MemoryDefenseAllBlockedError(Exception):
         super().__init__(f"all {len(violations)} items blocked by Memory Defense policy")
 
 
-async def _oracle_append_operation_metadata(
-    conn: Any,
-    table: str,
-    operation_uuid: uuid.UUID,
-    list_key: str,
-    value: str,
-    merge: dict[str, Any] | None = None,
-) -> None:
-    """Append ``value`` to ``result_metadata[list_key]`` (if absent) on Oracle.
-
-    PostgreSQL does this append-if-absent atomically with jsonb_set / -> / @>,
-    which the Oracle compatibility rewriter cannot translate (ORA-00936). Lock the
-    operation row, merge the JSON document in Python and write it back in the same
-    transaction instead. ``merge`` holds top-level keys to set first, mirroring the
-    PostgreSQL ``result_metadata || $1::jsonb``.
-    """
-    async with conn.transaction():
-        row = await conn.fetchrow(
-            f"SELECT result_metadata FROM {table} WHERE operation_id = $1 FOR UPDATE",
-            operation_uuid,
-        )
-        metadata = conn.parse_json(row["result_metadata"]) if row else {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if merge:
-            metadata.update(merge)
-        values = metadata.get(list_key)
-        if not isinstance(values, list):
-            values = []
-        if value not in values:
-            values.append(value)
-        metadata[list_key] = values
-        await conn.execute(
-            f"UPDATE {table} SET result_metadata = $1, updated_at = CURRENT_TIMESTAMP WHERE operation_id = $2",
-            json.dumps(metadata),
-            operation_uuid,
-        )
-
-
 async def _persist_facts_committed_checkpoint(
     conn: Any, table: str, operation_id: str, document_id: str, unit_ids_count: int
 ) -> None:
@@ -119,11 +80,6 @@ async def _persist_facts_committed_checkpoint(
     """
     operation_uuid = uuid.UUID(operation_id)
     checkpoint = {"facts_committed": True, "unit_ids_count": unit_ids_count}
-    if conn.backend_type == "oracle":
-        await _oracle_append_operation_metadata(
-            conn, table, operation_uuid, "facts_committed_document_ids", document_id, merge=checkpoint
-        )
-        return
 
     await conn.execute(
         f"""
@@ -155,9 +111,6 @@ async def _persist_operation_document_id(conn: Any, table: str, operation_id: st
     the JSON document in Python within the same transaction.
     """
     operation_uuid = uuid.UUID(operation_id)
-    if conn.backend_type == "oracle":
-        await _oracle_append_operation_metadata(conn, table, operation_uuid, "document_ids", document_id)
-        return
 
     await conn.execute(
         f"""

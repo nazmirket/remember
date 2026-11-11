@@ -20,7 +20,7 @@ from hindsight_api.config import get_config
 from hindsight_api.engine.audit import DESTRUCTIVE_ACTIONS
 from hindsight_api.engine.db_utils import acquire_with_retry
 from hindsight_api.engine.schema import fq_table
-from hindsight_api.mcp_tools import _ALL_TOOLS, _UNAUDITED_MCP_TOOLS
+from hindsight_api.mcp_tools import _ALL_TOOLS
 from tests.conftest import enable_audit_default
 
 
@@ -498,19 +498,6 @@ async def test_audit_log_ordered_by_most_recent(audit_api_client, bank_id):
     # Check descending order by started_at
     timestamps = [item["started_at"] for item in data["items"] if item["started_at"]]
     assert timestamps == sorted(timestamps, reverse=True), "Audit logs should be ordered most recent first"
-
-
-def test_control_plane_filter_offers_every_audited_action():
-    """The control plane's action filter is a hardcoded list; a new @audited route must join it."""
-    root = Path(__file__).resolve().parents[2]
-    http = (root / "hindsight-api-slim" / "hindsight_api" / "api" / "http.py").read_text()
-    audited = re.findall(r'^\s*@audited\(\s*"([a-z_]+)"', http, re.M)
-    assert len(audited) > 30
-    view = (root / "hindsight-control-plane" / "src" / "components" / "audit-logs-view.tsx").read_text()
-    offered = set(re.findall(r'value: "([a-z_]+)"', view))
-    assert [a for a in audited if a not in offered] == []
-    # Every MCP tool but the read-only ones is audited under its own name too.
-    assert sorted(_ALL_TOOLS - _UNAUDITED_MCP_TOOLS - offered) == []
 
 
 def test_destructive_actions_cover_every_delete_route():

@@ -197,9 +197,7 @@ def note_observation_written(observation_id: str, source_fact_ids: Iterable[str]
 async def append_operation_events(pool: Any, operation_id: str | None, events: list[DocumentEvent]) -> None:
     """Add ``events`` to the operation's ``result_metadata.document_events``. Best-effort: logged, never raised.
 
-    One path for both dialects — lock the row, merge in Python, write it back — because the
-    Oracle rewriter cannot translate PostgreSQL's in-place jsonb append, and an operation row is
-    written rarely enough that the lock costs nothing.
+    Lock the row, merge the events, and write the metadata back atomically.
     """
     if not operation_id or not events:
         return
@@ -257,14 +255,8 @@ async def list_document_events(
     """
     table = fq_table("async_operations")
     async with acquire_with_retry(pool) as conn:
-        if conn.backend_type == "oracle":
-            # The rewriter turns any `result_metadata @> :N` into a parent_operation_id lookup, so
-            # Oracle gets the JSON path filter spelled out.
-            match = "JSON_EXISTS(result_metadata, '$.document_events[*]?(@.document_id == $d)' PASSING $2 AS \"d\")"
-            needle: str = document_id
-        else:
-            match = "result_metadata->'document_events' @> $2::jsonb"
-            needle = json.dumps([{"document_id": document_id}])
+        match = "result_metadata->'document_events' @> $2::jsonb"
+        needle = json.dumps([{"document_id": document_id}])
         total = await conn.fetchval(f"SELECT COUNT(*) FROM {table} WHERE bank_id = $1 AND {match}", bank_id, needle)
         rows = await conn.fetch(
             f"""

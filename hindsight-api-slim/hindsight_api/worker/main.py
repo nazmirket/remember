@@ -141,6 +141,8 @@ def create_worker_app(poller: WorkerPoller, memory):
     app = FastAPI(
         title="Hindsight Worker",
         description="Worker process for distributed task execution",
+        docs_url=None,
+        redoc_url=None,
     )
 
     # Initialize OpenTelemetry metrics

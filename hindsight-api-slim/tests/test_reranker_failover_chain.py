@@ -105,22 +105,23 @@ def test_indexed_member_reads_its_own_provider_settings():
 
 
 def test_indexed_member_inherits_nothing_from_the_primary():
-    """An indexed member is read in isolation — no inheritance, only built-in defaults."""
+    """An indexed member is read in isolation from the primary."""
+    from hindsight_api.config import DEFAULT_RERANKER_TYPESAFE_BASE_URL, DEFAULT_RERANKER_TYPESAFE_MODEL
+
     env = {
-        "HINDSIGHT_API_RERANKER_PROVIDER": "cohere",
-        "HINDSIGHT_API_RERANKER_COHERE_API_KEY": "primary-key",
-        "HINDSIGHT_API_RERANKER_COHERE_MODEL": "rerank-multilingual-v3.0",
-        "HINDSIGHT_API_RERANKER_COHERE_BASE_URL": "http://primary/rerank",
-        "HINDSIGHT_API_COHERE_API_KEY": "shared-key",
-        "HINDSIGHT_API_RERANKER_1_PROVIDER": "cohere",
-        "HINDSIGHT_API_RERANKER_1_COHERE_API_KEY": "member-key",
+        "HINDSIGHT_API_RERANKER_PROVIDER": "typesafe",
+        "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY": "primary-key",
+        "HINDSIGHT_API_RERANKER_TYPESAFE_MODEL": "primary-model",
+        "HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL": "http://primary/rerank",
+        "HINDSIGHT_API_RERANKER_1_PROVIDER": "typesafe",
+        "HINDSIGHT_API_RERANKER_1_TYPESAFE_API_KEY": "member-key",
     }
     with patch.dict(os.environ, env, clear=False):
         member = HindsightConfig.from_env().reranker_members[0]
 
-    assert member.cohere_api_key == "member-key"
-    assert member.cohere_base_url is None
-    assert member.cohere_model == "rerank-english-v3.0"  # built-in default, not the primary's
+    assert member.typesafe_api_key == "member-key"
+    assert member.typesafe_base_url == DEFAULT_RERANKER_TYPESAFE_BASE_URL
+    assert member.typesafe_model == DEFAULT_RERANKER_TYPESAFE_MODEL
 
 
 def test_member_with_a_bad_numeric_setting_fails_fast():

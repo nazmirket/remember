@@ -146,8 +146,7 @@ class _CapturingPool:
         return 1
 
 
-async def _capture_audit_write(monkeypatch, *, oracle: bool, schema: str) -> str:
-    monkeypatch.setattr("hindsight_api.engine.schema._is_oracle", lambda: oracle)
+async def _capture_audit_write(monkeypatch, *, schema: str) -> str:
     sink: list[str] = []
     logger = AuditLogger(
         pool_getter=lambda: _CapturingPool(sink),
@@ -161,18 +160,8 @@ async def _capture_audit_write(monkeypatch, *, oracle: bool, schema: str) -> str
 
 
 @pytest.mark.asyncio
-async def test_audit_write_uses_bare_table_on_oracle(monkeypatch):
-    # audit_log exists on Oracle, but a raw f"{schema}.audit_log" yields
-    # public.audit_log — "public" is a reserved word there, so every write failed
-    # with ORA-00903. The dialect-qualified (bare) name must be used instead.
-    sql = await _capture_audit_write(monkeypatch, oracle=True, schema="public")
-    assert "INSERT INTO audit_log" in sql
-    assert "public.audit_log" not in sql
-
-
-@pytest.mark.asyncio
 async def test_audit_write_qualifies_schema_on_postgres(monkeypatch):
-    sql = await _capture_audit_write(monkeypatch, oracle=False, schema="tenant_x")
+    sql = await _capture_audit_write(monkeypatch, schema="tenant_x")
     assert '"tenant_x".audit_log' in sql
 
 

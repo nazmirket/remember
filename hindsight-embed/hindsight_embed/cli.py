@@ -103,7 +103,7 @@ def get_config() -> dict[str, str]:
     (its ``DEFAULT_LLM_PROVIDER`` is this same ``"openai"``, and
     ``PROVIDER_DEFAULT_MODELS`` is provider-keyed). Duplicating those tables
     here would silently desync — and importing them fails in standalone venvs
-    (``uvx hindsight-embed``) where ``hindsight-api`` isn't installed anyway.
+    where ``hindsight-api`` is not installed alongside the embedded manager.
     """
     load_config_file()
     config = {key: value for key, value in os.environ.items() if key.startswith("HINDSIGHT_")}

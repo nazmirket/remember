@@ -65,9 +65,8 @@ export function resolveHarness(env: NodeJS.ProcessEnv = process.env): string {
     throw new Error(
       "HINDSIGHT_MCP_HARNESS is not set. Every coding agent launches this same mcp-server.js, so " +
         "only that variable identifies the caller — it decides the harness:<id> stamp on everything " +
-        "ingested and which bank this session resolves. Re-run `npx " +
-        "@vectorize-io/hindsight-coding-agents install <harness>` to repair a registration written " +
-        "before the installer set it."
+        "ingested and which bank this session resolves. Re-run this fork’s coding-agent installer " +
+        "with `install <harness>` to repair the registration."
     );
   }
   return harness;

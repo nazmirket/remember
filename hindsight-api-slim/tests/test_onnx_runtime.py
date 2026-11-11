@@ -1,4 +1,4 @@
-"""Opt-in real model/device tests; see docker/docker-compose/cuda-onnx/README.md.
+"""Opt-in real model/device tests using a locally configured ONNX model.
 
 No mocks replace inference. CUDA profiling must record real GPU kernels, not
 merely list an installed execution provider. Ordinary CPU CI needs no downloads.

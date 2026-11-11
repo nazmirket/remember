@@ -693,7 +693,7 @@ from .interface import BankConfigState, BankTemplateImportWrite, MemoryEngineInt
 from .memories import sql_memories
 from .memories.base import watermark_may_postdate as _may_need_refresh
 from .page_markdown import EMPTY_PAGE_NOTICE
-from .schema import _is_oracle, fq_table
+from .schema import fq_table
 from .search.decision_reranker import PROVIDER_NAME as DECISION_MODEL_RERANKER
 
 if TYPE_CHECKING:
@@ -898,10 +898,7 @@ def _member_to_llm(member: "LLMMemberConfig", config: ConfigLike, defaults: _LLM
 
     ``LLMProvider`` uses its arguments verbatim (it no longer reads global config),
     so resolve each fallback here: a member's explicit value wins, otherwise inherit
-    the global LLM default. Fields that aren't per-member configurable
-    (``gemini_safety_settings``, ``prompt_cache_enabled``) take the global default.
-    ``gemini_safety_settings`` is bank-configurable so it comes from the raw config
-    (the proxy blocks it); the per-bank value is applied per-call downstream.
+    the global LLM default.
 
     ``defaults`` are the operation's already-resolved request defaults (timeout +
     retry policy). A member may override ``timeout`` and ``max_retries``
@@ -916,8 +913,6 @@ def _member_to_llm(member: "LLMMemberConfig", config: ConfigLike, defaults: _LLM
     transient error and a failed request, and it is where honouring a
     ``Retry-After`` actually pays. One shared value cannot serve both.
     """
-    from ..config import _get_raw_config
-
     return LLMConfig(
         provider=member.provider,
         api_key=member.api_key or "",
@@ -931,16 +926,7 @@ def _member_to_llm(member: "LLMMemberConfig", config: ConfigLike, defaults: _LLM
         default_headers=member.default_headers or config.llm_default_headers,
         cache_affinity=member.cache_affinity or config.llm_cache_affinity,
         ollama_num_ctx=config.llm_ollama_num_ctx,
-        bedrock_service_tier=member.bedrock_service_tier,
-        structured_output_in_prompt=config.llm_structured_output_in_prompt,
-        gemini_service_tier=member.gemini_service_tier or config.llm_gemini_service_tier,
-        gemini_safety_settings=_get_raw_config().llm_gemini_safety_settings,
-        prompt_cache_enabled=config.llm_prompt_cache_enabled,
         codex_home=member.codex_home or config.llm_codex_home,
-        vertexai_project_id=member.vertexai_project_id or config.llm_vertexai_project_id,
-        vertexai_region=member.vertexai_region or config.llm_vertexai_region,
-        vertexai_service_account_key=member.vertexai_service_account_key or config.llm_vertexai_service_account_key,
-        litellmrouter_config=member.litellmrouter_config or config.llm_litellmrouter_config,
         **_member_call_defaults(member, defaults),
     )
 
@@ -1116,24 +1102,6 @@ def _audit_summary(conn: Any, row: Any) -> "AuditLogSummary":
         duration_ms=int((ended - started).total_seconds() * 1000) if started and ended else None,
         metadata=conn.parse_json(row["metadata"]) if row["metadata"] is not None else {},
     )
-
-
-def _is_oracledb_connection_error(e: Exception) -> bool:
-    """Check if an exception is an Oracle connection/interface error."""
-    try:
-        import oracledb  # type: ignore[import-not-found]
-    except ImportError:
-        return False
-    return isinstance(e, (oracledb.InterfaceError, oracledb.OperationalError))
-
-
-def _is_oracledb_integrity_error(e: Exception) -> bool:
-    """Check if an exception is an Oracle integrity constraint error."""
-    try:
-        import oracledb  # type: ignore[import-not-found]
-    except ImportError:
-        return False
-    return isinstance(e, oracledb.IntegrityError)
 
 
 @dataclass
@@ -1717,19 +1685,8 @@ def _entity_map_from_results(
 
 
 def _is_foreign_key_violation(e: Exception) -> bool:
-    """Return True for a foreign-key violation on either dialect.
-
-    Oracle folds every constraint kind into ``IntegrityError``, so the FK case is
-    picked out by code: ORA-02291, parent key not found. That is the inserting
-    side, which is the side that fails — every FK in the Oracle baseline is
-    ON DELETE CASCADE or SET NULL, so a delete never raises ORA-02292.
-    """
-    if isinstance(e, asyncpg.exceptions.ForeignKeyViolationError):
-        return True
-    if not _is_oracledb_integrity_error(e):
-        return False
-    code = getattr(e.args[0], "code", None) if e.args else None
-    return code == 2291
+    """Foreign-key races are retryable PostgreSQL errors."""
+    return isinstance(e, asyncpg.exceptions.ForeignKeyViolationError)
 
 
 #: Tasks that write into a bank that already existed when they were queued. They run bound to
@@ -1761,7 +1718,6 @@ def _is_non_retryable_task_error(e: Exception) -> bool:
     return (
         isinstance(e, InvalidRetainRequestError)
         or isinstance(e, asyncpg.exceptions.IntegrityConstraintViolationError)
-        or _is_oracledb_integrity_error(e)
         or _is_invalid_embedding_dimension_error(e)
         # A provider content-policy refusal is a function of the content, not of
         # the moment: re-running the task feeds the same chunk to the same model
@@ -3039,16 +2995,9 @@ class MemoryEngine(MemoryEngineInterface):
                                   Defaults to HINDSIGHT_API_SKIP_LLM_VERIFICATION env var or False.
         """
         # Load config from environment for any missing parameters
-        from ..config import _get_raw_config, get_config
+        from ..config import get_config
 
         config = get_config()
-        # Gemini safety settings are bank-configurable, so the StaticConfigProxy from
-        # get_config() blocks reading them. The server-level default legitimately seeds
-        # each provider at construction (per-bank values are applied per-call via
-        # ConfiguredLLMProvider), so read it from the raw config. The other LLM fields
-        # below are static and safe to read off the proxy.
-        _llm_gemini_safety_settings = _get_raw_config().llm_gemini_safety_settings
-
         # Apply optimization flags from config if not explicitly provided
         self._skip_llm_verification = (
             skip_llm_verification if skip_llm_verification is not None else config.skip_llm_verification
@@ -3192,18 +3141,8 @@ class MemoryEngine(MemoryEngineInterface):
             default_headers=config.llm_default_headers,
             cache_affinity=config.llm_cache_affinity,
             ollama_num_ctx=config.llm_ollama_num_ctx,
-            litellmrouter_config=config.llm_litellmrouter_config,
-            bedrock_service_tier=config.llm_bedrock_service_tier,
-            structured_output_in_prompt=config.llm_structured_output_in_prompt,
-            gemini_service_tier=config.llm_gemini_service_tier,
-            groq_service_tier=config.llm_groq_service_tier,
             openai_service_tier=config.llm_openai_service_tier,
-            gemini_safety_settings=_llm_gemini_safety_settings,
-            prompt_cache_enabled=config.llm_prompt_cache_enabled,
             codex_home=config.llm_codex_home,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
             **default_call_defaults.as_kwargs(),
         )
         self._llm_config = _build_llm(_default_base_llm, config, "", default_call_defaults)
@@ -3240,18 +3179,8 @@ class MemoryEngine(MemoryEngineInterface):
             default_headers=config.llm_default_headers,
             cache_affinity=config.retain_llm_cache_affinity or config.llm_cache_affinity,
             ollama_num_ctx=config.llm_ollama_num_ctx,
-            litellmrouter_config=config.retain_llm_litellmrouter_config or config.llm_litellmrouter_config,
-            bedrock_service_tier=config.llm_bedrock_service_tier,
-            structured_output_in_prompt=config.llm_structured_output_in_prompt,
-            gemini_service_tier=config.llm_gemini_service_tier,
-            groq_service_tier=config.llm_groq_service_tier,
             openai_service_tier=config.llm_openai_service_tier,
-            gemini_safety_settings=_llm_gemini_safety_settings,
-            prompt_cache_enabled=config.llm_prompt_cache_enabled,
             codex_home=config.llm_codex_home,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
             **retain_call_defaults.as_kwargs(),
         )
         self._retain_llm_config = _build_llm(_retain_base_llm, config, "retain_", retain_call_defaults)
@@ -3295,17 +3224,8 @@ class MemoryEngine(MemoryEngineInterface):
                 or config.retain_llm_cache_affinity
                 or config.llm_cache_affinity,
                 ollama_num_ctx=config.llm_ollama_num_ctx,
-                bedrock_service_tier=config.llm_bedrock_service_tier,
-                structured_output_in_prompt=config.llm_structured_output_in_prompt,
-                gemini_service_tier=config.llm_gemini_service_tier,
-                groq_service_tier=config.llm_groq_service_tier,
                 openai_service_tier=config.llm_openai_service_tier,
-                gemini_safety_settings=_llm_gemini_safety_settings,
-                prompt_cache_enabled=config.llm_prompt_cache_enabled,
                 codex_home=config.llm_codex_home,
-                vertexai_project_id=config.llm_vertexai_project_id,
-                vertexai_region=config.llm_vertexai_region,
-                vertexai_service_account_key=config.llm_vertexai_service_account_key,
                 **vlm_call_defaults.as_kwargs(),
             )
             # Deliberately NOT run through `_build_llm`: that would make the
@@ -3350,18 +3270,8 @@ class MemoryEngine(MemoryEngineInterface):
             default_headers=config.llm_default_headers,
             cache_affinity=config.reflect_llm_cache_affinity or config.llm_cache_affinity,
             ollama_num_ctx=config.llm_ollama_num_ctx,
-            litellmrouter_config=config.reflect_llm_litellmrouter_config or config.llm_litellmrouter_config,
-            bedrock_service_tier=config.llm_bedrock_service_tier,
-            structured_output_in_prompt=config.llm_structured_output_in_prompt,
-            gemini_service_tier=config.llm_gemini_service_tier,
-            groq_service_tier=config.llm_groq_service_tier,
             openai_service_tier=config.llm_openai_service_tier,
-            gemini_safety_settings=_llm_gemini_safety_settings,
-            prompt_cache_enabled=config.llm_prompt_cache_enabled,
             codex_home=config.llm_codex_home,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
             **reflect_call_defaults.as_kwargs(),
         )
         self._reflect_llm_config = _build_llm(_reflect_base_llm, config, "reflect_", reflect_call_defaults)
@@ -3421,22 +3331,8 @@ class MemoryEngine(MemoryEngineInterface):
                     or config.llm_cache_affinity
                 ),
                 ollama_num_ctx=config.llm_ollama_num_ctx,
-                litellmrouter_config=(
-                    config.mental_model_refresh_llm_litellmrouter_config
-                    or config.reflect_llm_litellmrouter_config
-                    or config.llm_litellmrouter_config
-                ),
-                bedrock_service_tier=config.llm_bedrock_service_tier,
-                structured_output_in_prompt=config.llm_structured_output_in_prompt,
-                gemini_service_tier=config.llm_gemini_service_tier,
-                groq_service_tier=config.llm_groq_service_tier,
                 openai_service_tier=config.llm_openai_service_tier,
-                gemini_safety_settings=_llm_gemini_safety_settings,
-                prompt_cache_enabled=config.llm_prompt_cache_enabled,
                 codex_home=config.llm_codex_home,
-                vertexai_project_id=config.llm_vertexai_project_id,
-                vertexai_region=config.llm_vertexai_region,
-                vertexai_service_account_key=config.llm_vertexai_service_account_key,
                 **mental_model_refresh_call_defaults.as_kwargs(),
             )
             self._mental_model_refresh_llm_override = _build_llm(
@@ -3473,18 +3369,8 @@ class MemoryEngine(MemoryEngineInterface):
             default_headers=config.llm_default_headers,
             cache_affinity=config.consolidation_llm_cache_affinity or config.llm_cache_affinity,
             ollama_num_ctx=config.llm_ollama_num_ctx,
-            litellmrouter_config=config.consolidation_llm_litellmrouter_config or config.llm_litellmrouter_config,
-            bedrock_service_tier=config.llm_bedrock_service_tier,
-            structured_output_in_prompt=config.llm_structured_output_in_prompt,
-            gemini_service_tier=config.llm_gemini_service_tier,
-            groq_service_tier=config.llm_groq_service_tier,
             openai_service_tier=config.llm_openai_service_tier,
-            gemini_safety_settings=_llm_gemini_safety_settings,
-            prompt_cache_enabled=config.llm_prompt_cache_enabled,
             codex_home=config.llm_codex_home,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
             **consolidation_call_defaults.as_kwargs(),
         )
         self._consolidation_llm_config = _build_llm(
@@ -9907,7 +9793,6 @@ class MemoryEngine(MemoryEngineInterface):
                             isinstance(e, asyncpg.TooManyConnectionsError)
                             or isinstance(e, asyncpg.CannotConnectNowError)
                             or (isinstance(e, asyncpg.PostgresError) and "connection" in str(e).lower())
-                            or _is_oracledb_connection_error(e)
                         )
 
                         if is_connection_error and attempt < max_retries:
@@ -11601,9 +11486,7 @@ class MemoryEngine(MemoryEngineInterface):
         await self._require_writable(bank_id, request_context, document_id=document_id)
         # Opt-in (#6098): the prompts and answers that quote this document go with it instead of
         # waiting for the retention sweep. PG-only table.
-        from .llm_trace import _llm_requests_persistable  # noqa: PLC0415
-
-        delete_traces = get_config().llm_trace_delete_with_document and _llm_requests_persistable()
+        delete_traces = get_config().llm_trace_delete_with_document
         if delete_traces:
             # The recorder holds new rows for up to 0.5s before writing them: a retain answered just
             # before this delete would otherwise land its row after the DELETE below and outlive the
@@ -12521,10 +12404,7 @@ class MemoryEngine(MemoryEngineInterface):
                                 # PG-only existence guard: a declared-but-unprovisioned
                                 # table must not abort the whole bank delete. (to_regclass
                                 # is PG syntax; extension bank tables are a PG feature.)
-                                if (
-                                    not _is_oracle()
-                                    and await conn.fetchval("SELECT to_regclass($1)", qualified) is None
-                                ):
+                                if await conn.fetchval("SELECT to_regclass($1)", qualified) is None:
                                     continue
                                 await conn.execute(f"DELETE FROM {qualified} WHERE {spec.bank_id_column} = $1", bank_id)
 
@@ -12538,18 +12418,14 @@ class MemoryEngine(MemoryEngineInterface):
                             # The bank's request history holds its prompts and model output (memory
                             # text included) and has no FK to banks, so it goes with the bank rather
                             # than waiting for the retention sweep (#5839). PG-only table.
-                            from .llm_trace import (  # noqa: PLC0415
-                                _llm_requests_persistable,
-                                llm_requests_locked_in_id_order,
-                            )
+                            from .llm_trace import llm_requests_locked_in_id_order  # noqa: PLC0415
 
-                            if _llm_requests_persistable():
-                                _llm_table = fq_table("llm_requests")
-                                await conn.execute(
-                                    f"{llm_requests_locked_in_id_order(_llm_table, 'bank_id = $1')} "
-                                    f"DELETE FROM {_llm_table} t USING target WHERE t.id = target.id",
-                                    bank_id,
-                                )
+                            _llm_table = fq_table("llm_requests")
+                            await conn.execute(
+                                f"{llm_requests_locked_in_id_order(_llm_table, 'bank_id = $1')} "
+                                f"DELETE FROM {_llm_table} t USING target WHERE t.id = target.id",
+                                bank_id,
+                            )
                             # The FK cascade drops these, but resolve() caches them: their
                             # names are evicted after commit, or a write to one would recreate
                             # this bank instead of creating a bank under the freed name.
@@ -14614,19 +14490,6 @@ class MemoryEngine(MemoryEngineInterface):
         # Every caller's requests, unscoped: refuse tag-scoped callers.
         await self._refuse_bank_wide_if_scoped(bank_id, request_context, "read the bank's LLM requests")
 
-        if _is_oracle():
-            # llm_requests is PostgreSQL-only (its migration omits the Oracle slot;
-            # LLMTraceRecorder skips writes on Oracle). There is nothing to read, so
-            # return an empty page rather than querying a non-existent table (ORA-00942).
-            return LLMRequestListResponse(
-                bank_id=bank_id,
-                total=0,
-                limit=limit,
-                offset=offset,
-                items=[],
-                retention_days=self._llm_trace_retention_days(),
-            )
-
         where_clauses = ["bank_id = $1"]
         params: list[Any] = [bank_id]
         idx = 2
@@ -14764,17 +14627,6 @@ class MemoryEngine(MemoryEngineInterface):
             start = now - timedelta(days=30)
         else:  # 7d default
             start = now - timedelta(days=7)
-
-        if _is_oracle():
-            # llm_requests is PostgreSQL-only — no rows on Oracle (see list_llm_requests).
-            return LLMRequestStatsResponse(
-                bank_id=bank_id,
-                period=period,
-                trunc=trunc,
-                start=start.isoformat(),
-                buckets=[],
-                retention_days=self._llm_trace_retention_days(),
-            )
 
         where_clauses = ["bank_id = $1", "started_at >= $2"]
         params: list[Any] = [bank_id, start]
@@ -21029,7 +20881,6 @@ class MemoryEngine(MemoryEngineInterface):
                         pg_search_function_schema=pg_search_function_schema,
                         pg_search_tokenizer=cfg.text_search_extension_pg_search_tokenizer,
                         max_query_terms=cfg.bm25_max_query_terms,
-                        backend_type=backend_type,
                     )
                     # Vector arm (ANN over mm.embedding) + BM25 arm, each ranked
                     # independently, then RRF-fused (k=60) in SQL.
@@ -21077,7 +20928,6 @@ class MemoryEngine(MemoryEngineInterface):
                         pg_search_function_schema=pg_search_function_schema,
                         pg_search_tokenizer=cfg.text_search_extension_pg_search_tokenizer,
                         max_query_terms=cfg.bm25_max_query_terms,
-                        backend_type=backend_type,
                     )
                     # Ranked, not raw: each backend's BM25 operator returns its own scale
                     # (ts_rank_cd, a negated distance, paradedb.score), and those have
@@ -23850,9 +23700,7 @@ class MemoryEngine(MemoryEngineInterface):
             # primary-key race against a simultaneous first submission of the
             # same id must resolve to the winner's operation, not a 500. Only
             # a unique violation on our id qualifies; anything else propagates.
-            is_unique_violation = isinstance(
-                e, asyncpg.exceptions.UniqueViolationError
-            ) or _is_oracledb_integrity_error(e)
+            is_unique_violation = isinstance(e, asyncpg.exceptions.UniqueViolationError)
             if client_operation_id is None or not is_unique_violation:
                 raise
             replay = await self._resolve_retain_replay(client_operation_id, bank_id)

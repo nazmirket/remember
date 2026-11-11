@@ -134,13 +134,6 @@ enum Commands {
     /// Get API version information
     Version,
 
-    /// Interactive TUI explorer (k9s-style) for navigating banks, memories, entities, and performing recall/reflect
-    #[command(alias = "tui")]
-    Explore,
-
-    /// Launch the web-based control plane UI
-    Ui,
-
     /// Configure the CLI (API URL, API key, etc.)
     #[command(
         after_help = "Configuration priority:\n  1. Environment variables (HINDSIGHT_API_URL, HINDSIGHT_API_KEY) - highest priority\n  2. Named profile (-p / HINDSIGHT_PROFILE, see 'hindsight profile')\n  3. Config file (~/.hindsight/config)\n  4. Default (http://localhost:8888)"
@@ -1511,11 +1504,6 @@ fn run() -> Result<()> {
         return handle_profile(cmd, output_format);
     }
 
-    // Handle ui command - needs config but not API client
-    if let Commands::Ui = cli.command {
-        return handle_ui(profile.as_deref(), output_format);
-    }
-
     // Load configuration
     let config = Config::load_with_profile(profile.as_deref()).unwrap_or_else(|e| {
         ui::print_error(&format!("Configuration error: {}", e));
@@ -1535,8 +1523,6 @@ fn run() -> Result<()> {
     let result: Result<()> = match cli.command {
         Commands::Configure { .. } => unreachable!(), // Handled above
         Commands::Profile(_) => unreachable!(),       // Handled above
-        Commands::Ui => unreachable!(),               // Handled above
-        Commands::Explore => commands::explore::run(&client),
 
         // Filesystem mirror — talks to the API directly (blocking client), so it
         // uses the resolved endpoint rather than the generated async client.
@@ -2483,53 +2469,6 @@ fn handle_configure(
             "config_path": config_path.display().to_string(),
         });
         output::print_output(&result, output_format)?;
-    }
-
-    Ok(())
-}
-
-fn handle_ui(profile: Option<&str>, output_format: OutputFormat) -> Result<()> {
-    use std::process::Command;
-
-    // Load configuration to get the API URL
-    let config = Config::load_with_profile(profile).unwrap_or_else(|e| {
-        ui::print_error(&format!("Configuration error: {}", e));
-        errors::print_config_help();
-        std::process::exit(1);
-    });
-
-    let api_url = config.api_url();
-
-    if output_format == OutputFormat::Pretty {
-        ui::print_info("Launching Hindsight Control Plane UI...");
-        println!();
-        println!("  API URL: {}", api_url);
-        println!();
-    }
-
-    // Run npx @vectorize-io/hindsight-control-plane --api-url {api_url}
-    let status = Command::new("npx")
-        .arg("@vectorize-io/hindsight-control-plane")
-        .arg("--api-url")
-        .arg(api_url)
-        .status();
-
-    match status {
-        Ok(exit_status) => {
-            if !exit_status.success() {
-                if let Some(code) = exit_status.code() {
-                    std::process::exit(code);
-                } else {
-                    std::process::exit(1);
-                }
-            }
-        }
-        Err(e) => {
-            ui::print_error(&format!("Failed to launch control plane UI: {}", e));
-            ui::print_info("Make sure you have Node.js and npm installed.");
-            ui::print_info("You can also install the control plane globally: npm install -g @vectorize-io/hindsight-control-plane");
-            std::process::exit(1);
-        }
     }
 
     Ok(())

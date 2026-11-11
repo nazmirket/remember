@@ -12,11 +12,7 @@ receiving such patches depends on the CVSS v3.0 Rating:
 ## Reporting a Vulnerability
 
 Please report (suspected) security vulnerabilities to the maintainers privately.
-You can do this by opening a [GitHub Security Advisory](https://github.com/vectorize-io/hindsight/security/advisories/new).
-
-You will receive a response from us within 48 hours. If the issue is confirmed,
-we will release a patch as soon as possible depending on complexity but
-typically within a few days.
+You can do this by opening a [GitHub Security Advisory](https://github.com/nazmirket/remember/security/advisories/new).
 
 Please include the following information in your report:
 

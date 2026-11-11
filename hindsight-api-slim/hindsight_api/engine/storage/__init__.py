@@ -51,7 +51,7 @@ def create_file_storage(
     Create file storage backend based on configuration.
 
     Args:
-        storage_type: "native" (PostgreSQL BYTEA) or "s3" (S3-compatible object storage)
+        storage_type: "native" (PostgreSQL BYTEA) or a registered storage extension
         pool_getter: Database pool getter (required for native)
         schema: Static database schema (for native single-tenant)
         schema_getter: Callable returning current schema at query time (for native multi-tenant)

@@ -44,25 +44,13 @@ _RETRYABLE_EXCEPTION_NAMES = frozenset(
 )
 
 
-def _is_oracle_deadlock(exc: BaseException) -> bool:
-    """Check if an exception is an Oracle ORA-00060 deadlock."""
-    try:
-        import oracledb  # type: ignore[import-not-found]
-    except ImportError:
-        return False
-    if isinstance(exc, oracledb.DatabaseError) and exc.args:
-        err = exc.args[0]
-        return getattr(err, "code", None) == 60  # ORA-00060
-    return False
-
-
 def _is_retryable(exc: BaseException) -> bool:
     """Check if an exception is retryable (transient connection issue)."""
     if isinstance(exc, (OSError, ConnectionError, asyncio.TimeoutError)):
         return True
     if type(exc).__name__ in _RETRYABLE_EXCEPTION_NAMES:
         return True
-    return _is_oracle_deadlock(exc)
+    return False
 
 
 async def retry_with_backoff(
@@ -96,7 +84,7 @@ async def retry_with_backoff(
             last_exception = e
             if attempt < max_retries:
                 delay = _backoff_delay(attempt, base_delay, max_delay)
-                if type(e).__name__ == "DeadlockDetectedError" or _is_oracle_deadlock(e):
+                if type(e).__name__ == "DeadlockDetectedError":
                     logger.warning(
                         "Deadlock detected during parallel document processing — "
                         "this is expected and will resolve automatically "

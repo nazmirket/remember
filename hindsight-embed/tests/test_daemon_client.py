@@ -406,7 +406,6 @@ class TestStartDaemonSerialization:
                 DaemonEmbedManager, "_rotate_daemon_log", side_effect=lambda *_args, **_kwargs: calls.append("rotate")
             ),
             patch.object(DaemonEmbedManager, "_find_api_command", return_value=["hindsight-api"]),
-            patch.object(DaemonEmbedManager, "_component_version", return_value=None),
             patch.object(DaemonEmbedManager, "_register_profile"),
             patch(
                 "subprocess.Popen",

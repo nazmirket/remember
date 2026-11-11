@@ -430,7 +430,7 @@ def run_migrations(
     Args:
         database_url: SQLAlchemy database URL (e.g., "postgresql://user:pass@host/db")
         script_location: Path to alembic migrations directory (e.g., "/path/to/alembic").
-                        If None, defaults to hindsight-api/alembic directory.
+                        If None, defaults to the hindsight_api/alembic directory.
         schema: Target PostgreSQL schema name. If None, uses default (public).
                 When specified, creates the schema if needed and runs migrations there.
 

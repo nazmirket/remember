@@ -52,21 +52,6 @@ from .db_utils import acquire_with_retry
 logger = logging.getLogger(__name__)
 
 
-def _llm_requests_persistable() -> bool:
-    """Whether the ``llm_requests`` table exists on the active backend.
-
-    ``llm_requests`` is PostgreSQL-only: its migration is ``run_for_dialect(pg=...)``
-    with the Oracle slot intentionally absent, and MaintenanceLoop skips its
-    retention sweep on Oracle for the same reason. On Oracle the table does not
-    exist, so best-effort trace writes must be skipped rather than attempted —
-    otherwise every LLM call fires an INSERT that fails with ORA-00903 and spams
-    the error log. Mirrors the ``_is_oracle()`` gate in MaintenanceLoop.start.
-    """
-    from .schema import _is_oracle
-
-    return not _is_oracle()
-
-
 def llm_requests_locked_in_id_order(table: str, where: str) -> str:
     """A ``target`` CTE that locks the ``llm_requests`` rows matching ``where``, by id.
 
@@ -762,8 +747,6 @@ class LLMTraceRecorder:
         """Whether tracing is active for the given call scope."""
         if not self._enabled:
             return False
-        if not _llm_requests_persistable():
-            return False
         if _scope_matches(scope, self._excluded_scopes):
             return False
         if self._allowed_scopes is not None:
@@ -1005,7 +988,7 @@ class LLMTraceRecorder:
         ids are snapshotted synchronously here because the caller may reset the
         context immediately after.
         """
-        if not self._enabled or not _llm_requests_persistable() or trace_ctx is None or not trace_ctx.trace_id:
+        if not self._enabled or trace_ctx is None or not trace_ctx.trace_id:
             return
         created_ids = list(dict.fromkeys([*(created or []), *trace_ctx.created_memory_ids]))
         source_ids = list(dict.fromkeys([*(source or []), *trace_ctx.source_memory_ids]))

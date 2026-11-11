@@ -173,7 +173,7 @@ def vlm_engine(monkeypatch):
             "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES": "5",
             "HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF": "2",
             "HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF": "20",
-            "HINDSIGHT_API_RETAIN_LLM_CACHE_AFFINITY": "xai_conv_id",
+            "HINDSIGHT_API_RETAIN_LLM_CACHE_AFFINITY": "openai_prompt_cache_key",
             "HINDSIGHT_API_VLM_MODEL": "vision-model",
             **extra,
         }
@@ -196,7 +196,7 @@ def test_the_vision_slot_inherits_the_retain_settings_when_its_own_are_unset(vlm
     assert vlm.max_retries == 5
     assert vlm.initial_backoff == 2.0
     assert vlm.max_backoff == 20.0
-    assert vlm.cache_affinity == "xai_conv_id"
+    assert vlm.cache_affinity == "openai_prompt_cache_key"
 
 
 def test_the_vision_slot_takes_its_own_settings_over_the_retain_ones(vlm_engine):
@@ -224,4 +224,4 @@ def test_the_vision_slot_takes_its_own_settings_over_the_retain_ones(vlm_engine)
     assert retain.reasoning_effort == "xhigh"
     assert retain.timeout == 120.0
     assert retain.max_retries == 5
-    assert retain.cache_affinity == "xai_conv_id"
+    assert retain.cache_affinity == "openai_prompt_cache_key"

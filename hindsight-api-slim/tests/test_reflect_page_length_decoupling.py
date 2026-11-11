@@ -13,9 +13,7 @@ truncates the visible answer mid-word. These tests pin the decoupled contract:
   text.
 """
 
-from hindsight_api.engine.response_models import LLMCallResult
-import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,6 +21,7 @@ from hindsight_api.config import HindsightConfig, clear_config_cache
 from hindsight_api.engine.llm_interface import LLMToolChoice
 from hindsight_api.engine.reflect.agent import run_reflect_agent
 from hindsight_api.engine.reflect.prompts import build_final_prompt
+from hindsight_api.engine.response_models import LLMCallResult
 
 BANK = {"name": "TestBank", "mission": "Testing"}
 
@@ -65,8 +64,8 @@ def _mock_llm(final_answer: str = "Synthesized final answer."):
     from hindsight_api.engine.response_models import TokenUsage
 
     llm = MagicMock()
-    llm.provider = "gemini"
-    llm.model = "gemini-2.5-flash"
+    llm.provider = "openai"
+    llm.model = "gpt-4o-mini"
     llm.call = AsyncMock(
         return_value=LLMCallResult(
             content=final_answer, usage=TokenUsage(input_tokens=40, output_tokens=12, total_tokens=52)
@@ -188,33 +187,3 @@ async def test_tool_call_loop_uses_config_cap(monkeypatch):
             assert "done" in {t["function"]["name"] for t in c.kwargs["declared_tools"]}
     finally:
         clear_config_cache()
-
-
-# --------------------------------------------------------------------------- #
-# Gemini surfaces MAX_TOKENS truncation instead of a silent success
-# --------------------------------------------------------------------------- #
-@pytest.mark.asyncio
-async def test_gemini_warns_on_max_tokens_truncation(caplog):
-    pytest.importorskip("google.genai")
-    from hindsight_api.engine.llm_wrapper import LLMConfig
-
-    with patch("google.genai.Client", return_value=MagicMock()):
-        llm = LLMConfig(provider="gemini", api_key="fake-key", base_url="", model="gemini-2.5-flash")
-
-    response = MagicMock()
-    response.text = "A page that was cut off mid-wor"
-    candidate = MagicMock()
-    candidate.finish_reason = "FinishReason.MAX_TOKENS"
-    response.candidates = [candidate]
-    response.usage_metadata = MagicMock(
-        prompt_token_count=10, candidates_token_count=20, cached_content_token_count=0, thoughts_token_count=480
-    )
-    llm._provider_impl._client.aio.models.generate_content = AsyncMock(return_value=response)
-
-    with caplog.at_level(logging.WARNING):
-        out = (
-            await llm._provider_impl.call([{"role": "user", "content": "write a page"}], max_completion_tokens=500)
-        ).content
-
-    assert out == "A page that was cut off mid-wor"
-    assert any("truncated at max_output_tokens" in r.message for r in caplog.records)

@@ -15,7 +15,6 @@ import time
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Callable, cast
 
-from hindsight_api.engine.cache_affinity import apply_opencode_session
 from hindsight_api.engine.llm_interface import (
     LLMInterface,
     ProviderContentPolicyError,
@@ -411,7 +410,6 @@ class AnthropicLLM(LLMInterface):
 
         # opencode-go's /v1/messages requires x-opencode-session (#4071), reached
         # via provider=anthropic + an opencode.ai base URL; the host check decides.
-        apply_opencode_session(call_params, base_url=self.base_url)
 
         last_exception = None
 

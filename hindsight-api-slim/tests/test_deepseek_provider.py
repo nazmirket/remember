@@ -4,7 +4,6 @@ import pytest
 
 from hindsight_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM
 
-
 # These tests assert the default json_object behaviour, not a job's JSON-mode override.
 pytestmark = pytest.mark.usefixtures("default_json_mode")
 
@@ -13,31 +12,9 @@ def _make_deepseek_llm(model: str = "deepseek-v4-flash") -> OpenAICompatibleLLM:
     return OpenAICompatibleLLM(
         provider="openai",
         api_key="sk-test",
-        base_url="https://api.deepseek.com",
+        base_url="http://localhost:1234/v1",
         model=model,
     )
-
-
-def test_deepseek_first_class_provider_sets_default_base_url():
-    """provider="deepseek" is a configuration shortcut for the api.deepseek.com endpoint."""
-    llm = OpenAICompatibleLLM(
-        provider="deepseek",
-        api_key="sk-test",
-        base_url="",
-        model="deepseek-v4-flash",
-    )
-
-    assert llm.base_url == "https://api.deepseek.com"
-
-
-def test_deepseek_first_class_provider_requires_api_key():
-    with pytest.raises(ValueError, match="API key is required for deepseek"):
-        OpenAICompatibleLLM(
-            provider="deepseek",
-            api_key="",
-            base_url="",
-            model="deepseek-v4-flash",
-        )
 
 
 def test_deepseek_flash_is_not_treated_as_reasoning_model():
@@ -53,13 +30,13 @@ def test_deepseek_reasoning_models_still_use_reasoning_parameters():
 
 
 @pytest.mark.asyncio
-async def test_a_strict_schema_goes_in_the_prompt_on_deepseek():
-    """DeepSeek rejects a json_schema response_format with HTTP 400, so it gets json_object."""
+async def test_strict_schema_reaches_openai_compatible_local_server():
+    """A local OpenAI-compatible endpoint receives the configured strict schema."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from hindsight_api.engine.providers.tools_via_schema import ResponseSchema, schema_format
 
-    llm = OpenAICompatibleLLM(provider="deepseek", api_key="k", base_url="", model="deepseek-v4-flash")
+    llm = _make_deepseek_llm()
     reply = MagicMock()
     reply.choices[0].message.content = '{"query": "x"}'
     reply.choices[0].finish_reason = "stop"
@@ -79,6 +56,6 @@ async def test_a_strict_schema_goes_in_the_prompt_on_deepseek():
             max_retries=0,
         )
     sent = create.await_args.kwargs
-    assert sent["response_format"] == {"type": "json_object"}
-    assert '"query"' in sent["messages"][0]["content"]
+    assert sent["response_format"]["type"] == "json_schema"
+    assert "query" in sent["response_format"]["json_schema"]["schema"]["properties"]
     assert result.content == {"query": "x"}

@@ -75,7 +75,7 @@ from ..models import RequestContext
 from ..schema_context import _current_schema
 from .db_utils import acquire_with_retry
 from .retain.attachment_store import ATTACHMENT_SWEEP_GRACE
-from .schema import _is_oracle, fq_routine, fq_table, fq_table_explicit
+from .schema import fq_routine, fq_table, fq_table_explicit
 
 if TYPE_CHECKING:
     from .memories.base import MemoriesExtension
@@ -167,9 +167,6 @@ class MaintenanceLoop:
         # llm_requests) and the reconcile relies on PG-only PL/pgSQL routines
         # installed by the maintenance-routines migration. Oracle support is
         # intentionally absent (mirrors that PG-only migration).
-        if _is_oracle():
-            logger.debug("Maintenance loop not started: PostgreSQL-only")
-            return
         if not self._any_job_enabled():
             logger.debug("Maintenance loop not started: no jobs enabled")
             return

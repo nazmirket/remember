@@ -332,14 +332,14 @@ def test_find_api_command_prefers_installed_binary_over_uvx(tmp_path, monkeypatc
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("0.0.0") == [str(api_binary)]
+    assert manager._find_api_command() == [str(api_binary)]
 
 
 def test_find_api_command_skips_slim_binary_without_local_ml(tmp_path, monkeypatch):
     """Default local embeddings/reranker need sentence-transformers.
 
     A slim sibling hindsight-api binary can exist without local ML extras
-    installed. In that case, use the uvx full-package fallback instead of
+    installed. In that case, report that local dependencies are missing instead of
     starting a daemon that immediately fails during local provider init.
     """
     scripts_dir = tmp_path / "venv_bin"
@@ -361,7 +361,8 @@ def test_find_api_command_skips_slim_binary_without_local_ml(tmp_path, monkeypat
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.find_spec", lambda name: None)
 
-    assert manager._find_api_command("1.2.3", env={}) == ["uvx", "hindsight-api@1.2.3"]
+    with pytest.raises(RuntimeError, match="No usable local hindsight-api"):
+        manager._find_api_command(env={})
 
 
 def test_find_api_command_allows_slim_binary_with_external_providers(tmp_path, monkeypatch):
@@ -383,7 +384,7 @@ def test_find_api_command_allows_slim_binary_with_external_providers(tmp_path, m
         "HINDSIGHT_API_EMBEDDINGS_PROVIDER": "cohere",
         "HINDSIGHT_API_RERANKER_PROVIDER": "cohere",
     }
-    assert manager._find_api_command("1.2.3", env=env) == [str(api_binary)]
+    assert manager._find_api_command(env=env) == [str(api_binary)]
 
 
 def test_find_api_command_target_install_uses_file_relative_fallback(tmp_path, monkeypatch):
@@ -412,7 +413,7 @@ def test_find_api_command_target_install_uses_file_relative_fallback(tmp_path, m
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("0.0.0") == [str(sibling_bin)]
+    assert manager._find_api_command() == [str(sibling_bin)]
 
 
 def test_find_api_command_target_install_uses_sibling_even_without_local_ml(tmp_path, monkeypatch):
@@ -445,7 +446,7 @@ def test_find_api_command_target_install_uses_sibling_even_without_local_ml(tmp_
     # fall back to uvx, but the --target sibling must still win.
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.find_spec", lambda name: None)
 
-    assert manager._find_api_command("1.2.3", env={}) == [str(sibling_bin)]
+    assert manager._find_api_command(env={}) == [str(sibling_bin)]
 
 
 def _embed_module_in_venv(venv: Path, site_packages: str) -> Path:
@@ -479,12 +480,12 @@ def test_find_api_command_uses_venv_of_module_when_run_by_another_interpreter(tm
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.sys.executable", str(base_scripts / "python.exe"))
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("1.2.3") == [str(api_binary)]
+    assert manager._find_api_command() == [str(api_binary)]
 
     # With the venv's pythonw.exe present, the daemon starts windowless from it (#1885).
     pythonw = venv / "Scripts" / "pythonw.exe"
     pythonw.touch()
-    assert manager._find_api_command("1.2.3") == [str(pythonw), "-m", "hindsight_api.main"]
+    assert manager._find_api_command() == [str(pythonw), "-m", "hindsight_api.main"]
 
 
 def test_find_api_command_uses_venv_of_module_on_posix(tmp_path, monkeypatch):
@@ -503,11 +504,12 @@ def test_find_api_command_uses_venv_of_module_on_posix(tmp_path, monkeypatch):
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("1.2.3") == [str(api_binary)]
+    assert manager._find_api_command() == [str(api_binary)]
 
     # Missing local ML deps keep the #2676 uvx fallback, as for a standard venv.
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.find_spec", lambda name: None)
-    assert manager._find_api_command("1.2.3", env={}) == ["uvx", "hindsight-api@1.2.3"]
+    with pytest.raises(RuntimeError, match="No usable local hindsight-api"):
+        manager._find_api_command(env={})
 
 
 def test_find_api_command_target_bundle_inside_venv_keeps_its_sibling(tmp_path, monkeypatch):
@@ -535,11 +537,11 @@ def test_find_api_command_target_bundle_inside_venv_keeps_its_sibling(tmp_path, 
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("1.2.3") == [str(sibling_bin)]
+    assert manager._find_api_command() == [str(sibling_bin)]
 
 
-def test_find_api_command_falls_back_to_uvx_when_no_binary(tmp_path, monkeypatch):
-    """Without an installed binary or dev checkout, fall back to uvx."""
+def test_find_api_command_rejects_missing_local_binary(tmp_path, monkeypatch):
+    """Without a local binary or checkout, fail instead of downloading upstream."""
     scripts_dir = tmp_path / "bin"
     scripts_dir.mkdir()
     # No hindsight-api binary in scripts_dir
@@ -551,7 +553,8 @@ def test_find_api_command_falls_back_to_uvx_when_no_binary(tmp_path, monkeypatch
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.platform.system", lambda: "Linux")
 
-    assert manager._find_api_command("1.2.3") == ["uvx", "hindsight-api@1.2.3"]
+    with pytest.raises(RuntimeError, match="No usable local hindsight-api"):
+        manager._find_api_command()
 
 
 def test_find_api_command_windows_uses_exe_suffix(tmp_path, monkeypatch):
@@ -581,7 +584,7 @@ def test_find_api_command_windows_uses_exe_suffix(tmp_path, monkeypatch):
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.sys.executable", str(interp_dir / "python.exe"))
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("0.0.0") == [str(api_binary)]
+    assert manager._find_api_command() == [str(api_binary)]
 
 
 def test_find_api_command_windows_prefers_gui_interpreter(tmp_path, monkeypatch):
@@ -609,7 +612,7 @@ def test_find_api_command_windows_prefers_gui_interpreter(tmp_path, monkeypatch)
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.sys.executable", str(scripts_dir / "python.exe"))
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("0.0.0") == [str(pythonw), "-m", "hindsight_api.main"]
+    assert manager._find_api_command() == [str(pythonw), "-m", "hindsight_api.main"]
 
 
 def test_find_api_command_windows_prefers_scripts_dir_pythonw_for_wrappers(tmp_path, monkeypatch):
@@ -634,7 +637,7 @@ def test_find_api_command_windows_prefers_scripts_dir_pythonw_for_wrappers(tmp_p
     monkeypatch.setattr("hindsight_embed.daemon_embed_manager.sys.executable", str(wrapper_dir / "hindsight-embed.exe"))
     _mock_sentence_transformers_present(monkeypatch)
 
-    assert manager._find_api_command("0.0.0") == [str(pythonw), "-m", "hindsight_api.main"]
+    assert manager._find_api_command() == [str(pythonw), "-m", "hindsight_api.main"]
 
 
 def test_listening_pids_windows_hides_netstat_console(monkeypatch):
@@ -675,30 +678,6 @@ def test_register_profile_preserves_existing_embed_keys(tmp_path, monkeypatch):
     env = (tmp_path / ".hindsight" / "profiles" / "p.env").read_text()
     assert "HINDSIGHT_EMBED_CP_PORT=25000" in env  # preserved, not wiped
     assert "HINDSIGHT_API_LLM_API_KEY=sk-x" not in env
-
-
-def test_component_version_resolution(tmp_path, monkeypatch):
-    """Component version: profile .env override > env var > embed __version__."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    from hindsight_embed import __version__
-
-    manager = DaemonEmbedManager()
-    manager._profile_manager.create_profile("p", {"HINDSIGHT_API_LLM_PROVIDER": "openai"})
-
-    # default = embed version
-    monkeypatch.delenv("HINDSIGHT_EMBED_CP_VERSION", raising=False)
-    assert manager._component_version("p", "HINDSIGHT_EMBED_CP_VERSION") == __version__
-
-    # env var overrides the default
-    monkeypatch.setenv("HINDSIGHT_EMBED_CP_VERSION", "9.9.9")
-    assert manager._component_version("p", "HINDSIGHT_EMBED_CP_VERSION") == "9.9.9"
-
-    # profile .env override beats the env var
-    manager._profile_manager.create_profile(
-        "p", {"HINDSIGHT_API_LLM_PROVIDER": "openai", "HINDSIGHT_EMBED_CP_VERSION": "1.2.3"}
-    )
-    assert manager._component_version("p", "HINDSIGHT_EMBED_CP_VERSION") == "1.2.3"
 
 
 def test_is_port_in_use_checks_both_loopback_families(monkeypatch):

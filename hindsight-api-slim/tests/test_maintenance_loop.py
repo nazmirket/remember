@@ -11,16 +11,6 @@ from hindsight_api.engine.maintenance import MaintenanceLoop
 from hindsight_api.engine.memory_engine import MemoryEngine
 
 
-def test_start_is_noop_on_oracle(monkeypatch):
-    """The loop is PostgreSQL-only (PG-only tables + routines); it must not start on Oracle."""
-    import hindsight_api.engine.maintenance as maintenance_mod
-
-    monkeypatch.setattr(maintenance_mod, "_is_oracle", lambda: True)
-    loop = MaintenanceLoop(engine=None)
-    loop.start()
-    assert loop._task is None
-
-
 def _tick_cfg(**overrides):
     """A config stub for ``_tick``, with every job disabled unless overridden."""
     from types import SimpleNamespace

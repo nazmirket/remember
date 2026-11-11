@@ -23,7 +23,6 @@ import pytest
 
 from hindsight_api.engine.cache_affinity import (
     OPENAI_PROMPT_CACHE_KEY_PARAM,
-    XAI_CONV_ID_HEADER,
     CacheAffinityMode,
     apply_cache_affinity,
     cache_affinity_id,
@@ -75,40 +74,40 @@ def _bound_trace(trace_id: str):
         reset_trace_context(token)
 
 
-# ── AC1: xai_conv_id header ───────────────────────────────────────────────────
+# ── AC1: cache key identity ───────────────────────────────────────────────────
 
 
-async def test_xai_header_is_32_lowercase_hex():
-    llm = _llm("xai_conv_id")
+async def test_cache_key_is_32_lowercase_hex():
+    llm = _llm("openai_prompt_cache_key")
     create = await _call(llm, AsyncMock(return_value=_chat_response()))
-    header = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+    header = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
     assert _HEX32.match(header)
 
 
-async def test_xai_header_is_stable_within_one_trace_context():
+async def test_cache_key_is_stable_within_one_trace_context():
     """Every LLM call of one reflect/retain run must pin to the same backend."""
-    llm = _llm("xai_conv_id")
+    llm = _llm("openai_prompt_cache_key")
     create = AsyncMock(return_value=_chat_response())
     with _bound_trace("11111111-1111-1111-1111-111111111111"):
         await _call(llm, create)
-        first = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+        first = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
         # Different message content: the id comes from operation identity, not payload.
         llm._client.chat.completions.create = create
         with patch("hindsight_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
             await llm.call(messages=[{"role": "user", "content": "a different prompt"}], max_retries=0)
-        second = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+        second = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
     assert first == second
 
 
-async def test_xai_header_differs_across_trace_contexts():
-    llm = _llm("xai_conv_id")
+async def test_cache_key_differs_across_trace_contexts():
+    llm = _llm("openai_prompt_cache_key")
     create = AsyncMock(return_value=_chat_response())
     with _bound_trace("11111111-1111-1111-1111-111111111111"):
         await _call(llm, create)
-        first = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+        first = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
     with _bound_trace("22222222-2222-2222-2222-222222222222"):
         await _call(llm, create)
-        second = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+        second = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
     assert first != second
 
 
@@ -148,14 +147,13 @@ async def test_no_affinity_key_by_default(mode):
     kwargs = create.call_args.kwargs
     assert "extra_headers" not in kwargs
     assert OPENAI_PROMPT_CACHE_KEY_PARAM not in kwargs
-    assert XAI_CONV_ID_HEADER not in str(kwargs)
 
 
 def test_invalid_mode_raises():
     """The setting has no visible effect in the response, so a typo that silently
     disabled it would be indistinguishable from it working."""
     with pytest.raises(ValueError, match="Invalid cache_affinity"):
-        _llm("xai-conv-id")
+        _llm("unknown-mode")
 
 
 # ── AC4: auto resolution table ────────────────────────────────────────────────
@@ -164,8 +162,8 @@ def test_invalid_mode_raises():
 @pytest.mark.parametrize(
     ("provider", "base_url", "expected"),
     [
-        ("openai", "https://api.x.ai/v1", CacheAffinityMode.XAI_CONV_ID),
-        ("openai", "https://cli-chat-proxy.grok.com/v1", CacheAffinityMode.XAI_CONV_ID),
+        ("openai", "https://model.example/v1", CacheAffinityMode.NONE),
+        ("openai", "https://proxy.example/v1", CacheAffinityMode.NONE),
         ("openai", None, CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY),
         ("openai", "", CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY),
         ("openai", "https://api.openai.com/v1", CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY),
@@ -179,21 +177,21 @@ def test_auto_resolution_table(provider, base_url, expected):
     assert resolve_cache_affinity(CacheAffinityMode.AUTO, provider, base_url) is expected
 
 
-@pytest.mark.parametrize("base_url", ["https://api.vertex.ai/v1", "https://x.ai.evil.example/v1"])
-def test_auto_does_not_substring_match_xai(base_url):
-    """`"x.ai" in base_url` would false-match both of these; the host is parsed."""
+@pytest.mark.parametrize("base_url", ["https://api.openai.com.evil.example/v1", "https://not-openai.com/v1"])
+def test_auto_requires_an_openai_hostname(base_url):
+    """A substring match would trust a different host; the hostname is parsed."""
     assert resolve_cache_affinity(CacheAffinityMode.AUTO, "openai", base_url) is CacheAffinityMode.NONE
 
 
 def test_auto_resolves_once_at_construction():
-    llm = _llm("auto", base_url="https://api.x.ai/v1")
-    assert llm._cache_affinity is CacheAffinityMode.XAI_CONV_ID
+    llm = _llm("auto", base_url="https://api.openai.com/v1")
+    assert llm._cache_affinity is CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY
 
 
-@pytest.mark.parametrize("mode", ["none", "xai_conv_id", "openai_prompt_cache_key"])
+@pytest.mark.parametrize("mode", ["none", "openai_prompt_cache_key"])
 def test_explicit_modes_are_not_re_resolved(mode):
     parsed = parse_cache_affinity(mode)
-    assert resolve_cache_affinity(parsed, "openai", "https://api.x.ai/v1") is parsed
+    assert resolve_cache_affinity(parsed, "openai", "https://model.example/v1") is parsed
 
 
 # ── AC5: no-context fallback (first-message hash) ─────────────────────────────
@@ -227,14 +225,14 @@ def test_fallback_returns_none_for_malformed_messages(messages):
 async def test_no_header_when_messages_are_malformed():
     """Fail-open all the way to the wire: no id means no header, not an error."""
     request = {"messages": "bogus"}
-    apply_cache_affinity(request, CacheAffinityMode.XAI_CONV_ID)
+    apply_cache_affinity(request, CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY)
     assert request == {"messages": "bogus"}
 
 
 async def test_call_uses_the_fallback_hash_without_a_trace_context():
-    llm = _llm("xai_conv_id")
+    llm = _llm("openai_prompt_cache_key")
     create = await _call(llm, AsyncMock(return_value=_chat_response()))
-    sent = create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER]
+    sent = create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM]
     assert sent == cache_affinity_id(create.call_args.kwargs["messages"])
 
 
@@ -291,11 +289,11 @@ def test_config_reads_global_and_per_operation_affinity(clean_llm_env):
     from hindsight_api.config import HindsightConfig
 
     clean_llm_env.setenv("HINDSIGHT_API_LLM_CACHE_AFFINITY", "auto")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY", "xai_conv_id")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY", "openai_prompt_cache_key")
     config = HindsightConfig.from_env()
 
     assert config.llm_cache_affinity == "auto"
-    assert config.reflect_llm_cache_affinity == "xai_conv_id"
+    assert config.reflect_llm_cache_affinity == "openai_prompt_cache_key"
     assert config.retain_llm_cache_affinity is None
     assert config.consolidation_llm_cache_affinity is None
 
@@ -305,7 +303,7 @@ def test_config_affinity_defaults_to_auto(clean_llm_env):
 
     "auto" only emits a hint for hosts documented to accept one (see
     test_auto_default_sends_nothing_to_an_unrecognized_backend), so defaulting
-    it on costs unknown backends nothing while every xAI/OpenAI deployment gets
+    it on costs unknown backends nothing while every OpenAI deployment gets
     the cache hit it was otherwise silently losing.
     """
     from hindsight_api.config import HindsightConfig
@@ -347,8 +345,8 @@ def test_auto_default_sends_nothing_to_an_unrecognized_backend(provider, base_ur
 @pytest.mark.parametrize(
     ("provider", "base_url", "expected"),
     [
-        ("openai", "https://api.x.ai/v1", CacheAffinityMode.XAI_CONV_ID),
-        ("openai", "https://grok.com/v1", CacheAffinityMode.XAI_CONV_ID),
+        ("openai", "https://model.example/v1", CacheAffinityMode.NONE),
+        ("openai", "https://another-model.example/v1", CacheAffinityMode.NONE),
         ("openai", None, CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY),
         ("openai", "https://api.openai.com/v1", CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY),
         ("openai", "https://myco.openai.azure.com/", CacheAffinityMode.NONE),
@@ -363,18 +361,18 @@ def test_indexed_member_carries_affinity(clean_llm_env):
 
     clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_PROVIDER", "openai")
     clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_API_KEY", "sk-member")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_CACHE_AFFINITY", "xai_conv_id")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_CACHE_AFFINITY", "openai_prompt_cache_key")
 
     members = _parse_llm_members("REFLECT_")
-    assert [m.cache_affinity for m in members] == ["xai_conv_id"]
+    assert [m.cache_affinity for m in members] == ["openai_prompt_cache_key"]
     assert _parse_llm_members("RETAIN_") == []
 
 
 def test_llm_provider_from_env_carries_affinity(clean_llm_env):
-    clean_llm_env.setenv("HINDSIGHT_API_LLM_CACHE_AFFINITY", "xai_conv_id")
-    clean_llm_env.setenv("HINDSIGHT_API_LLM_BASE_URL", "https://api.x.ai/v1")
+    clean_llm_env.setenv("HINDSIGHT_API_LLM_CACHE_AFFINITY", "openai_prompt_cache_key")
+    clean_llm_env.setenv("HINDSIGHT_API_LLM_BASE_URL", "https://model.example/v1")
     llm = LLMProvider.from_env()
-    assert llm._provider_impl._cache_affinity is CacheAffinityMode.XAI_CONV_ID
+    assert llm._provider_impl._cache_affinity is CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY
 
 
 # ── AC9: bank attribution is unaffected ───────────────────────────────────────
@@ -387,7 +385,7 @@ async def test_bank_attribution_and_affinity_coexist(clean_llm_env):
     clean_llm_env.setenv("HINDSIGHT_API_LLM_SEND_BANK_AS_USER", "true")
     clear_config_cache()
 
-    llm = _llm("xai_conv_id")
+    llm = _llm("openai_prompt_cache_key")
     create = AsyncMock(return_value=_chat_response())
     token = _current_bank_id.set("user-9")
     try:
@@ -396,7 +394,7 @@ async def test_bank_attribution_and_affinity_coexist(clean_llm_env):
         _current_bank_id.reset(token)
 
     assert create.call_args.kwargs["user"] == "user-9"
-    assert _HEX32.match(create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER])
+    assert _HEX32.match(create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM])
 
 
 # ── AC11: user-configured values win ──────────────────────────────────────────
@@ -412,21 +410,11 @@ async def test_configured_prompt_cache_key_survives():
     assert OPENAI_PROMPT_CACHE_KEY_PARAM not in kwargs
 
 
-def test_preset_conv_id_header_is_not_clobbered():
-    """Mirrors `apply_bank_attribution`'s "never override an explicit value" rule."""
-    request = {
-        "messages": [{"role": "user", "content": "ping"}],
-        "extra_headers": {XAI_CONV_ID_HEADER: "caller-pinned"},
-    }
-    apply_cache_affinity(request, CacheAffinityMode.XAI_CONV_ID)
-    assert request["extra_headers"][XAI_CONV_ID_HEADER] == "caller-pinned"
-
-
 def test_other_extra_headers_are_preserved():
     request = {"messages": [{"role": "user", "content": "ping"}], "extra_headers": {"x-other": "keep"}}
-    apply_cache_affinity(request, CacheAffinityMode.XAI_CONV_ID)
+    apply_cache_affinity(request, CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY)
     assert request["extra_headers"]["x-other"] == "keep"
-    assert _HEX32.match(request["extra_headers"][XAI_CONV_ID_HEADER])
+    assert _HEX32.match(request[OPENAI_PROMPT_CACHE_KEY_PARAM])
 
 
 # ── AC12: the hint survives a retry ───────────────────────────────────────────
@@ -434,7 +422,7 @@ def test_other_extra_headers_are_preserved():
 
 async def test_affinity_persists_across_a_retry():
     """`call_params` is built once before the retry loop; attempt 2 must carry it."""
-    llm = _llm("xai_conv_id")
+    llm = _llm("openai_prompt_cache_key")
     # Empty content raises a retryable ProviderResponseError on attempt 1.
     create = AsyncMock(side_effect=[_chat_response(content=""), _chat_response()])
     llm._client.chat.completions.create = create
@@ -446,7 +434,7 @@ async def test_affinity_persists_across_a_retry():
         )
     assert create.await_count == 2
     for call in create.await_args_list:
-        assert _HEX32.match(call.kwargs["extra_headers"][XAI_CONV_ID_HEADER])
+        assert _HEX32.match(call.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM])
 
 
 # ── AC10: END-TO-END anti-inert ───────────────────────────────────────────────
@@ -464,22 +452,20 @@ async def test_end_to_end_reflect_lane_sends_the_affinity_header(clean_llm_env):
     """
     from hindsight_api import MemoryEngine
 
-    clean_llm_env.setenv("HINDSIGHT_API_LLM_MODEL", "grok-4.5")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_BASE_URL", "https://api.x.ai/v1")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY", "xai_conv_id")
+    clean_llm_env.setenv("HINDSIGHT_API_LLM_MODEL", "gpt-4o-mini")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_BASE_URL", "https://model.example/v1")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY", "openai_prompt_cache_key")
 
     engine = MemoryEngine(skip_llm_verification=True)
     reflect_llm = engine._reflect_llm_config
     create = AsyncMock(return_value=_chat_response())
     reflect_llm._provider_impl._client.chat.completions.create = create
 
-    configured = reflect_llm.with_config(
-        SimpleNamespace(llm_gemini_safety_settings=None), bank_id="bank-e2e", operation="reflect"
-    )
+    configured = reflect_llm.with_config(SimpleNamespace(), bank_id="bank-e2e", operation="reflect")
     with patch("hindsight_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
         await configured.call(messages=[{"role": "user", "content": "ping"}], max_retries=0)
 
-    assert _HEX32.match(create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER])
+    assert _HEX32.match(create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM])
 
 
 async def test_end_to_end_failover_member_sends_the_affinity_header(clean_llm_env):
@@ -489,23 +475,23 @@ async def test_end_to_end_failover_member_sends_the_affinity_header(clean_llm_en
     from hindsight_api import MemoryEngine
     from hindsight_api.engine.multi_llm import MultiLLMProvider
 
-    clean_llm_env.setenv("HINDSIGHT_API_LLM_MODEL", "grok-4.5")
-    clean_llm_env.setenv("HINDSIGHT_API_LLM_CACHE_AFFINITY", "xai_conv_id")
+    clean_llm_env.setenv("HINDSIGHT_API_LLM_MODEL", "gpt-4o-mini")
+    clean_llm_env.setenv("HINDSIGHT_API_LLM_CACHE_AFFINITY", "openai_prompt_cache_key")
     clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_PROVIDER", "openai")
     clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_API_KEY", "sk-member")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_MODEL", "grok-4.5-fallback")
-    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_BASE_URL", "https://api.x.ai/v1")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_MODEL", "local-fallback-model")
+    clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_1_BASE_URL", "https://model.example/v1")
     clean_llm_env.setenv("HINDSIGHT_API_REFLECT_LLM_STRATEGY", '{"mode": "failover"}')
 
     engine = MemoryEngine(skip_llm_verification=True)
     chain = engine._reflect_llm_config
     assert isinstance(chain, MultiLLMProvider)
     member = chain._members[1]
-    assert member.model == "grok-4.5-fallback"
+    assert member.model == "local-fallback-model"
 
     create = AsyncMock(return_value=_chat_response())
     member._provider_impl._client.chat.completions.create = create
     with patch("hindsight_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
         await member.call(messages=[{"role": "user", "content": "ping"}], max_retries=0)
 
-    assert _HEX32.match(create.call_args.kwargs["extra_headers"][XAI_CONV_ID_HEADER])
+    assert _HEX32.match(create.call_args.kwargs[OPENAI_PROMPT_CACHE_KEY_PARAM])

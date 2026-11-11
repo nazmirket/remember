@@ -192,7 +192,7 @@ export interface RawConfig {
    *
    *  These are re-synced like the seeded ones — the config is the source of truth for the query —
    *  so rewording one here reaches the live page on the next session. A page you create yourself
-   *  in the control plane is a different thing entirely and is never touched.
+   *  through the API or CLI is a different thing entirely and is never touched.
    *
    *  File-only, and replaced (not merged) by a `banks.<id>` section, exactly like `pages`. */
   customPages?: CustomPagesConfig;
@@ -204,12 +204,6 @@ export interface RawConfig {
   /** Plugin log verbosity ("debug" | "info" | "warn" | "error", default "info");
    *  HINDSIGHT_LOG_LEVEL overrides for ad-hoc debugging. */
   logLevel?: "debug" | "info" | "warn" | "error";
-  /** Keep the installed runtime current by itself (default true). Once a day a session start asks
-   *  npm for the published version and, when it is newer, re-stages ~/.hindsight/coding-agents in
-   *  the background — the copy every wired agent's hooks already point at. It rewires no host
-   *  config, so a release that adds a NEW hook entry point still needs a manual `install`.
-   *  Set false to pin the installed version (air-gapped machines, or a deliberate downgrade);
-   *  updating is then `npx @vectorize-io/hindsight-coding-agents install` again, as before. */
   surveyRefreshCommits?: number; // re-run the survey at SessionStart once this many commits have accrued since the last one, so structural pages track an evolving architecture (default 20; 0 = cold-seed only)
   /** How git history feeds memory — seeding AND keeping current use the same engine:
    *  "message" = commit messages only (cheap aggregated doc, re-upserted when HEAD moves);

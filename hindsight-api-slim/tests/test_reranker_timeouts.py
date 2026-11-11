@@ -45,73 +45,9 @@ def _make_config(**overrides) -> HindsightConfig:
     "provider, extra, timeout_field, attr_path",
     [
         (
-            "cohere",
-            {"reranker_cohere_api_key": "k", "reranker_cohere_base_url": "https://example/rerank"},
-            "reranker_cohere_timeout",
-            ("_http_client", "timeout"),
-        ),
-        (
-            "openrouter",
-            {
-                "reranker_openrouter_api_key": "k",
-                "reranker_openrouter_base_url": "https://openrouter.ai/api/v1/rerank",
-            },
-            "reranker_openrouter_timeout",
-            ("_http_client", "timeout"),
-        ),
-        (
-            "zeroentropy",
-            {"reranker_zeroentropy_api_key": "k"},
-            "reranker_zeroentropy_timeout",
-            ("_client", "timeout"),
-        ),
-        (
-            "siliconflow",
-            {
-                "reranker_siliconflow_api_key": "k",
-                "reranker_siliconflow_base_url": "https://api.siliconflow.cn/v1",
-            },
-            "reranker_siliconflow_timeout",
-            ("_client", "timeout"),
-        ),
-        (
-            "nvidia",
-            {
-                "reranker_nvidia_api_key": "k",
-                "reranker_nvidia_model": "nvidia/m",
-                "reranker_nvidia_base_url": "https://x",
-            },
-            "reranker_nvidia_timeout",
-            ("timeout",),
-        ),
-        (
-            "alibaba",
-            {"reranker_alibaba_api_key": "k"},
-            "reranker_alibaba_timeout",
-            ("_client", "timeout"),
-        ),
-        (
             "typesafe",
             {"reranker_typesafe_api_key": "k"},
             "reranker_typesafe_timeout",
-            ("timeout",),
-        ),
-        (
-            "litellm",
-            {"reranker_litellm_api_base": "http://localhost:4000"},
-            "reranker_litellm_timeout",
-            ("timeout",),
-        ),
-        (
-            "litellm-sdk",
-            {"reranker_litellm_sdk_api_key": "k"},
-            "reranker_litellm_sdk_timeout",
-            ("timeout",),
-        ),
-        (
-            "google",
-            {"reranker_google_project_id": "test-project"},
-            "reranker_google_timeout",
             ("timeout",),
         ),
     ],
@@ -136,13 +72,4 @@ def test_factory_threads_per_provider_timeout(provider, extra, timeout_field, at
 def test_default_timeouts_preserve_60s_behavior():
     """Unset env keeps the previously hardcoded 60.0s default for HTTP providers."""
     config = HindsightConfig.from_env()
-    assert config.reranker_cohere_timeout == 60.0
-    assert config.reranker_openrouter_timeout == 60.0
-    assert config.reranker_zeroentropy_timeout == 60.0
-    assert config.reranker_siliconflow_timeout == 60.0
-    assert config.reranker_nvidia_timeout == 60.0
-    assert config.reranker_alibaba_timeout == 60.0
     assert config.reranker_typesafe_timeout == 60.0
-    assert config.reranker_litellm_timeout == 60.0
-    assert config.reranker_litellm_sdk_timeout == 60.0
-    assert config.reranker_google_timeout == 60.0

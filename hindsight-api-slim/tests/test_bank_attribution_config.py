@@ -10,11 +10,9 @@ Deterministic, no network.
 
 import os
 from dataclasses import fields
-from unittest.mock import patch
 
-from hindsight_api.config import DEFAULT_RERANKER_OPENROUTER_BASE_URL, HindsightConfig
+from hindsight_api.config import HindsightConfig
 from hindsight_api.engine.bank_attribution import reranker_bank_attribution_headers
-from hindsight_api.engine.cross_encoder import create_cross_encoder_from_env
 from hindsight_api.schema_context import _current_bank_id
 
 
@@ -107,46 +105,3 @@ class TestSendBankAsUserConfig:
                 _current_bank_id.reset(token)
         finally:
             _restore_env(saved)
-
-
-class TestRerankerOpenRouterBaseUrlConfig:
-    def test_default_matches_previously_hardcoded_url(self):
-        from hindsight_api.config import clear_config_cache
-
-        saved = {
-            "HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL": os.environ.get("HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL")
-        }
-        os.environ.pop("HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL", None)
-        clear_config_cache()
-        try:
-            config = HindsightConfig.from_env()
-            assert config.reranker_openrouter_base_url == DEFAULT_RERANKER_OPENROUTER_BASE_URL
-            assert config.reranker_openrouter_base_url == "https://openrouter.ai/api/v1/rerank"
-        finally:
-            _restore_env(saved)
-
-    def test_env_override_is_read(self):
-        from hindsight_api.config import clear_config_cache
-
-        saved = {
-            "HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL": os.environ.get("HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL")
-        }
-        os.environ["HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL"] = "https://gateway.internal/v1/rerank"
-        clear_config_cache()
-        try:
-            assert HindsightConfig.from_env().reranker_openrouter_base_url == "https://gateway.internal/v1/rerank"
-        finally:
-            _restore_env(saved)
-
-    def test_factory_threads_configured_base_url_into_cross_encoder(self):
-        """create_cross_encoder_from_env() honors the configured OpenRouter rerank URL."""
-        config = _make_full_config(
-            reranker_provider="openrouter",
-            reranker_openrouter_api_key="k",
-            reranker_openrouter_model="cohere/rerank-v3.5",
-            reranker_openrouter_base_url="https://gateway.internal/v1/rerank",
-            reranker_openrouter_timeout=60.0,
-        )
-        with patch("hindsight_api.config.get_config", return_value=config):
-            encoder = create_cross_encoder_from_env()
-        assert encoder.base_url == "https://gateway.internal/v1/rerank"

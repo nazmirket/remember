@@ -238,37 +238,3 @@ async def test_real_openai_batch_api(real_llm_config, test_contents_real, integr
             logger.info(f"\n🧹 Cleaned up test bank: {bank_id}")
         except Exception as e:
             logger.error(f"Failed to cleanup bank: {e}")
-
-
-@pytest.mark.skip(reason="Real API test - requires Groq API key. Run manually if needed.")
-@pytest.mark.integration
-@pytest.mark.slow
-@pytest.mark.asyncio
-async def test_real_batch_supports_groq(integration_config):
-    """
-    Test that Groq also supports batch API (if configured).
-
-    Groq has the same batch API interface as OpenAI.
-    """
-    groq_api_key = os.getenv("HINDSIGHT_API_LLM_API_KEY")
-
-    if not groq_api_key or not groq_api_key.startswith("gsk_"):
-        pytest.skip("Groq API key not found in environment")
-
-    llm_config = LLMProvider(
-        provider="groq",
-        api_key=groq_api_key,
-        base_url="https://api.groq.com/openai/v1",
-        model="llama-3.1-8b-instant",
-        reasoning_effort="medium",
-    )
-
-    # Check if Groq supports batch API
-    supports_batch = await llm_config._provider_impl.supports_batch_api()
-
-    logger.info(f"Groq batch API support: {supports_batch}")
-
-    # Groq should support batch API (same interface as OpenAI)
-    assert supports_batch, "Groq should support batch API"
-
-    logger.info("✅ Groq batch API support confirmed")

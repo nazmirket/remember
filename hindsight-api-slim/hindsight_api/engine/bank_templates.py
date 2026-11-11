@@ -213,9 +213,6 @@ class BankTemplateConfig(BaseModel):
             "min_refresh_interval_seconds."
         ),
     )
-    llm_gemini_safety_settings: list | None = Field(
-        default=None, description="Per-bank Gemini/VertexAI safety filter settings"
-    )
     recall_budget_function: str | None = Field(
         default=None, description="Recall budget mapping function: 'fixed' or 'adaptive'"
     )

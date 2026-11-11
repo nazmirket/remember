@@ -19,7 +19,6 @@ import pytest
 
 from hindsight_api import LLMConfig
 from hindsight_api.config import _get_raw_config
-from hindsight_api.engine.retain.fact_extraction import extract_facts_from_text
 from hindsight_api.engine.retain.attachment_content import (
     LoadedAttachment,
     RetainAttachment,
@@ -28,6 +27,7 @@ from hindsight_api.engine.retain.attachment_content import (
     compute_attachment_hash,
     short_attachment_id,
 )
+from hindsight_api.engine.retain.fact_extraction import extract_facts_from_text
 from tests.llm_judge import assert_meets_criteria
 
 pytestmark = pytest.mark.hs_llm_core
@@ -109,9 +109,6 @@ async def _extract(text: str, loader, context: str):
             api_key=config.vlm_api_key or "",
             base_url=config.vlm_base_url or "",
             model=config.vlm_model,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
         )
     facts, _, _ = await extract_facts_from_text(
         text=text,

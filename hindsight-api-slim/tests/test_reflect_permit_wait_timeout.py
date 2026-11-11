@@ -37,7 +37,6 @@ def engine(monkeypatch):
     eng._config_resolver = SimpleNamespace(
         resolve_full_config=AsyncMock(
             return_value=SimpleNamespace(
-                llm_gemini_safety_settings=None,
                 reflect_use_decision_model=False,
                 mental_model_refresh_use_decision_model=False,
             )

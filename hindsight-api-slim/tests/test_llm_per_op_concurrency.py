@@ -276,9 +276,7 @@ class TestSemaphoreEnforcement:
             return "ok"
 
         provider._provider_impl.call = slow_mock_call  # type: ignore[assignment]
-        refresh_llm = provider.with_config(
-            SimpleNamespace(llm_gemini_safety_settings=None), bank_id="b", operation="refresh_mental_model"
-        )
+        refresh_llm = provider.with_config(SimpleNamespace(), bank_id="b", operation="refresh_mental_model")
 
         refresh_sem = llm_wrapper.CrossLoopSemaphore(1)
         reflect_sem = llm_wrapper.CrossLoopSemaphore(1)

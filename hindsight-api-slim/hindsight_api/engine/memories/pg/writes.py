@@ -586,9 +586,8 @@ async def apply_edit(
     # PostgreSQL only: on Oracle search_vector is a CLOB kept by Oracle's own text index, and the
     # ``::regconfig`` cast would reach it as an unbound ``:REGCONFIG`` placeholder (DPY-4010) — the
     # same guard as ``observation_search_vector_expr`` in pg/consolidation.py (#3021).
-    from ...schema import _is_oracle
 
-    sv_expr = None if _is_oracle() else pg_search_vector_expr(get_config(), text_col="$3", context_col="$4")
+    sv_expr = pg_search_vector_expr(get_config(), text_col="$3", context_col="$4")
     sv_clause = f", search_vector = {sv_expr}" if sv_expr else ""
     # The re-embedded vector rides the edit's own UPDATE. It describes the text being written by
     # this statement, so writing it here is what keeps the two from ever disagreeing — and it

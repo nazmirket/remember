@@ -36,7 +36,6 @@ class _StoredFile:
 
     length: int
     manifest: ChunkedStorageManifest | None
-    oracle: bool
 
 
 def _chunk_key(key: str, index: int) -> str:
@@ -109,11 +108,7 @@ class PostgreSQLFileStorage(FileStorage):
         """
         sig_len = len(_CHUNKED_MANIFEST_SIGNATURE)
         # The admin CLI hands this storage a raw asyncpg pool, whose connections carry no dialect.
-        oracle = getattr(conn, "backend_type", "postgresql") == "oracle"
-        if oracle:
-            head = f"DBMS_LOB.GETLENGTH(data) AS len, DBMS_LOB.SUBSTR(data, {sig_len}, 1) AS sig"
-        else:
-            head = f"length(data) AS len, substring(data from 1 for {sig_len}) AS sig"
+        head = f"length(data) AS len, substring(data from 1 for {sig_len}) AS sig"
         row = await conn.fetchrow(
             f"SELECT {head} FROM {fq_table('file_storage', self._schema)} WHERE storage_key = $1",
             key,
@@ -132,7 +127,7 @@ class PostgreSQLFileStorage(FileStorage):
                 # A row that only looks like a manifest: treat it as the plain bytes it
                 # is, so it can still be read back and deleted rather than wedging both.
                 logger.warning("Unparseable chunk manifest at %s; treating it as a plain file", key)
-        return _StoredFile(length=row["len"], manifest=manifest, oracle=oracle)
+        return _StoredFile(length=row["len"], manifest=manifest)
 
     async def _delete_with_chunks(self, conn: Any, key: str, *, keep_key: bool = False) -> bool:
         """Delete ``key`` and, when it is a chunked file, every chunk row its manifest names.
@@ -277,12 +272,6 @@ class PostgreSQLFileStorage(FileStorage):
                 if data is None:
                     raise FileNotFoundError(f"Missing chunk {i} for {key}")
                 yield bytes(data)
-        elif stored.oracle:
-            async with acquire_with_retry(pool) as conn:
-                data = await conn.fetchval(f"SELECT data FROM {table} WHERE storage_key = $1", key)
-            if data is None:
-                raise FileNotFoundError(f"File not found: {key}")
-            yield bytes(data)
         else:
             for offset in range(0, stored.length, PG_STREAM_CHUNK_SIZE):
                 async with acquire_with_retry(pool) as conn:

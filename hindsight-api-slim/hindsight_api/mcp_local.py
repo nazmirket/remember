@@ -13,11 +13,8 @@ Or pinned to a specific bank (single-bank mode):
 Run with:
     hindsight-local-mcp
 
-Or with uvx:
-    uvx hindsight-api@latest hindsight-local-mcp
-
 Environment variables:
-    HINDSIGHT_API_LLM_API_KEY: Required. API key for LLM provider.
+    HINDSIGHT_API_LLM_API_KEY: API key for providers that require one.
     HINDSIGHT_API_LLM_PROVIDER: Optional. LLM provider (default: "openai").
     HINDSIGHT_API_LLM_MODEL: Optional. LLM model (default: "gpt-4o-mini").
     HINDSIGHT_API_DATABASE_URL: Optional. Override database URL (default: pg0://hindsight-mcp).

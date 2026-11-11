@@ -1,14 +1,4 @@
-"""Regression tests for providers (e.g. OpenRouter) that return null content.
-
-Some OpenRouter free-tier models (e.g. nvidia/nemotron-3-super-120b-a12b:free,
-openai/gpt-oss-120b:free) occasionally respond with
-``response.choices[0].message.content == None`` despite a valid finish_reason.
-Without a guard, downstream string operations such as ``_strip_code_fences``
-crash with ``TypeError: 'NoneType' object is not subscriptable``, and every
-retry hits the same unhandled error so the entire retry budget is wasted.
-
-See https://github.com/vectorize-io/hindsight/issues/1334.
-"""
+"""Retry handling for empty responses from OpenAI-compatible servers."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,10 +14,10 @@ class _Response(BaseModel):
 
 def _make_llm() -> OpenAICompatibleLLM:
     return OpenAICompatibleLLM(
-        provider="openrouter",
+        provider="openai",
         api_key="sk-test",
-        base_url="",
-        model="nvidia/nemotron-3-super-120b-a12b:free",
+        base_url="http://localhost:1234/v1",
+        model="local-model",
     )
 
 

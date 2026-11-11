@@ -24,7 +24,6 @@ async def test_only_an_interactive_reflect_reads_linked_documents(engine, monkey
     engine._config_resolver = SimpleNamespace(
         resolve_full_config=AsyncMock(
             return_value=SimpleNamespace(
-                llm_gemini_safety_settings=None,
                 reflect_use_decision_model=False,
                 mental_model_refresh_use_decision_model=False,
             )

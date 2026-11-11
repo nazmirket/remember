@@ -8382,7 +8382,7 @@
           "Files"
         ],
         "summary": "Convert files to memories",
-        "description": "Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\nThis endpoint handles file upload, conversion, and memory creation in a single operation.\n\n**Features:**\n- Supports PDF, DOCX, PPTX, XLSX, images (parser-dependent OCR), audio (with transcription)\n- Automatic file-to-markdown conversion using pluggable parsers\n- Files stored in object storage (PostgreSQL by default, S3 for production)\n- Each file becomes a separate document with optional metadata/tags\n- Always processes asynchronously \u2014 returns operation IDs immediately\n\n**The system automatically:**\n1. Stores uploaded files in object storage\n2. Converts files to markdown\n3. Creates document records with file metadata\n4. Extracts facts and creates memory units (same as regular retain)\n\nUse the operations endpoint to monitor progress.\n\n**Request format:** multipart/form-data with:\n- `files`: One or more files to upload\n- `request`: JSON string with FileRetainRequest model\n\n**Parser selection:**\n- Set `parser` in the request body to override the server default for all files.\n- Set `parser` inside a `files_metadata` entry for per-file control.\n- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain \u2014 each parser is tried in sequence until one succeeds.\n- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n- Only parsers enabled on the server may be requested; others return HTTP 400.",
+        "description": "Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\nThis endpoint handles file upload, conversion, and memory creation in a single operation.\n\n**Features:**\n- Supports PDF, DOCX, PPTX, XLSX, images (parser-dependent OCR), audio (with transcription)\n- Automatic file-to-markdown conversion using pluggable parsers\n- Files stored in PostgreSQL by default or a configured storage extension\n- Each file becomes a separate document with optional metadata/tags\n- Always processes asynchronously \u2014 returns operation IDs immediately\n\n**The system automatically:**\n1. Stores uploaded files in object storage\n2. Converts files to markdown\n3. Creates document records with file metadata\n4. Extracts facts and creates memory units (same as regular retain)\n\nUse the operations endpoint to monitor progress.\n\n**Request format:** multipart/form-data with:\n- `files`: One or more files to upload\n- `request`: JSON string with FileRetainRequest model\n\n**Parser selection:**\n- Set `parser` in the request body to override the server default for all files.\n- Set `parser` inside a `files_metadata` entry for per-file control.\n- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain \u2014 each parser is tried in sequence until one succeeds.\n- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n- Only parsers enabled on the server may be requested; others return HTTP 400.",
         "operationId": "file_retain",
         "parameters": [
           {
@@ -10615,19 +10615,6 @@
             ],
             "title": "Mental Model Min Refresh Interval Seconds",
             "description": "Minimum seconds between two automatic refreshes of the same mental model in this bank. 0 (the default) means no floor. Overridable per model via the trigger's min_refresh_interval_seconds."
-          },
-          "llm_gemini_safety_settings": {
-            "anyOf": [
-              {
-                "items": {},
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Gemini Safety Settings",
-            "description": "Per-bank Gemini/VertexAI safety filter settings"
           },
           "recall_budget_function": {
             "anyOf": [
@@ -16805,7 +16792,7 @@
               }
             ],
             "title": "Min Refresh Interval Seconds",
-            "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes (API, MCP, control plane) ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor)."
+            "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes via the API or MCP ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor)."
           },
           "fact_types": {
             "anyOf": [
@@ -17044,7 +17031,7 @@
               }
             ],
             "title": "Min Refresh Interval Seconds",
-            "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes (API, MCP, control plane) ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor)."
+            "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes via the API or MCP ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor)."
           },
           "fact_types": {
             "anyOf": [
@@ -20532,7 +20519,7 @@
           "thoughts_tokens": {
             "type": "integer",
             "title": "Thoughts Tokens",
-            "description": "Reasoning/thinking tokens generated by the model. Billed at the output rate by some providers (e.g. Gemini 2.5+ family) but not surfaced in the visible response.",
+            "description": "Reasoning/thinking tokens generated by the model. Some providers bill these as output tokens without including them in the visible response.",
             "default": 0
           }
         },

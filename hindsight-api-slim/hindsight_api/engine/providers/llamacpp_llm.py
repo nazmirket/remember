@@ -71,11 +71,9 @@ def _require_llama_cpp() -> None:
         raise RuntimeError(
             "HINDSIGHT_API_LLM_PROVIDER=llamacpp needs the 'local-llm' extra, which is not "
             "installed (no module named 'llama_cpp').\n"
-            "  • pip install 'hindsight-api-slim[local-llm]'\n"
-            "  • The published Docker image (ghcr.io/vectorize-io/hindsight) deliberately omits "
-            "llama-cpp-python. For Docker, run llama.cpp as a sidecar and point Hindsight at it "
-            "with HINDSIGHT_API_LLM_PROVIDER=openai + HINDSIGHT_API_LLM_BASE_URL: see "
-            "docker/docker-compose/local-llm/ in the repository."
+            "  • Install the fork's local extra: uv sync --project hindsight-api-slim --extra local-llm\n"
+            "  • Or run a local OpenAI-compatible server and configure "
+            "HINDSIGHT_API_LLM_PROVIDER=openai and HINDSIGHT_API_LLM_BASE_URL."
         )
 
 

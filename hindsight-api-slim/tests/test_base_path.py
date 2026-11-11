@@ -86,12 +86,11 @@ async def test_base_path_openapi_schema(api_client_with_base_path):
 
 
 @pytest.mark.asyncio
-async def test_base_path_docs_redirect(api_client_with_base_path):
-    """Test that /docs redirects correctly with base path."""
-    # FastAPI docs endpoint should work
-    response = await api_client_with_base_path.get("/docs", follow_redirects=False)
-    # Should either return 200 (direct) or 307 (redirect to trailing slash)
-    assert response.status_code in [200, 307]
+async def test_base_path_browser_docs_are_disabled(api_client_with_base_path):
+    """The headless service has no browser documentation UI."""
+    for path in ("/docs", "/redoc"):
+        response = await api_client_with_base_path.get(path, follow_redirects=False)
+        assert response.status_code == 404
 
 
 @pytest.mark.asyncio

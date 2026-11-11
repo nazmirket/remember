@@ -1,27 +1,7 @@
-"""Server-side prompt-cache affinity hints for OpenAI-compatible providers.
+"""Prompt-cache affinity for OpenAI and compatible local providers.
 
-Prompt caching only pays off when the same conversation reaches the same backend
-cache, and providers expose different mechanisms for that:
-
-- xAI stores prompt-cache entries **per backend server** and routes requests
-  carrying the same ``x-grok-conv-id`` to one server (docs.x.ai, "Maximizing
-  Cache Hits"). Without it, consecutive calls of one agentic loop can each land
-  on a cache-cold replica.
-- OpenAI accepts a ``prompt_cache_key`` request field that improves its own
-  cache routing.
-
-Hindsight already does provider-specific cache work for its first-class
-providers (``anthropic_llm`` sets ``cache_control`` breakpoints; ``gemini_llm``
-runs an explicit ``CachedContent`` manager). This module is the equivalent for
-the OpenAI-compatible family — ``OpenAICompatibleLLM`` and its ``fireworks``
-and ``nous`` subclasses — which sent no affinity hint at all.
-
-Default ``auto`` per member (``cache_affinity``). ``auto`` is an allowlist, not a
-best-effort probe: it emits a hint only for hosts documented to accept one and
-resolves to ``none`` for everything else, so an unknown OpenAI-compatible backend
-never receives an unfamiliar field. Every helper here is fail-open — when no id
-can be derived the request goes out byte-identical to before. Set ``none`` to
-disable entirely.
+Auto mode sends an OpenAI prompt cache key only to OpenAI hosts. Unknown
+OpenAI-compatible endpoints receive no extra hint unless explicitly configured.
 """
 
 from __future__ import annotations
@@ -35,19 +15,8 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# xAI's documented cache-pinning header, and OpenAI's cache-routing field.
-XAI_CONV_ID_HEADER = "x-grok-conv-id"
 OPENAI_PROMPT_CACHE_KEY_PARAM = "prompt_cache_key"
-# OpenCode Go's conversation-grouping header (#4071).
-OPENCODE_SESSION_HEADER = "x-opencode-session"
 
-# Hosts (exact or parent domain) whose backends implement the xAI header.
-_XAI_DOMAINS = ("x.ai", "grok.com")
-# Hosts (exact or parent domain) whose backends require the x-opencode-session
-# header. opencode-go serves /v1/responses, /v1/chat/completions, and
-# /v1/messages from the same host, so the requirement is host-level rather than
-# provider-name-level — see ``apply_opencode_session``.
-_OPENCODE_DOMAINS = ("opencode.ai",)
 # Hosts (exact or parent domain) that accept OpenAI's prompt_cache_key field.
 # Deliberately excludes openai.azure.com: Azure OpenAI itself accepts the field
 # on GPT deployments, but the same *.openai.azure.com endpoint also fronts
@@ -62,7 +31,6 @@ class CacheAffinityMode(StrEnum):
     """How (and whether) to pin a request to a backend prompt cache."""
 
     NONE = "none"
-    XAI_CONV_ID = "xai_conv_id"
     OPENAI_PROMPT_CACHE_KEY = "openai_prompt_cache_key"
     AUTO = "auto"
 
@@ -84,35 +52,16 @@ def parse_cache_affinity(value: str | None) -> CacheAffinityMode:
 
 
 def _host_matches(hostname: str, domain: str) -> bool:
-    """True when ``hostname`` is ``domain`` itself or a subdomain of it.
-
-    Parsed-host suffix matching, never a substring test: a bare
-    ``"x.ai" in base_url`` also matches ``vertex.ai`` and
-    ``https://x.ai.evil.example``. The in-tree Azure check
-    (``".openai.azure.com" in self.base_url``) gets away with a substring only
-    because its needle is long and dotted; ``x.ai`` is four characters.
-    """
+    """Match the hostname itself or one of its subdomains."""
     return hostname == domain or hostname.endswith(f".{domain}")
 
 
 def resolve_cache_affinity(mode: CacheAffinityMode, provider: str, base_url: str | None) -> CacheAffinityMode:
-    """Resolve ``auto`` to a concrete mode from the provider and base-URL host.
-
-    Non-``auto`` modes are returned unchanged. ``auto`` resolves to
-    ``xai_conv_id`` for an x.ai / grok.com host, ``openai_prompt_cache_key`` for
-    native OpenAI (no base URL) or an openai.com host, and
-    ``none`` for everything else — an unknown backend gets no unfamiliar field.
-
-    The xAI check is host-only and deliberately provider-independent: the
-    documented setup for an xAI endpoint is ``provider=openai`` plus an x.ai base
-    URL, exactly like Azure OpenAI, so keying on the provider name would miss it.
-    """
+    """Use OpenAI cache keys only for native OpenAI hosts in auto mode."""
     if mode is not CacheAffinityMode.AUTO:
         return mode
 
     hostname = (urlparse(base_url).hostname or "") if base_url else ""
-    if hostname and any(_host_matches(hostname, domain) for domain in _XAI_DOMAINS):
-        return CacheAffinityMode.XAI_CONV_ID
     if provider.lower() == "openai":
         if not hostname:
             return CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY
@@ -164,70 +113,13 @@ def cache_affinity_id(messages: Any) -> str | None:
     return _first_message_fingerprint(messages)
 
 
-def is_opencode_host(base_url: str | None) -> bool:
-    """True when ``base_url`` targets an OpenCode Go (``opencode.ai``) host."""
-    hostname = (urlparse(base_url).hostname or "") if base_url else ""
-    return any(_host_matches(hostname, domain) for domain in _OPENCODE_DOMAINS)
-
-
-def apply_opencode_session(request: dict[str, Any], *, base_url: str | None) -> None:
-    """Add OpenCode Go's conversation-grouping header to ``request`` in place.
-
-    OpenCode Go asks third-party clients to send ``x-opencode-session`` so
-    requests of one conversation are grouped, and has warned that requests
-    omitting it will be rejected (#4071). That makes it a protocol requirement
-    rather than a cache optimization, so it is applied whenever the request
-    targets an ``opencode.ai`` host — regardless of the configured
-    ``cache_affinity`` mode and regardless of the configured ``provider`` name.
-    An operator setting ``cache_affinity=none`` to opt out of cache pinning must
-    not lose a header the backend requires, and an operator using the
-    ``openai-responses`` provider with a custom ``base_url`` pointing at
-    ``opencode.ai`` (the documented setup for ``muse-spark-1.3-contributor`` and
-    friends) must get the header too.
-
-    Detection is host-based, mirroring how ``resolve_cache_affinity`` handles
-    the xAI / native-OpenAI hosts (the same pattern already documented in this
-    file). It previously keyed on ``provider == "opencode-go"``, which missed
-    every deployment that reaches the same backend under another provider name:
-    ``openai-responses`` for /v1/responses and ``anthropic`` for /v1/messages.
-    Keying on the name is also wrong in the other direction — it cannot tell
-    opencode-go apart from a same-named proxy that does not want the header.
-    The ``opencode-go`` provider sets this base URL itself (see
-    ``OpenAICompatibleLLM.__init__``), so it stays covered.
-
-    The value is the operation-scoped id from :func:`cache_affinity_id`, so every
-    LLM call of one retain/reflect/consolidation run shares it — including the
-    provider's own retries, since this is applied to ``call_params`` once before
-    the retry loop — while separate runs get different ids.
-
-    User-wins, matching :func:`apply_cache_affinity`: a value the caller already
-    placed in ``extra_headers`` is kept. Never raises; when no id can be derived
-    the request goes out unchanged.
-    """
-    if not is_opencode_host(base_url):
-        return
-    # The Responses API carries the conversation under ``input``, not
-    # ``messages``. Reading only ``messages`` left an untraced Responses call —
-    # the startup verification probe — with no id, so opencode-go rejected it
-    # with HTTP 400 MissingSessionID.
-    session_id = cache_affinity_id(request.get("messages") or request.get("input"))
-    if session_id is None:
-        return
-    extra_headers = request.setdefault("extra_headers", {})
-    extra_headers.setdefault(OPENCODE_SESSION_HEADER, session_id)
-
-
 def apply_cache_affinity(request: dict[str, Any], mode: CacheAffinityMode) -> None:
     """Add this request's cache-affinity hint to ``request`` in place.
 
     ``mode`` must already be resolved (see :func:`resolve_cache_affinity`);
     ``none`` — and an unresolved ``auto`` — add nothing.
 
-    User-wins semantics throughout, matching the file's ``setdefault`` precedent
-    in ``_apply_provider_extra_body_defaults``: an ``x-grok-conv-id`` the caller
-    already placed in ``extra_headers`` is kept, and a ``prompt_cache_key`` in
-    the operator's configured ``extra_body`` (the escape hatch for a backend
-    that wants its own value) suppresses ours entirely.
+    An operator-supplied ``prompt_cache_key`` takes precedence.
 
     Never raises: when no id can be derived the request is left byte-identical
     to a pre-affinity one.
@@ -236,10 +128,7 @@ def apply_cache_affinity(request: dict[str, Any], mode: CacheAffinityMode) -> No
     if affinity_id is None:
         return
 
-    if mode is CacheAffinityMode.XAI_CONV_ID:
-        extra_headers = request.setdefault("extra_headers", {})
-        extra_headers.setdefault(XAI_CONV_ID_HEADER, affinity_id)
-    elif mode is CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY:
+    if mode is CacheAffinityMode.OPENAI_PROMPT_CACHE_KEY:
         # prompt_cache_key is a first-class named parameter on
         # chat.completions.create() in the resolved openai SDK, so it goes at the
         # top level rather than through extra_body. An operator value in

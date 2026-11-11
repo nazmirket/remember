@@ -40,10 +40,7 @@ def observation_search_vector_expr(param: str) -> str | None:
     Shared with repair-bank's rebuild (pg/admin.py), so the repair builds exactly what the writes do.
     """
     from ...db.ops_postgresql import pg_search_vector_expr  # noqa: PLC0415
-    from ...schema import _is_oracle  # noqa: PLC0415
 
-    if _is_oracle():
-        return None
     return pg_search_vector_expr(get_config(), text_col=param, context_col=None, signals_col=None)
 
 

@@ -112,8 +112,6 @@ async def test_resolution_preserves_typed_member_dataclasses():
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
     )
     strategy = LLMStrategyConfig(mode="failover")
     resolver._global_config = replace(resolver._global_config, llm_members=[member], llm_strategy=strategy)

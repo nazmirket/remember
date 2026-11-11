@@ -149,7 +149,7 @@ _PARENT_INTERPRETER_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH", "VIRTUA
 def _runs_a_foreign_interpreter(cmd: list[str]) -> bool:
     """Whether *cmd* launches hindsight-api on an interpreter that is not ours.
 
-    True for every uv-launched form — the ``uvx hindsight-api@<version>`` fallback and the
+    True for uv-launched commands, including the
     monorepo ``uv run --project <api-slim> ... hindsight-api`` dev command — because uv resolves
     an environment of its own, usually on a different Python than the caller. False for the
     installed-binary paths, which are a single executable from an environment we already share.
@@ -168,7 +168,7 @@ def _strip_parent_interpreter_env(env: dict[str, str]) -> dict[str, str]:
     builds for them, usually on a different Python than the caller. Hosts that
     locate their own site-packages through PYTHONPATH (Hermes' package-manager
     install exports its Python 3.14 generation that way) otherwise hand that
-    directory to uvx's 3.12 interpreter, which then imports the host's pydantic
+    directory to the child interpreter, which then imports the host's pydantic
     and dies on the missing compiled extension::
 
         ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'
@@ -222,7 +222,7 @@ def _detach_popen_kwargs(log_handle: IO[bytes]) -> dict:
 def _signal_startup_process(process: subprocess.Popen, *, force: bool) -> None:
     """Signal the daemon child's whole process group on POSIX.
 
-    The child may be the ``uvx`` launcher rather than hindsight-api itself;
+    The child may be a launcher rather than hindsight-api itself;
     signalling only its pid can leave the real API running as an orphan.
     ``_detach_popen_kwargs`` starts it with ``start_new_session``, so its pid is
     also its process group id. On Windows there is no group to signal, and
@@ -450,18 +450,6 @@ class DaemonEmbedManager(EmbedManager):
             return [str(pythonw), "-m", "hindsight_api.main"]
         return None
 
-    def _component_version(self, profile: str, env_key: str) -> str:
-        """Resolve a component version: profile .env override > env var > embed version.
-
-        Lets the API and control-plane package versions be pinned per profile
-        (e.g. from the control center), falling back to the process env var and
-        finally the embed's own version so the stack stays in lockstep.
-        """
-        from . import __version__
-
-        override = self._profile_manager.load_profile_config(profile).get(env_key)
-        return override or os.getenv(env_key) or __version__
-
     @staticmethod
     def _needs_local_sentence_transformers(env: Mapping[str, str] | None = None) -> bool:
         """Return True when the daemon config will load the local ST providers."""
@@ -479,14 +467,14 @@ class DaemonEmbedManager(EmbedManager):
             return True
         logger.warning(
             "Installed hindsight-api binary is missing local ML dependencies; "
-            "falling back to uvx hindsight-api for the local daemon. Set "
+            "install local ML extras in the fork environment or set "
             "HINDSIGHT_API_EMBEDDINGS_PROVIDER and HINDSIGHT_API_RERANKER_PROVIDER "
             "to non-local providers to use a slim install."
         )
         return False
 
-    def _find_api_command(self, api_version: str, env: Mapping[str, str] | None = None) -> list[str]:
-        """Find the command to run hindsight-api (api_version used only for the uvx fallback)."""
+    def _find_api_command(self, env: Mapping[str, str] | None = None) -> list[str]:
+        """Find a local API executable without downloading a published upstream package."""
         # Check if we're in development mode
         dev_command = self._dev_api_command()
         if dev_command is not None:
@@ -532,16 +520,12 @@ class DaemonEmbedManager(EmbedManager):
         for bin_dir in ("bin", "Scripts"):
             candidate = package_root / bin_dir / binary_name
             if candidate.exists():
-                # A hindsight-api binary bundled into a --target layout is a
-                # deliberate slim-bundle install; use it unconditionally. Falling
-                # back to uvx here reintroduces issue #1240 (the Windows embed
-                # smoke test enforces this). The #2676 "missing local ML deps ->
-                # uvx" fallback intentionally applies only to the sysconfig-scripts
-                # path above (standard venv installs), not to a --target bundle.
+                # A binary bundled into a --target layout is a deliberate local install.
                 return [str(candidate)]
 
-        # Fall back to uvx for the installed version (resolved by the caller).
-        return ["uvx", f"hindsight-api@{api_version}"]
+        raise RuntimeError(
+            "No usable local hindsight-api found; install the fork and its required local model dependencies"
+        )
 
     @staticmethod
     def _is_port_in_use(port: int) -> bool:
@@ -1027,7 +1011,13 @@ class DaemonEmbedManager(EmbedManager):
         # too was redundant, and API versions older than the Popen-based
         # daemonize() (#1519) fork on it, which can deadlock native libraries
         # on macOS.
-        cmd = self._find_api_command(self._component_version(profile, "HINDSIGHT_EMBED_API_VERSION"), env=env) + [
+        try:
+            cmd = self._find_api_command(env=env)
+        except RuntimeError as exc:
+            logger.error("Cannot start local daemon: %s", exc)
+            console.print(f"[red]Cannot start local daemon: {exc}[/red]")
+            return False
+        cmd += [
             "--idle-timeout",
             str(idle_timeout),
             "--port",
@@ -1040,7 +1030,7 @@ class DaemonEmbedManager(EmbedManager):
 
         try:
             # Start daemon. Redirect stdout/stderr to the daemon log so that
-            # any output from the subprocess (e.g. uvx download progress,
+            # any output from the subprocess (e.g. dependency startup,
             # Python library init messages) does not leak into the parent
             # process terminal. Python's own logging (via
             # HINDSIGHT_API_DAEMON_LOG) will append to the same path.

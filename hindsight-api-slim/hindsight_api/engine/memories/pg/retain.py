@@ -406,32 +406,6 @@ async def memory_ids_for_chunks(
 
 async def delete_chunks(*, conn, fq_table: Callable[[str], str], bank_id: str, chunk_ids: list[str]) -> None:
     """Delete the named chunks with their memories and links, taking row locks in a total order."""
-    if getattr(conn, "backend_type", None) == "oracle":
-        # Oracle has no ctid, DELETE ... USING or FOR UPDATE inside a CTE, so the
-        # ordered-lock form below cannot be ported as is: delete plainly, like
-        # OracleOps.delete_unit_links (see prune_stale_cooccurrences for that asymmetry).
-        units = f"SELECT id FROM {fq_table('memory_units')} WHERE chunk_id = ANY($1::text[]) AND bank_id = $2"
-        await conn.execute(
-            f"""
-            DELETE FROM {fq_table("memory_links")}
-            WHERE bank_id = $2 AND (from_unit_id IN ({units}) OR to_unit_id IN ({units}))
-            """,
-            chunk_ids,
-            bank_id,
-        )
-        # Oracle's memory_units.chunk_id FK is still ON DELETE SET NULL (PG moved it to
-        # CASCADE in f6g7h8i9j0k1), so the facts would outlive their chunk as duplicates.
-        await conn.execute(
-            f"DELETE FROM {fq_table('memory_units')} WHERE chunk_id = ANY($1::text[]) AND bank_id = $2",
-            chunk_ids,
-            bank_id,
-        )
-        await conn.execute(
-            f"DELETE FROM {fq_table('chunks')} WHERE chunk_id = ANY($1::text[]) AND bank_id = $2",
-            chunk_ids,
-            bank_id,
-        )
-        return
 
     # PostgreSQL's FK cascade deletes child memory_links in executor-chosen
     # order. Concurrent chunk deletes for the same bank can then lock overlapping

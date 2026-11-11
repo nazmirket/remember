@@ -43,4 +43,4 @@ def test_lmstudio_bare_host_targets_v1_chat_completions():
 
 def test_non_local_provider_base_url_untouched():
     """Cloud/proxy providers keep an explicit host with no path verbatim (path is provider-specific)."""
-    assert _base_url("openrouter", "https://gateway.example.com", api_key="sk-x") == "https://gateway.example.com"
+    assert _base_url("openai", "https://gateway.example.com", api_key="sk-x") == "https://gateway.example.com"

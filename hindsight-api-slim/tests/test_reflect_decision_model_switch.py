@@ -51,7 +51,6 @@ async def _orchestrated(engine, monkeypatch, operation_label: str, **switches: b
     engine._config_resolver = SimpleNamespace(
         resolve_full_config=AsyncMock(
             return_value=SimpleNamespace(
-                llm_gemini_safety_settings=None,
                 reflect_use_decision_model=switches.get("reflect", True),
                 mental_model_refresh_use_decision_model=switches.get("refresh", True),
             )

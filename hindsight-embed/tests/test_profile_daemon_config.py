@@ -376,8 +376,8 @@ def test_daemon_child_env_var_set_in_daemon_env(temp_home, monkeypatch):
     assert env.get("_HINDSIGHT_DAEMON_CHILD") == "1"
 
 
-def test_daemon_preserves_uv_python_for_nested_uvx(temp_home, monkeypatch):
-    """The API uvx fallback inherits the interpreter selected by the integration."""
+def test_daemon_preserves_uv_python_for_local_uv(temp_home, monkeypatch):
+    """The local API launch inherits the interpreter selected by the integration."""
     from unittest.mock import MagicMock, patch
 
     from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
@@ -387,9 +387,9 @@ def test_daemon_preserves_uv_python_for_nested_uvx(temp_home, monkeypatch):
     captured = {}
     popen_called = [False]
 
-    def fake_find_api_command(api_version, env=None):
+    def fake_find_api_command(env=None):
         captured["find_env"] = env
-        return ["uvx", f"hindsight-api@{api_version}"]
+        return ["uv", "run", "--project", "/fork/hindsight-api-slim", "hindsight-api"]
 
     def fake_popen(cmd, env, **kwargs):
         captured["popen_env"] = env
@@ -751,7 +751,7 @@ def test_windows_daemon_launches_via_gui_interpreter(temp_home, tmp_path, monkey
     )
 
     cmd = manager._find_api_command(
-        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+        env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
     )
     assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "hindsight_api.main"]
 
@@ -779,7 +779,7 @@ def test_windows_daemon_falls_back_to_console_exe_without_pythonw(temp_home, tmp
     )
 
     cmd = manager._find_api_command(
-        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+        env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
     )
     assert cmd == [str(scripts_dir / "hindsight-api.exe")]
 
@@ -802,7 +802,7 @@ def test_posix_daemon_uses_console_entrypoint(temp_home, tmp_path, monkeypatch):
     )
 
     cmd = manager._find_api_command(
-        "0.0.0", env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
+        env={"HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai", "HINDSIGHT_API_RERANKER_PROVIDER": "rrf"}
     )
     assert cmd == [str(console_bin)]
 
@@ -875,7 +875,7 @@ def test_windows_uv_trampoline_resolves_to_base_pythonw(temp_home, tmp_path, mon
     manager = _windows_manager(monkeypatch, scripts_dir)
 
     env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command("0.0.0", env=env)
+    cmd = manager._find_api_command(env=env)
 
     site_packages = str(tmp_path / "Lib" / "site-packages")
     assert cmd == [str(_base_pythonw(tmp_path)), "-c", _VENV_SITE_BOOTSTRAP, site_packages]
@@ -922,7 +922,7 @@ def test_windows_stdlib_venv_keeps_its_own_pythonw(temp_home, tmp_path, monkeypa
     manager = _windows_manager(monkeypatch, scripts_dir)
 
     env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command("0.0.0", env=env)
+    cmd = manager._find_api_command(env=env)
 
     assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "hindsight_api.main"]
     assert "PYTHONPATH" not in env
@@ -940,7 +940,7 @@ def test_windows_uv_trampoline_kept_when_site_packages_missing(temp_home, tmp_pa
     manager = _windows_manager(monkeypatch, scripts_dir)
 
     env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command("0.0.0", env=env)
+    cmd = manager._find_api_command(env=env)
 
     assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "hindsight_api.main"]
     assert "PYTHONPATH" not in env

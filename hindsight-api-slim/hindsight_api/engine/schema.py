@@ -38,17 +38,10 @@ def _guard(table_name: str) -> None:
         )
 
 
-def _is_oracle() -> bool:
-    """Return True when the configured database backend is Oracle."""
-    return get_config().database_backend == "oracle"
-
-
 def fq_table(table_name: str) -> str:
     """Get fully-qualified table name using the current schema context.
 
-    On Oracle the schema is set at the session level (``ALTER SESSION SET
-    CURRENT_SCHEMA``), so we return the bare table name.  On PostgreSQL
-    we prefix with the schema from :func:`hindsight_api.schema_context.get_current_schema`.
+    Prefix with the schema from :func:`hindsight_api.schema_context.get_current_schema`.
     """
     _guard(table_name)
     return fq_store_table(table_name)
@@ -56,8 +49,6 @@ def fq_table(table_name: str) -> str:
 
 def fq_store_table(table_name: str) -> str:
     """:func:`fq_table` without the guard. Only the Postgres memories store may call it."""
-    if _is_oracle():
-        return table_name
     return f"{get_current_schema()}.{table_name}"
 
 
@@ -91,8 +82,6 @@ def fq_table_explicit(table: str, schema: str | None = None) -> str:
 
 def fq_store_table_explicit(table: str, schema: str | None = None) -> str:
     """:func:`fq_table_explicit` without the guard. Only the Postgres memories store may call it."""
-    if _is_oracle():
-        return table
     if schema:
         return f'"{schema}".{table}'
     return table

@@ -1,3 +1,0 @@
-FROM hindsight-coding-agents-e2e-base
-ARG VERSION=latest
-RUN npm install --global "@kilocode/cli@${VERSION}"

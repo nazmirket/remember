@@ -48,7 +48,7 @@ async def test_missing_dependency_advice_matches_device(monkeypatch, ort_runtime
     message = str(raised.value)
     if device == "cuda":
         assert "onnxruntime-gpu" in message
-        assert "docker/docker-compose/cuda-onnx/" in message
+        assert "CUDA/cuDNN" in message
         assert "pip install 'hindsight-api-slim[local-onnx]'" not in message
     else:
         assert "pip install 'hindsight-api-slim[local-onnx]'" in message

@@ -30,15 +30,13 @@ def test_parse_delta_operation_list_trailing_brackets():
 
 
 def test_parse_delta_operation_list_backticks_in_path():
-    raw = (
-        '{"operations":[{"op":"append_block","section_id":"conventions","text":"- hindsight-control-plane/knip.json"}]}'
-    )
+    raw = '{"operations":[{"op":"append_block","section_id":"conventions","text":"- hindsight-cli/Cargo.toml"}]}'
     op_list = parse_delta_operation_list(raw)
     assert len(op_list.operations) == 1
     op = op_list.operations[0]
     assert isinstance(op, AppendBlockOp)
     assert op.section_id == "conventions"
-    assert op.text == "- hindsight-control-plane/knip.json"
+    assert op.text == "- hindsight-cli/Cargo.toml"
 
 
 def test_parse_delta_operation_list_prose_prefix():

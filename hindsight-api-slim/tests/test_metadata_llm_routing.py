@@ -177,13 +177,12 @@ def test_route_for_rebinds_member_and_keeps_trace_context() -> None:
     """A routed call must stay attributed to the same operation and trace."""
     chain = _chain(("classification", "sensitive", 1))
     trace_ctx = object()
-    configured = ConfiguredLLMProvider(chain, ["safety"], trace_ctx)
+    configured = ConfiguredLLMProvider(chain, None, trace_ctx)
 
     routed = configured.route_for({"classification": "sensitive"})
     assert routed is not configured
     assert routed.model == "model-1"
     assert routed.trace_context() is trace_ctx
-    assert object.__getattribute__(routed, "_gemini_safety_settings") == ["safety"]
 
     assert configured.route_for({"classification": "public"}) is configured
 
@@ -271,8 +270,6 @@ def _build_config(**overrides: Any) -> HindsightConfig:
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
     )
     config.llm_members = [member]
     config.llm_strategy = None

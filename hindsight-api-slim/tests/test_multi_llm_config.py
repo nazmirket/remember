@@ -190,8 +190,6 @@ def _member(provider="ollama"):
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
     )
 
 
@@ -329,8 +327,6 @@ def test_member_to_llm_passes_codex_home(clean_llm_env, tmp_path, monkeypatch):
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
         codex_home=str(member_home),
     )
     provider = _member_to_llm(member, _empty_config(llm_codex_home=None), _NO_CALL_DEFAULTS)
@@ -356,8 +352,6 @@ def test_member_to_llm_codex_home_falls_back_to_global(clean_llm_env, tmp_path, 
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
     )
     provider = _member_to_llm(member, _empty_config(llm_codex_home=str(global_home)), _NO_CALL_DEFAULTS)
 
@@ -385,8 +379,6 @@ def test_build_llm_codex_chain_spans_two_profiles(clean_llm_env, tmp_path, monke
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
         codex_home=str(fallback_home),
     )
     config = _empty_config(
@@ -469,8 +461,6 @@ def _policy_member(**overrides):
         reasoning_effort=None,
         extra_body=None,
         default_headers=None,
-        bedrock_service_tier=None,
-        gemini_service_tier=None,
     )
     base.update(overrides)
     return LLMMemberConfig(**base)

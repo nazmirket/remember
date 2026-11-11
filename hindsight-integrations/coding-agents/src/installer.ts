@@ -377,9 +377,7 @@ export const ORIGIN_FILE = ".install-origin.json";
  * Copy the runtime out of wherever this was executed from and into a stable location, then point
  * the wiring at the copy.
  *
- * Both fields matter: `dist` is baked into every hook command and MCP registration, and `pkgRoot`
- * is what opencode and Kilo load as a plugin directory. Repointing them here means no per-harness
- * installer needs to know staging happened.
+ * `dist` is baked into each supported agent's hook commands and MCP registration.
  *
  * Copying is skipped when there is nothing to copy — running from a checkout whose dist has not
  * been built, and in tests — so the wiring falls back to the source path rather than a directory
@@ -410,15 +408,6 @@ function stageRuntime(c: InstallCtx): InstallCtx {
     if (existsSync(skill)) cpSync(skill, join(target, "skill"), { recursive: true });
     const pkgJson = join(c.pkgRoot, "package.json");
     if (existsSync(pkgJson)) copyFileSync(pkgJson, join(target, "package.json"));
-    // The Dcode Agent Plugin surface (its manifest and the hooks that manifest points at) plus the
-    // root index.js opencode2 loads a plugin directory from — see src/opencode2.ts. Without that
-    // file here, the staged copy is a v1-only plugin and opencode2 logs "configured plugin
-    // directory has no index entrypoint".
-    // (All are listed in package.json#files, so they exist in a published install too.)
-    for (const resource of ["plugin.json", "hooks", "index.js"]) {
-      const source = join(c.pkgRoot, resource);
-      if (existsSync(source)) cpSync(source, join(target, resource), { recursive: true });
-    }
     // Record WHERE this copy came from, LAST — the marker means "a complete copy landed here".
     // core/auto-update.ts will only replace a runtime it can prove was downloaded by npx: a copy
     // staged from a global `npm i -g`, a project dependency or a local checkout belongs to whoever

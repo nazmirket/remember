@@ -664,22 +664,11 @@ async def _restore_rows(
     first = next(rows, None)
     if first is None:
         return 0
-    from ..schema import _is_oracle
-
-    oracle = _is_oracle()
-    if oracle:
-        # No information_schema on Oracle; the backend sets CURRENT_SCHEMA per session.
-        col_rows = await conn.fetch(
-            "SELECT LOWER(column_name) AS column_name, LOWER(data_type) AS data_type FROM all_tab_columns "
-            "WHERE owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND table_name = UPPER($1)",
-            table,
-        )
-    else:
-        col_rows = await conn.fetch(
-            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
-            get_current_schema(),
-            table,
-        )
+    col_rows = await conn.fetch(
+        "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+        get_current_schema(),
+        table,
+    )
     col_types = {r["column_name"]: r["data_type"] for r in col_rows}
     inserted = 0
     pending_sql: str | None = None
@@ -712,7 +701,7 @@ async def _restore_rows(
             placeholders.append(f"${position}")
             values.append(value)
         # Oracle folds unquoted DDL identifiers to upper case; quoted lower case would not match.
-        col_list = ", ".join(f'"{c.upper()}"' if oracle else f'"{c}"' for c in cols)
+        col_list = ", ".join(f'"{c}"' for c in cols)
         sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}) ON CONFLICT DO NOTHING"
         if pending and (sql != pending_sql or len(pending) >= _RESTORE_BATCH_SIZE):
             await conn.executemany(cast(str, pending_sql), pending)

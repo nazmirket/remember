@@ -4582,6 +4582,8 @@ def create_app(
             "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
         },
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
         root_path=config.base_path,
     )
 
@@ -9904,7 +9906,7 @@ def _register_routes(app: FastAPI):
         "**Features:**\n"
         "- Supports PDF, DOCX, PPTX, XLSX, images (parser-dependent OCR), audio (with transcription)\n"
         "- Automatic file-to-markdown conversion using pluggable parsers\n"
-        "- Files stored in object storage (PostgreSQL by default, S3 for production)\n"
+        "- Files stored in PostgreSQL by default or a configured storage extension\n"
         "- Each file becomes a separate document with optional metadata/tags\n"
         "- Always processes asynchronously — returns operation IDs immediately\n\n"
         "**The system automatically:**\n"

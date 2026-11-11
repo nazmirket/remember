@@ -182,29 +182,6 @@ async def test_trigram_query_caps_candidates_per_query_text():
     assert conn.fetch.call_args.args[3] == 42
 
 
-@pytest.mark.asyncio
-async def test_oracle_query_caps_candidates_per_query_text():
-    """The Oracle probe truncates per query text via ROW_NUMBER, ranked by Jaro-Winkler."""
-    resolver = _make_resolver(max_candidates=42)
-    resolver.entity_lookup = "oracle_fuzzy"
-    conn = _make_conn()
-    conn.backend_type = "oracle"
-
-    with patch.object(resolver, "_resolve_from_candidates", new=AsyncMock(return_value=[])):
-        await resolver._resolve_entities_batch_oracle_fuzzy(
-            conn=conn,
-            bank_id="bank-1",
-            entities_data=[{"text": "Alice", "nearby_entities": [], "event_date": None}],
-            unit_event_date=None,
-        )
-
-    query = conn.fetch.call_args.args[0]
-    assert "ROW_NUMBER() OVER" in query
-    assert "PARTITION BY q.query_text" in query
-    assert "WHERE rn <= $3" in query
-    assert conn.fetch.call_args.args[3] == 42
-
-
 def test_max_candidates_must_be_positive():
     with pytest.raises(ValueError, match="entity_resolution_max_candidates must be >= 1"):
         EntityResolver(pool=None, entity_resolution_max_candidates=0)  # type: ignore[arg-type]

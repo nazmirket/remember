@@ -7,7 +7,6 @@ to disambiguate entities across memory units.
 
 import asyncio
 import heapq
-import json
 import logging
 import math
 import re
@@ -723,11 +722,6 @@ class EntityResolver:
         if self.entity_lookup == "trigram":
             # Route to backend-specific fuzzy strategy.
             # Non-PG backends (Oracle) use UTL_MATCH instead of pg_trgm.
-            backend_strategy = self._ops.get_entity_resolution_strategy()
-            if backend_strategy == "oracle_fuzzy":
-                return await self._resolve_entities_batch_oracle_fuzzy(
-                    conn, bank_id, entities_data, unit_event_date, taxonomy_lookup, labels_cfg
-                )
             # Auto-detect pg_trgm availability on first call and fall back to
             # "full" strategy if the extension is not installed.  See #626.
             if not self._pg_trgm_checked:
@@ -918,151 +912,6 @@ class EntityResolver:
             )
 
         # Group candidates by query_text
-        all_candidates: dict[str, list] = {t: [] for t in entity_texts}
-        candidate_ids: set = set()
-        for row in rows:
-            query_text = row["query_text"]
-            all_candidates[query_text].append(
-                (row["id"], row["canonical_name"], row["metadata"], row["last_seen"], row["mention_count"])
-            )
-            candidate_ids.add(row["id"])
-
-        # Fetch co-occurrences only for the candidate entities (not all bank entities)
-        cooccurrence_map: dict[str, set[str]] = {}
-        cooccurrence_degrees: dict[str, int] = {}
-        if candidate_ids:
-            candidate_id_list = list(candidate_ids)
-            cooc_rows = await conn.fetch(
-                f"""
-                SELECT ec.entity_id_1, ec.entity_id_2
-                FROM {fq_table("entity_cooccurrences")} ec
-                WHERE ec.entity_id_1 = ANY($1::uuid[])
-                   OR ec.entity_id_2 = ANY($1::uuid[])
-                """,
-                candidate_id_list,
-            )
-            # Build name lookup for co-occurrence mapping
-            id_to_name = {
-                row["id"]: row["canonical_name"].lower()
-                for cands in all_candidates.values()
-                for row in [{"id": c[0], "canonical_name": c[1]} for c in cands]
-            }
-            cooccurrences = _build_cooccurrence_index(cooc_rows, id_to_name)
-            cooccurrence_map = cooccurrences.by_entity
-            cooccurrence_degrees = cooccurrences.degree_by_name
-
-        return await self._resolve_from_candidates(
-            conn,
-            bank_id,
-            entities_data,
-            unit_event_date,
-            all_candidates,
-            cooccurrence_map,
-            taxonomy_lookup,
-            labels_cfg,
-            cooccurrence_degrees,
-        )
-
-    async def _resolve_entities_batch_oracle_fuzzy(
-        self,
-        conn: Any,
-        bank_id: str,
-        entities_data: list[dict],
-        unit_event_date: datetime | None,
-        taxonomy_lookup: set[str] | None = None,
-        labels_cfg=None,
-    ) -> list[ResolvedEntity]:
-        """
-        Oracle strategy: fetch similar candidates using UTL_MATCH.JARO_WINKLER_SIMILARITY.
-
-        Replaces pg_trgm for Oracle backends. Uses JSON_TABLE to expand the
-        entity text list into rows (Oracle equivalent of PG's unnest), then
-        joins with a Jaro-Winkler threshold of 70/100 — looser than the trigram
-        merge floor, deliberately: Jaro-Winkler and trigram rank names differently,
-        so no JW cutoff maps onto that floor without dropping mergeable candidates.
-        The floor is applied afterwards in _resolve_from_candidates.
-        Falls back to the "full" strategy if UTL_MATCH is unavailable.
-        """
-        entity_texts = list(set(e["text"] for e in entities_data))
-        entities_table = fq_table("entities")
-
-        # Label entities resolve by exact match only, so the fuzzy Jaro-Winkler
-        # join only returns similar-but-distinct label values that are always
-        # discarded. Resolve label texts with an exact lookup on the unique
-        # (bank_id, LOWER(canonical_name)) index and only fuzzy-match the rest.
-        label_set = self._label_texts(entity_texts, taxonomy_lookup, labels_cfg)
-        label_texts = [t for t in entity_texts if t in label_set]
-        fuzzy_texts = [t for t in entity_texts if t not in label_set]
-
-        try:
-            # Batch entity texts into bounded sub-queries using JSON_TABLE to
-            # expand the list into rows. UTL_MATCH.JARO_WINKLER_SIMILARITY
-            # returns 0-100; threshold 70 is kept loose (see the docstring).
-            # Bounded batches mirror the PG trigram path so very wide retain
-            # batches don't time out a single JOIN on large banks.
-            rows = []
-            for entity_text_batch in self._chunked(label_texts, self.entity_resolution_batch_size):
-                rows.extend(
-                    await conn.fetch(
-                        f"""
-                        SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count,
-                               q.query_text
-                        FROM JSON_TABLE($2, '$[*]' COLUMNS (query_text VARCHAR2(4000) PATH '$')) q
-                        JOIN {entities_table} e ON (
-                            e.bank_id = $1
-                            AND LOWER(e.canonical_name) = LOWER(q.query_text)
-                        )
-                        """,
-                        bank_id,
-                        json.dumps(entity_text_batch),
-                    )
-                )
-            # Only the best `max_candidates` per query text are returned: each
-            # candidate costs a synchronous SequenceMatcher call downstream, so an
-            # unbounded fuzzy match set blocks the event loop for minutes
-            # (GH-3211). Ranking by the same Jaro-Winkler score the join already
-            # computes keeps the truncation at the noise end.
-            for entity_text_batch in self._chunked(fuzzy_texts, self.entity_resolution_batch_size):
-                rows.extend(
-                    await conn.fetch(
-                        f"""
-                        SELECT id, canonical_name, metadata, last_seen, mention_count, query_text
-                        FROM (
-                            SELECT e.id, e.canonical_name, e.metadata, e.last_seen, e.mention_count,
-                                   q.query_text,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY q.query_text
-                                       ORDER BY UTL_MATCH.JARO_WINKLER_SIMILARITY(
-                                           LOWER(e.canonical_name), LOWER(q.query_text)
-                                       ) DESC, e.id
-                                   ) AS rn
-                            FROM JSON_TABLE($2, '$[*]' COLUMNS (query_text VARCHAR2(4000) PATH '$')) q
-                            JOIN {entities_table} e ON (
-                                e.bank_id = $1
-                                AND e.entity_kind != 'label'
-                                AND UTL_MATCH.JARO_WINKLER_SIMILARITY(LOWER(e.canonical_name), LOWER(q.query_text)) > 70
-                            )
-                        )
-                        WHERE rn <= $3
-                        """,
-                        bank_id,
-                        json.dumps(entity_text_batch),
-                        self.entity_resolution_max_candidates,
-                    )
-                )
-        except Exception as e:
-            # UTL_MATCH may not be available (ORA-06550, ORA-00904, etc.)
-            # Catch broadly because Oracle error types vary depending on driver.
-            # Fall back to the "full" strategy which works on any backend.
-            logger.warning(
-                "UTL_MATCH.JARO_WINKLER_SIMILARITY not available on Oracle — "
-                "falling back to 'full' entity lookup strategy. Error: %s",
-                e,
-            )
-            self.entity_lookup = "full"
-            return await self._resolve_entities_batch_full(conn, bank_id, entities_data, unit_event_date)
-
-        # Group candidates by query_text (same structure as trigram strategy)
         all_candidates: dict[str, list] = {t: [] for t in entity_texts}
         candidate_ids: set = set()
         for row in rows:

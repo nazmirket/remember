@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 
 from hindsight_api import config as hs_config
-from hindsight_api.engine import schema
 from hindsight_api.engine.consolidation.consolidator import _TemporalBounds
 from hindsight_api.engine.memories.pg import admin, consolidation
 
@@ -52,7 +51,6 @@ def backend(monkeypatch, request):
     cfg = SimpleNamespace(text_search_extension=ext, text_search_extension_native_language="english")
     monkeypatch.setattr(consolidation, "get_config", lambda: cfg)
     monkeypatch.setattr(hs_config, "get_config", lambda: cfg)
-    monkeypatch.setattr(schema, "_is_oracle", lambda: oracle)
     return ext, oracle
 
 
@@ -122,7 +120,7 @@ async def test_every_observation_write_rebuilds_search_vector(backend):
     assert EXPECTED[ext].replace("$1", "$3").split(" = ", 1)[1] in " ".join(writes[3].split())
 
 
-@pytest.mark.parametrize("backend", [("pgroonga", False), ("pg_search", False), ("native", True)], indirect=True)
+@pytest.mark.parametrize("backend", [("pgroonga", False), ("pg_search", False)], indirect=True)
 async def test_backends_without_an_inline_column_write_no_search_vector(backend):
     conn = _CapturingConn()
     await _run_every_write(conn)

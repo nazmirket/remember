@@ -178,17 +178,11 @@ ENV_LLM_TIMEOUT = "HINDSIGHT_API_LLM_TIMEOUT"
 ENV_LLM_CONNECT_TIMEOUT = "HINDSIGHT_API_LLM_CONNECT_TIMEOUT"
 ENV_LLM_HTTP_LOG_LEVEL = "HINDSIGHT_API_LLM_HTTP_LOG_LEVEL"
 ENV_LLM_REASONING_EFFORT = "HINDSIGHT_API_LLM_REASONING_EFFORT"
-ENV_LLM_GROQ_SERVICE_TIER = "HINDSIGHT_API_LLM_GROQ_SERVICE_TIER"
 ENV_LLM_OPENAI_SERVICE_TIER = "HINDSIGHT_API_LLM_OPENAI_SERVICE_TIER"
-ENV_LLM_BEDROCK_SERVICE_TIER = "HINDSIGHT_API_LLM_BEDROCK_SERVICE_TIER"
-ENV_LLM_GEMINI_SERVICE_TIER = "HINDSIGHT_API_LLM_GEMINI_SERVICE_TIER"
 ENV_LLM_EXTRA_BODY = "HINDSIGHT_API_LLM_EXTRA_BODY"
 ENV_LLM_DEFAULT_HEADERS = "HINDSIGHT_API_LLM_DEFAULT_HEADERS"
-# Backend prompt-cache pinning for the OpenAI-compatible providers and Fireworks. Server-side
-# prompt caches are per backend server, so the same conversation has to reach the same
-# one: "xai_conv_id" sends xAI's documented x-grok-conv-id header, and
-# "openai_prompt_cache_key" sends OpenAI's prompt_cache_key field. See
-# engine/cache_affinity.py. Per-operation variants override the global one.
+# Prompt-cache affinity for OpenAI-compatible providers. Per-operation values
+# override the global mode. See engine/cache_affinity.py.
 ENV_LLM_CACHE_AFFINITY = "HINDSIGHT_API_LLM_CACHE_AFFINITY"
 # Grammar-enforced structured output. The global flag applies to every internal
 # LLM call; the per-operation variants override it for a single operation, so an
@@ -200,11 +194,6 @@ ENV_LLM_STRICT_SCHEMA_RETAIN = "HINDSIGHT_API_LLM_STRICT_SCHEMA_RETAIN"
 ENV_LLM_STRICT_SCHEMA_REFLECT = "HINDSIGHT_API_LLM_STRICT_SCHEMA_REFLECT"
 ENV_LLM_STRICT_SCHEMA_CONSOLIDATION = "HINDSIGHT_API_LLM_STRICT_SCHEMA_CONSOLIDATION"
 ENV_LLM_SUPPORTS_STRING_PATTERN = "HINDSIGHT_API_LLM_SUPPORTS_STRING_PATTERN"
-# Give the structured-output schema in the prompt instead of the
-# OpenAI-style ``response_format`` on the LiteLLM-backed providers (``litellm``,
-# ``litellmrouter``, ``bedrock``). Off by default; see
-# DEFAULT_LLM_STRUCTURED_OUTPUT_IN_PROMPT.
-ENV_LLM_STRUCTURED_OUTPUT_IN_PROMPT = "HINDSIGHT_API_LLM_STRUCTURED_OUTPUT_IN_PROMPT"
 # Whether the configured LLM accepts image parts in a user message. Tri-state:
 # unset lets each provider answer for itself (see LLMInterface.supports_vision),
 # while an explicit true/false overrides it in both directions. The escape hatch
@@ -250,14 +239,6 @@ ENV_REFLECT_LLM_STRATEGY = "HINDSIGHT_API_REFLECT_LLM_STRATEGY"
 ENV_CONSOLIDATION_LLM_STRATEGY = "HINDSIGHT_API_CONSOLIDATION_LLM_STRATEGY"
 ENV_MENTAL_MODEL_REFRESH_LLM_STRATEGY = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_STRATEGY"
 
-# LiteLLM Router chain — provider-specific config consumed by the "litellmrouter"
-# provider. Each entry is a deployment; the Router tries them in declared order and
-# falls back to the next on transient errors (5xx, rate-limit, timeout).
-# Provider-scoped naming mirrors other provider-specific flags (e.g. llm_groq_*,
-# llm_vertexai_*). Note the single token "LITELLMROUTER" — keeping it one word
-# disambiguates from the embeddings/reranker LITELLM_* settings.
-ENV_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_LLM_LITELLMROUTER_CONFIG"
-
 # Per-operation temperature defaults (preserve historical hardcoded values).
 DEFAULT_LLM_TEMPERATURE_VERIFICATION = 0.0  # connection check
 DEFAULT_LLM_TEMPERATURE_RETAIN = 0.1  # fact extraction
@@ -265,34 +246,13 @@ DEFAULT_LLM_TEMPERATURE_REFLECT = 0.9  # reflect "thinking"
 DEFAULT_LLM_TEMPERATURE_CONSOLIDATION = 0.0  # dedup; mental-model delta/retraction unless overridden
 
 # Defaults for service tiers
-DEFAULT_LLM_GROQ_SERVICE_TIER = "auto"  # "on_demand", "flex", or "auto"
 DEFAULT_LLM_OPENAI_SERVICE_TIER = None  # None (default) or "flex" (50% cheaper)
-DEFAULT_LLM_BEDROCK_SERVICE_TIER = None  # None (default), "flex", "priority", or "reserved"
-DEFAULT_LLM_GEMINI_SERVICE_TIER = None  # None (default) or "flex" (50% cheaper best-effort tier)
 DEFAULT_LLM_EXTRA_BODY = None  # None = no extra body params; JSON dict merged into OpenAI extra_body
 DEFAULT_LLM_DEFAULT_HEADERS = (
     None  # None = no extra headers; JSON dict passed as default_headers to provider SDK clients
 )
-# "auto" is safe as a default because it is an allowlist, not a best-effort probe:
-# it emits a hint only for hosts documented to accept one (x.ai / grok.com get the
-# header, native OpenAI / openai.com get the field) and resolves to
-# "none" for every other backend, so vLLM, ollama, groq, openrouter and any custom
-# OpenAI-compatible endpoint keep receiving byte-identical requests. Measured on a
-# live xAI backend: 29% of a shared prefix cached without the header vs 99% with it,
-# so defaulting to "none" silently costs most deployments the benefit.
+# Auto sends a cache key to native OpenAI hosts and no hint to unknown backends.
 DEFAULT_LLM_CACHE_AFFINITY = "auto"
-
-
-def parse_gemini_service_tier(value: str | None) -> str | None:
-    """Normalize and validate the Gemini service tier."""
-    tier = value or None
-    valid_tiers = (None, "flex")
-    if tier not in valid_tiers:
-        raise ValueError(
-            f"Invalid HINDSIGHT_API_LLM_GEMINI_SERVICE_TIER: "
-            f"{tier!r}. Must be one of: {', '.join(t for t in valid_tiers if t is not None)}."
-        )
-    return tier
 
 
 # Sentinel strings that, as a temperature value, mean "omit the temperature
@@ -474,21 +434,10 @@ ENV_RETAIN_LLM_MAX_RETRIES = "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES"
 ENV_RETAIN_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF"
 ENV_RETAIN_LLM_MAX_BACKOFF = "HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF"
 ENV_RETAIN_LLM_TIMEOUT = "HINDSIGHT_API_RETAIN_LLM_TIMEOUT"
-ENV_RETAIN_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_RETAIN_LLM_LITELLMROUTER_CONFIG"
 ENV_RETAIN_LLM_REASONING_EFFORT = "HINDSIGHT_API_RETAIN_LLM_REASONING_EFFORT"
 ENV_RETAIN_LLM_EXTRA_BODY = "HINDSIGHT_API_RETAIN_LLM_EXTRA_BODY"
 ENV_RETAIN_LLM_CACHE_AFFINITY = "HINDSIGHT_API_RETAIN_LLM_CACHE_AFFINITY"
 
-# Fireworks AI batch inference. Fireworks' batch API is a proprietary
-# account-scoped dataset/job REST API on a control-plane host, distinct from the
-# OpenAI-compatible inference host. account_id is REQUIRED for batch retain
-# (the control-plane endpoints are /v1/accounts/{account_id}/...). Static,
-# server-level config — it pairs with the Fireworks API key.
-ENV_FIREWORKS_ACCOUNT_ID = "HINDSIGHT_API_FIREWORKS_ACCOUNT_ID"
-ENV_FIREWORKS_BATCH_BASE_URL = "HINDSIGHT_API_FIREWORKS_BATCH_BASE_URL"
-ENV_FIREWORKS_BATCH_MAX_WAIT_SECONDS = "HINDSIGHT_API_FIREWORKS_BATCH_MAX_WAIT_SECONDS"
-DEFAULT_FIREWORKS_BATCH_BASE_URL = "https://api.fireworks.ai"
-DEFAULT_FIREWORKS_BATCH_MAX_WAIT_SECONDS = 86_400  # 24h — Fireworks' max job timeout
 
 ENV_REFLECT_LLM_PROVIDER = "HINDSIGHT_API_REFLECT_LLM_PROVIDER"
 ENV_REFLECT_LLM_API_KEY = "HINDSIGHT_API_REFLECT_LLM_API_KEY"
@@ -499,7 +448,6 @@ ENV_REFLECT_LLM_MAX_RETRIES = "HINDSIGHT_API_REFLECT_LLM_MAX_RETRIES"
 ENV_REFLECT_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF"
 ENV_REFLECT_LLM_MAX_BACKOFF = "HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF"
 ENV_REFLECT_LLM_TIMEOUT = "HINDSIGHT_API_REFLECT_LLM_TIMEOUT"
-ENV_REFLECT_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_REFLECT_LLM_LITELLMROUTER_CONFIG"
 ENV_REFLECT_LLM_REASONING_EFFORT = "HINDSIGHT_API_REFLECT_LLM_REASONING_EFFORT"
 ENV_REFLECT_LLM_EXTRA_BODY = "HINDSIGHT_API_REFLECT_LLM_EXTRA_BODY"
 ENV_REFLECT_LLM_CACHE_AFFINITY = "HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY"
@@ -513,7 +461,6 @@ ENV_CONSOLIDATION_LLM_MAX_RETRIES = "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_RETRIES
 ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_INITIAL_BACKOFF"
 ENV_CONSOLIDATION_LLM_MAX_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_BACKOFF"
 ENV_CONSOLIDATION_LLM_TIMEOUT = "HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT"
-ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG"
 ENV_CONSOLIDATION_LLM_REASONING_EFFORT = "HINDSIGHT_API_CONSOLIDATION_LLM_REASONING_EFFORT"
 ENV_CONSOLIDATION_LLM_EXTRA_BODY = "HINDSIGHT_API_CONSOLIDATION_LLM_EXTRA_BODY"
 ENV_CONSOLIDATION_LLM_CACHE_AFFINITY = "HINDSIGHT_API_CONSOLIDATION_LLM_CACHE_AFFINITY"
@@ -533,7 +480,6 @@ ENV_MENTAL_MODEL_REFRESH_LLM_MAX_RETRIES = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_L
 ENV_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF"
 ENV_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF"
 ENV_MENTAL_MODEL_REFRESH_LLM_TIMEOUT = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_TIMEOUT"
-ENV_MENTAL_MODEL_REFRESH_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_LITELLMROUTER_CONFIG"
 ENV_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT"
 ENV_MENTAL_MODEL_REFRESH_LLM_EXTRA_BODY = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_EXTRA_BODY"
 ENV_MENTAL_MODEL_REFRESH_LLM_CACHE_AFFINITY = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_CACHE_AFFINITY"
@@ -553,10 +499,8 @@ EMBEDDINGS_SIDE_PASSAGE = "PASSAGE"
 # HINDSIGHT_API_KNOWLEDGE_TEXT_EMBEDDINGS_<X> for any HINDSIGHT_API_EMBEDDINGS_<X>.
 EMBEDDINGS_SIDE_KNOWLEDGE_TEXT = "KNOWLEDGE_TEXT"
 _ENV_EMBEDDINGS_PREFIX = "HINDSIGHT_API_EMBEDDINGS_"
-# Provider-agnostic asymmetric prefixes: applied client-side by every provider that
-# is plain text-in/vector-out (tei, litellm, litellm-sdk, openai-compatible). Providers
-# with a native asymmetry mechanism (local, zeroentropy) ignore them; onnx has its own
-# pair below because its defaults are non-empty.
+# Prefixes for text-in/vector-out providers such as TEI and OpenAI-compatible
+# endpoints. Local models use native asymmetry; ONNX has separate defaults.
 ENV_EMBEDDINGS_QUERY_PREFIX = "HINDSIGHT_API_EMBEDDINGS_QUERY_PREFIX"
 ENV_EMBEDDINGS_PASSAGE_PREFIX = "HINDSIGHT_API_EMBEDDINGS_PASSAGE_PREFIX"
 ENV_EMBEDDINGS_LOCAL_MODEL = "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
@@ -608,90 +552,16 @@ ENV_RERANKER_INITIAL_BACKOFF = "HINDSIGHT_API_RERANKER_INITIAL_BACKOFF"
 ENV_RERANKER_MAX_BACKOFF = "HINDSIGHT_API_RERANKER_MAX_BACKOFF"
 ENV_RERANKER_RETRY_BUDGET = "HINDSIGHT_API_RERANKER_RETRY_BUDGET"
 
-# Gemini/Vertex AI embeddings configuration
-ENV_EMBEDDINGS_GEMINI_API_KEY = "HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY"
-ENV_EMBEDDINGS_GEMINI_MODEL = "HINDSIGHT_API_EMBEDDINGS_GEMINI_MODEL"
-ENV_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY = "HINDSIGHT_API_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY"
-ENV_EMBEDDINGS_GEMINI_FORCE_IPV4 = "HINDSIGHT_API_EMBEDDINGS_GEMINI_FORCE_IPV4"
-ENV_EMBEDDINGS_GEMINI_BATCH_SIZE = "HINDSIGHT_API_EMBEDDINGS_GEMINI_BATCH_SIZE"
-ENV_EMBEDDINGS_VERTEXAI_PROJECT_ID = "HINDSIGHT_API_EMBEDDINGS_VERTEXAI_PROJECT_ID"
-ENV_EMBEDDINGS_VERTEXAI_REGION = "HINDSIGHT_API_EMBEDDINGS_VERTEXAI_REGION"
-ENV_EMBEDDINGS_VERTEXAI_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_EMBEDDINGS_VERTEXAI_SERVICE_ACCOUNT_KEY"
 
-# Cohere configuration (separate for embeddings and reranker)
-ENV_EMBEDDINGS_COHERE_API_KEY = "HINDSIGHT_API_EMBEDDINGS_COHERE_API_KEY"
-ENV_EMBEDDINGS_COHERE_MODEL = "HINDSIGHT_API_EMBEDDINGS_COHERE_MODEL"
-ENV_EMBEDDINGS_COHERE_BASE_URL = "HINDSIGHT_API_EMBEDDINGS_COHERE_BASE_URL"
-ENV_EMBEDDINGS_COHERE_OUTPUT_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_COHERE_OUTPUT_DIMENSIONS"
-ENV_RERANKER_COHERE_API_KEY = "HINDSIGHT_API_RERANKER_COHERE_API_KEY"
-ENV_RERANKER_COHERE_MODEL = "HINDSIGHT_API_RERANKER_COHERE_MODEL"
-ENV_RERANKER_COHERE_BASE_URL = "HINDSIGHT_API_RERANKER_COHERE_BASE_URL"
-
-# OpenRouter configuration (embeddings and reranker)
-ENV_OPENROUTER_API_KEY = "HINDSIGHT_API_OPENROUTER_API_KEY"
-ENV_EMBEDDINGS_OPENROUTER_API_KEY = "HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY"
-ENV_EMBEDDINGS_OPENROUTER_MODEL = "HINDSIGHT_API_EMBEDDINGS_OPENROUTER_MODEL"
-ENV_RERANKER_OPENROUTER_API_KEY = "HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY"
-ENV_RERANKER_OPENROUTER_MODEL = "HINDSIGHT_API_RERANKER_OPENROUTER_MODEL"
-ENV_RERANKER_OPENROUTER_BASE_URL = "HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL"
-
-# Requesty configuration (OpenAI-compatible gateway; embeddings)
-ENV_REQUESTY_API_KEY = "HINDSIGHT_API_REQUESTY_API_KEY"
-ENV_EMBEDDINGS_REQUESTY_API_KEY = "HINDSIGHT_API_EMBEDDINGS_REQUESTY_API_KEY"
-ENV_EMBEDDINGS_HINDSIGHT_API_KEY = "HINDSIGHT_API_EMBEDDINGS_HINDSIGHT_API_KEY"
-ENV_EMBEDDINGS_REQUESTY_MODEL = "HINDSIGHT_API_EMBEDDINGS_REQUESTY_MODEL"
-
-# ZeroEntropy configuration (embeddings)
-ENV_EMBEDDINGS_ZEROENTROPY_API_KEY = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_API_KEY"
-ENV_EMBEDDINGS_ZEROENTROPY_MODEL = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_MODEL"
-ENV_EMBEDDINGS_ZEROENTROPY_BASE_URL = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_BASE_URL"
-ENV_EMBEDDINGS_ZEROENTROPY_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_DIMENSIONS"
-ENV_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT"
-ENV_EMBEDDINGS_ZEROENTROPY_LATENCY = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_LATENCY"
-ENV_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE = "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE"
-
-# NVIDIA NIM embeddings (OpenAI-shaped /embeddings plus a required input_type)
-ENV_EMBEDDINGS_NVIDIA_API_KEY = "HINDSIGHT_API_EMBEDDINGS_NVIDIA_API_KEY"
-ENV_EMBEDDINGS_NVIDIA_MODEL = "HINDSIGHT_API_EMBEDDINGS_NVIDIA_MODEL"
-ENV_EMBEDDINGS_NVIDIA_BASE_URL = "HINDSIGHT_API_EMBEDDINGS_NVIDIA_BASE_URL"
-ENV_EMBEDDINGS_NVIDIA_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_NVIDIA_DIMENSIONS"
-ENV_EMBEDDINGS_NVIDIA_BATCH_SIZE = "HINDSIGHT_API_EMBEDDINGS_NVIDIA_BATCH_SIZE"
-
-# Deprecated: Legacy shared Cohere API key (for backward compatibility)
-ENV_COHERE_API_KEY = "HINDSIGHT_API_COHERE_API_KEY"
-
-# LiteLLM configuration (separate for embeddings and reranker)
-ENV_EMBEDDINGS_LITELLM_API_BASE = "HINDSIGHT_API_EMBEDDINGS_LITELLM_API_BASE"
-ENV_EMBEDDINGS_LITELLM_API_KEY = "HINDSIGHT_API_EMBEDDINGS_LITELLM_API_KEY"
-ENV_EMBEDDINGS_LITELLM_MODEL = "HINDSIGHT_API_EMBEDDINGS_LITELLM_MODEL"
-ENV_EMBEDDINGS_LITELLM_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_LITELLM_DIMENSIONS"
-ENV_RERANKER_LITELLM_API_BASE = "HINDSIGHT_API_RERANKER_LITELLM_API_BASE"
-ENV_RERANKER_LITELLM_API_KEY = "HINDSIGHT_API_RERANKER_LITELLM_API_KEY"
-ENV_RERANKER_LITELLM_MODEL = "HINDSIGHT_API_RERANKER_LITELLM_MODEL"
 # Deprecated alias of ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE, folded into it at load time.
-ENV_RERANKER_LITELLM_MAX_TOKENS_PER_DOC = "HINDSIGHT_API_RERANKER_LITELLM_MAX_TOKENS_PER_DOC"
 # Provider-agnostic per-candidate truncation cap (tokens, see ENV_TOKENIZER_ENCODING).
 ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE = "HINDSIGHT_API_RERANKER_MAX_TOKENS_PER_CANDIDATE"
 
-# LiteLLM SDK configuration (direct API access, no proxy needed)
-ENV_EMBEDDINGS_LITELLM_SDK_API_KEY = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_KEY"
-ENV_EMBEDDINGS_LITELLM_SDK_MODEL = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_MODEL"
-ENV_EMBEDDINGS_LITELLM_SDK_MODEL_ID = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_MODEL_ID"
-ENV_EMBEDDINGS_LITELLM_SDK_API_BASE = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_API_BASE"
-ENV_EMBEDDINGS_LITELLM_SDK_OUTPUT_DIMENSIONS = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_OUTPUT_DIMENSIONS"
-ENV_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT"
 # Provider-agnostic per-input truncation cap (tokens, see ENV_TOKENIZER_ENCODING).
 ENV_EMBEDDINGS_MAX_INPUT_TOKENS = "HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS"
 # Deprecated alias kept so existing deployments keep working; folded into
 # ENV_EMBEDDINGS_MAX_INPUT_TOKENS (the generic name) at load time.
-ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS = "HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS"
-ENV_RERANKER_LITELLM_SDK_API_KEY = "HINDSIGHT_API_RERANKER_LITELLM_SDK_API_KEY"
-ENV_RERANKER_LITELLM_SDK_MODEL = "HINDSIGHT_API_RERANKER_LITELLM_SDK_MODEL"
-ENV_RERANKER_LITELLM_SDK_API_BASE = "HINDSIGHT_API_RERANKER_LITELLM_SDK_API_BASE"
 
-# Deprecated: Legacy shared LiteLLM config (for backward compatibility)
-ENV_LITELLM_API_BASE = "HINDSIGHT_API_LITELLM_API_BASE"
-ENV_LITELLM_API_KEY = "HINDSIGHT_API_LITELLM_API_KEY"
 
 ENV_RERANKER_PROVIDER = "HINDSIGHT_API_RERANKER_PROVIDER"
 ENV_RERANKER_SEND_BANK_AS_HEADER = "HINDSIGHT_API_RERANKER_SEND_BANK_AS_HEADER"
@@ -707,15 +577,6 @@ ENV_RERANKER_TEI_URL = "HINDSIGHT_API_RERANKER_TEI_URL"
 ENV_RERANKER_TEI_BATCH_SIZE = "HINDSIGHT_API_RERANKER_TEI_BATCH_SIZE"
 ENV_RERANKER_TEI_MAX_CONCURRENT = "HINDSIGHT_API_RERANKER_TEI_MAX_CONCURRENT"
 ENV_RERANKER_TEI_HTTP_TIMEOUT = "HINDSIGHT_API_RERANKER_TEI_HTTP_TIMEOUT"
-ENV_RERANKER_COHERE_TIMEOUT = "HINDSIGHT_API_RERANKER_COHERE_TIMEOUT"
-ENV_RERANKER_COHERE_MAX_CONCURRENT = "HINDSIGHT_API_RERANKER_COHERE_MAX_CONCURRENT"
-ENV_RERANKER_OPENROUTER_TIMEOUT = "HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT"
-ENV_RERANKER_ZEROENTROPY_TIMEOUT = "HINDSIGHT_API_RERANKER_ZEROENTROPY_TIMEOUT"
-ENV_RERANKER_SILICONFLOW_TIMEOUT = "HINDSIGHT_API_RERANKER_SILICONFLOW_TIMEOUT"
-ENV_RERANKER_ALIBABA_TIMEOUT = "HINDSIGHT_API_RERANKER_ALIBABA_TIMEOUT"
-ENV_RERANKER_LITELLM_TIMEOUT = "HINDSIGHT_API_RERANKER_LITELLM_TIMEOUT"
-ENV_RERANKER_LITELLM_SDK_TIMEOUT = "HINDSIGHT_API_RERANKER_LITELLM_SDK_TIMEOUT"
-ENV_RERANKER_GOOGLE_TIMEOUT = "HINDSIGHT_API_RERANKER_GOOGLE_TIMEOUT"
 ENV_RERANKER_MAX_CANDIDATES = "HINDSIGHT_API_RERANKER_MAX_CANDIDATES"
 # Per-budget override of the reranker candidate cap. 0 (default) = unset → fall back to
 # ENV_RERANKER_MAX_CANDIDATES, so the mapping is fully backwards-compatible until set.
@@ -731,42 +592,16 @@ ENV_RERANKER_FLASHRANK_CACHE_DIR = "HINDSIGHT_API_RERANKER_FLASHRANK_CACHE_DIR"
 ENV_RERANKER_FLASHRANK_CPU_MEM_ARENA = "HINDSIGHT_API_RERANKER_FLASHRANK_CPU_MEM_ARENA"
 ENV_RERANKER_FLASHRANK_BATCH_SIZE = "HINDSIGHT_API_RERANKER_FLASHRANK_BATCH_SIZE"
 
-# ZeroEntropy configuration (reranker only)
-ENV_RERANKER_ZEROENTROPY_API_KEY = "HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY"
-ENV_RERANKER_ZEROENTROPY_MODEL = "HINDSIGHT_API_RERANKER_ZEROENTROPY_MODEL"
-ENV_RERANKER_ZEROENTROPY_BASE_URL = "HINDSIGHT_API_RERANKER_ZEROENTROPY_BASE_URL"
-
-# SiliconFlow configuration (reranker only; Cohere-compatible /rerank endpoint)
-ENV_RERANKER_SILICONFLOW_API_KEY = "HINDSIGHT_API_RERANKER_SILICONFLOW_API_KEY"
-ENV_RERANKER_SILICONFLOW_MODEL = "HINDSIGHT_API_RERANKER_SILICONFLOW_MODEL"
-ENV_RERANKER_SILICONFLOW_BASE_URL = "HINDSIGHT_API_RERANKER_SILICONFLOW_BASE_URL"
-
-# NVIDIA NIM configuration (reranker only; native /retrieval/<model>/reranking endpoint)
-ENV_RERANKER_NVIDIA_API_KEY = "HINDSIGHT_API_RERANKER_NVIDIA_API_KEY"
-ENV_RERANKER_NVIDIA_MODEL = "HINDSIGHT_API_RERANKER_NVIDIA_MODEL"
-ENV_RERANKER_NVIDIA_BASE_URL = "HINDSIGHT_API_RERANKER_NVIDIA_BASE_URL"
-ENV_RERANKER_NVIDIA_TIMEOUT = "HINDSIGHT_API_RERANKER_NVIDIA_TIMEOUT"
-ENV_RERANKER_NVIDIA_BATCH_SIZE = "HINDSIGHT_API_RERANKER_NVIDIA_BATCH_SIZE"
-ENV_RERANKER_NVIDIA_MAX_CONCURRENT = "HINDSIGHT_API_RERANKER_NVIDIA_MAX_CONCURRENT"
 
 # TypeSafe configuration (reranker only; typed-question API, not a /rerank endpoint).
 # Deprecated: set up the shared decision model (ENV_DECISION_MODEL_* below) instead.
 ENV_RERANKER_TYPESAFE_API_KEY = "HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY"
-ENV_RERANKER_HINDSIGHT_API_KEY = "HINDSIGHT_API_RERANKER_HINDSIGHT_API_KEY"
 ENV_RERANKER_TYPESAFE_MODEL = "HINDSIGHT_API_RERANKER_TYPESAFE_MODEL"
 ENV_RERANKER_TYPESAFE_BASE_URL = "HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL"
 ENV_RERANKER_TYPESAFE_TIMEOUT = "HINDSIGHT_API_RERANKER_TYPESAFE_TIMEOUT"
 ENV_RERANKER_TYPESAFE_MAX_CONCURRENT = "HINDSIGHT_API_RERANKER_TYPESAFE_MAX_CONCURRENT"
 ENV_RERANKER_TYPESAFE_PRUNE_CANDIDATES = "HINDSIGHT_API_RERANKER_TYPESAFE_PRUNE_CANDIDATES"
 
-# Alibaba Cloud DashScope configuration (reranker only)
-ENV_RERANKER_ALIBABA_API_KEY = "HINDSIGHT_API_RERANKER_ALIBABA_API_KEY"
-ENV_RERANKER_ALIBABA_MODEL = "HINDSIGHT_API_RERANKER_ALIBABA_MODEL"
-
-# Google Discovery Engine reranker configuration
-ENV_RERANKER_GOOGLE_MODEL = "HINDSIGHT_API_RERANKER_GOOGLE_MODEL"
-ENV_RERANKER_GOOGLE_PROJECT_ID = "HINDSIGHT_API_RERANKER_GOOGLE_PROJECT_ID"
-ENV_RERANKER_GOOGLE_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_RERANKER_GOOGLE_SERVICE_ACCOUNT_KEY"
 
 # Decision model (TypeSafe System One): set up once, shared by every operation that supports
 # one. Separate from the deprecated typesafe reranker above, which keeps its own settings. Each operation may override provider/key/model/URL with
@@ -875,34 +710,6 @@ ENV_LLM_CODEX_HOME = "HINDSIGHT_API_LLM_CODEX_HOME"
 # chatgpt provider (Sign in with ChatGPT) credential directory: holds
 # credentials.json and this host's host_id. Server-level only.
 ENV_LLM_CHATGPT_HOME = "HINDSIGHT_API_LLM_CHATGPT_HOME"
-
-# xai-oauth provider. The token store is written by the `login` entrypoint and read on
-# every call; the rest exist so a deployment can point at a different OAuth app.
-ENV_XAI_OAUTH_TOKEN_PATH = "HINDSIGHT_API_XAI_OAUTH_TOKEN_PATH"
-ENV_XAI_OAUTH_CLIENT_ID = "HINDSIGHT_API_XAI_OAUTH_CLIENT_ID"
-ENV_XAI_OAUTH_SCOPE = "HINDSIGHT_API_XAI_OAUTH_SCOPE"
-ENV_XAI_OAUTH_REFRESH_TIMEOUT_SECONDS = "HINDSIGHT_API_XAI_OAUTH_REFRESH_TIMEOUT_SECONDS"
-ENV_XAI_OAUTH_REFRESH_SKEW_SECONDS = "HINDSIGHT_API_XAI_OAUTH_REFRESH_SKEW_SECONDS"
-ENV_XAI_OAUTH_BASE_URL = "HINDSIGHT_API_XAI_OAUTH_BASE_URL"
-ENV_XAI_OAUTH_DEBUG_HEADERS = "HINDSIGHT_API_XAI_OAUTH_DEBUG_HEADERS"
-
-# Vertex AI configuration
-ENV_LLM_VERTEXAI_PROJECT_ID = "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID"
-ENV_LLM_VERTEXAI_REGION = "HINDSIGHT_API_LLM_VERTEXAI_REGION"
-ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY = "HINDSIGHT_API_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY"
-
-# Gemini safety settings
-ENV_LLM_GEMINI_SAFETY_SETTINGS = "HINDSIGHT_API_LLM_GEMINI_SAFETY_SETTINGS"
-
-# Gemini prompt caching. When enabled, retain fact-extraction reuses a
-# CachedContent prefix for the static system_instruction + response_schema,
-# cutting per-call input cost on workloads with many small documents.
-# Provider-agnostic prompt-prefix caching. Providers that support it (currently
-# Gemini/Vertex via CachedContent) reuse the large, fixed, bank-agnostic system
-# prefix at the cached-input rate; providers that don't simply ignore it. On by
-# default — the prefix is bank-agnostic so a single cache is shared across all
-# banks, and creation soft-fails to an uncached call, so it never breaks a request.
-ENV_LLM_PROMPT_CACHE_ENABLED = "HINDSIGHT_API_LLM_PROMPT_CACHE_ENABLED"
 
 # Opt-in diagnostic: when truthy, log the exact request behind any LLM 4xx (the
 # serialized request config with message bodies stripped + length-capped per-message
@@ -1281,8 +1088,8 @@ DEFAULT_LLAMACPP_NO_GRAMMAR = False  # True = disable JSON grammar enforcement (
 DEFAULT_LLAMACPP_EXTRA_ARGS = None  # Space-separated extra CLI args for llama.cpp server
 
 # True = ask schema-capable backends to grammar-enforce structured output via
-# json_schema strict (OpenAI-compatible, LiteLLM; Gemini already enforces its
-# native response_schema). Default False keeps the soft "schema-in-prompt +
+# json_schema strict on supported OpenAI-compatible models. Default False keeps
+# the soft "schema-in-prompt +
 # json_object" path, which weaker self-hosted instruction-followers can violate
 # (prose preambles, markdown fences, invalid JSON) — wedging retain/consolidation
 # on parse retries.
@@ -1299,18 +1106,6 @@ DEFAULT_LLM_STRICT_SCHEMA = False
 # nor reject it (native Anthropic tool schemas) gain nothing from it either --
 # only grammar-constrained backends that accept it do, so it is opt-in.
 DEFAULT_LLM_SUPPORTS_STRING_PATTERN = False
-
-# True = give LiteLLM-backed providers the structured-output schema in the prompt and
-# parse the reply, instead of the OpenAI-style ``response_format``. Needed where the
-# backend rejects the response_format route outright — notably Bedrock Claude, whose
-# Converse layer refuses the translated ``outputConfig`` ("Extra inputs are not
-# permitted", issue #3300). It used to send the schema as a single forced function
-# tool, which Bedrock accepted; Hindsight sends no tools any more
-# (providers/tools_via_schema.py), and the prompt is what every CLI provider already uses. Verified region-dependent:
-# ap-southeast-2 / au.* rejects it, us-east-1 / us.* accepts it, so this is opt-in
-# rather than keyed off the provider. Default False keeps ``response_format``, which
-# every other LiteLLM backend handles natively.
-DEFAULT_LLM_STRUCTURED_OUTPUT_IN_PROMPT = False
 
 DEFAULT_LLM_MAX_CONCURRENT = 32
 DEFAULT_LLM_MAX_RETRIES = 3  # Max retry attempts for LLM API calls
@@ -1337,7 +1132,7 @@ DEFAULT_LLM_HTTP_LOG_LEVEL = "WARNING"
 # generation rather than to keep a request responsive.
 #
 # 30s is chosen against the *retry ladder*, not against a single call: a stalled attempt is
-# retried (see _TIMEOUT_RETRIES in providers/gemini_llm.py), so what has to fit inside a
+# retried, so what has to fit inside a
 # caller's patience is deadline x attempts, and 30x3 = 90s does. A first pass at 60s did not:
 # CI logs showed reflect calls answering in 1-4s but stalling on roughly a quarter of
 # attempts, so two stalls in a row landed right back on 120s. The headroom over a healthy
@@ -1351,13 +1146,6 @@ DEFAULT_LLM_CODEX_HOME = None
 # chatgpt credentials directory (None = ~/.hindsight/chatgpt)
 DEFAULT_LLM_CHATGPT_HOME = None
 
-# Vertex AI defaults
-DEFAULT_LLM_VERTEXAI_PROJECT_ID = None  # Required for Vertex AI
-DEFAULT_LLM_VERTEXAI_REGION = "us-central1"
-DEFAULT_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY = None  # Optional, uses ADC if not set
-
-# Gemini safety settings defaults
-DEFAULT_LLM_GEMINI_SAFETY_SETTINGS = None  # None = use Gemini default safety settings
 
 DEFAULT_EMBEDDINGS_PROVIDER = "local"
 DEFAULT_EMBEDDINGS_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
@@ -1416,10 +1204,6 @@ DEFAULT_RERANKER_MAX_RETRIES = 3
 DEFAULT_RERANKER_INITIAL_BACKOFF = 0.5
 DEFAULT_RERANKER_MAX_BACKOFF = 4.0
 DEFAULT_RERANKER_RETRY_BUDGET = 10.0
-DEFAULT_EMBEDDINGS_GEMINI_MODEL = "gemini-embedding-001"
-DEFAULT_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY = 768
-DEFAULT_EMBEDDINGS_GEMINI_FORCE_IPV4 = False
-DEFAULT_EMBEDDINGS_GEMINI_BATCH_SIZE = 100
 DEFAULT_EMBEDDING_DIMENSION = 384
 
 DEFAULT_RERANKER_PROVIDER = "local"
@@ -1444,19 +1228,9 @@ DEFAULT_RERANKER_TEI_MAX_CONCURRENT = 8
 DEFAULT_RERANKER_TEI_HTTP_TIMEOUT = 30.0  # HTTP timeout for TEI reranker requests (seconds)
 # HTTP timeout (seconds) for remote rerank providers. Defaults match the previous
 # hardcoded constructor defaults so unset envs keep current behavior.
-DEFAULT_RERANKER_COHERE_TIMEOUT = 60.0
 # In-flight rerank requests per process. Excess requests queue locally, so the request
 # timeout measures server time rather than time spent behind other recalls.
-DEFAULT_RERANKER_COHERE_MAX_CONCURRENT = 16
-DEFAULT_RERANKER_OPENROUTER_TIMEOUT = 60.0
-DEFAULT_RERANKER_ZEROENTROPY_TIMEOUT = 60.0
-DEFAULT_RERANKER_SILICONFLOW_TIMEOUT = 60.0
-DEFAULT_RERANKER_NVIDIA_TIMEOUT = 60.0
 DEFAULT_RERANKER_TYPESAFE_TIMEOUT = 60.0
-DEFAULT_RERANKER_ALIBABA_TIMEOUT = 60.0
-DEFAULT_RERANKER_LITELLM_TIMEOUT = 60.0
-DEFAULT_RERANKER_LITELLM_SDK_TIMEOUT = 60.0
-DEFAULT_RERANKER_GOOGLE_TIMEOUT = 60.0
 DEFAULT_RERANKER_MAX_CANDIDATES = 300
 # 0 = unset → the reranker cap falls back to DEFAULT_RERANKER_MAX_CANDIDATES for that budget level.
 DEFAULT_RERANKER_MAX_CANDIDATES_LOW = 0
@@ -1586,46 +1360,6 @@ DEFAULT_RERANKER_ONNX_THREADS = 0  # Threads per pass; 0 = the native thread cap
 DEFAULT_RERANKER_ONNX_MAX_CONCURRENT = 1
 DEFAULT_RERANKER_ONNX_CPU_MEM_ARENA = False  # Arena never shrinks; off keeps RSS bounded
 
-DEFAULT_EMBEDDINGS_COHERE_MODEL = "embed-english-v3.0"
-DEFAULT_RERANKER_COHERE_MODEL = "rerank-english-v3.0"
-
-# OpenRouter defaults
-DEFAULT_EMBEDDINGS_OPENROUTER_MODEL = "perplexity/pplx-embed-v1-0.6b"
-DEFAULT_RERANKER_OPENROUTER_MODEL = "cohere/rerank-v3.5"
-DEFAULT_RERANKER_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/rerank"
-
-# Requesty defaults
-DEFAULT_EMBEDDINGS_REQUESTY_MODEL = "openai/text-embedding-3-small"
-
-# ZeroEntropy defaults
-DEFAULT_EMBEDDINGS_ZEROENTROPY_MODEL = "zembed-1"
-# Shared between embeddings (zembed-1) and reranker (zerank-*) — the host is the same.
-DEFAULT_ZEROENTROPY_BASE_URL = "https://api.zeroentropy.dev"
-# ZeroEntropy's API default is 2560, but Hindsight defaults to 1280 so the
-# provider works with pgvector HNSW's 2000-dimension index limit out of the box.
-DEFAULT_EMBEDDINGS_ZEROENTROPY_DIMENSIONS = 1280
-DEFAULT_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT = "float"
-DEFAULT_EMBEDDINGS_ZEROENTROPY_LATENCY = None
-DEFAULT_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE = 100
-
-DEFAULT_RERANKER_ZEROENTROPY_MODEL = "zerank-2"
-
-DEFAULT_RERANKER_SILICONFLOW_MODEL = "BAAI/bge-reranker-v2-m3"
-DEFAULT_RERANKER_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-
-# The model id is part of the reranking path, so it keeps its "nvidia/" namespace.
-DEFAULT_RERANKER_NVIDIA_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
-DEFAULT_RERANKER_NVIDIA_BASE_URL = "https://ai.api.nvidia.com/v1"
-# The hosted ranking API rejects more than 512 passages per request.
-DEFAULT_RERANKER_NVIDIA_BATCH_SIZE = 512
-DEFAULT_RERANKER_NVIDIA_MAX_CONCURRENT = 8
-
-DEFAULT_EMBEDDINGS_NVIDIA_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
-DEFAULT_EMBEDDINGS_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-# The model's native size is 2048; 1024 (a Matryoshka step it accepts) keeps the
-# provider inside pgvector HNSW's 2000-dimension index limit out of the box.
-DEFAULT_EMBEDDINGS_NVIDIA_DIMENSIONS = 1024
-DEFAULT_EMBEDDINGS_NVIDIA_BATCH_SIZE = 100
 
 DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
@@ -1633,15 +1367,10 @@ DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
 # /v1/rerank) and the decision model (System One). hs-rerank-1 reranks and hs-decide-1-flash decides.
 # Hindsight Inference keys come from the provider-specific API key setting.
 HINDSIGHT_INFERENCE_URL = "https://inference.hindsight.vectorize.io"
-DEFAULT_EMBEDDINGS_HINDSIGHT_MODEL = "hs-embed-1"
-DEFAULT_RERANKER_HINDSIGHT_MODEL = "hs-rerank-1"
 DEFAULT_RERANKER_TYPESAFE_MAX_CONCURRENT = 24
 # Off by default: dropping changes what recall returns, so it is opt-in.
 DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES = False
 
-DEFAULT_RERANKER_ALIBABA_MODEL = "qwen3-rerank"
-
-DEFAULT_RERANKER_GOOGLE_MODEL = "semantic-ranker-default-004"
 
 DecisionModelOperation = Literal["recall", "reflect", "consolidation"]
 DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = ("recall", "reflect", "consolidation")
@@ -1748,18 +1477,11 @@ DEFAULT_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE = "english"
 DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER = ""
 DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA = "paradedb"
 
-# LiteLLM defaults
-DEFAULT_LITELLM_API_BASE = "http://localhost:4000"
-DEFAULT_EMBEDDINGS_LITELLM_MODEL = "text-embedding-3-small"
-DEFAULT_RERANKER_LITELLM_MODEL = "cohere/rerank-english-v3.0"
 # Per-candidate truncation before rerank, applied to every provider. Off by default;
 # set it to the model's context window (or lower, to bound request size on a CPU-only
 # rerank server).
 DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE: int | None = None
 
-# LiteLLM SDK defaults
-DEFAULT_EMBEDDINGS_LITELLM_SDK_MODEL = "cohere/embed-english-v3.0"
-DEFAULT_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT = "float"
 # Per-text input truncation (tokens, see ENV_TOKENIZER_ENCODING), applied to every
 # embeddings provider before the text leaves the process. 8192 is the input limit of
 # essentially every remote embedding model in use (OpenAI text-embedding-3-*, Bedrock
@@ -1768,7 +1490,6 @@ DEFAULT_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT = "float"
 # does — which failed the owning task for good (#2501, #4165). Set the env var to the
 # model's real limit if it differs, or to 0 to send text uncapped.
 DEFAULT_EMBEDDINGS_MAX_INPUT_TOKENS: int | None = 8192
-DEFAULT_RERANKER_LITELLM_SDK_MODEL = "cohere/rerank-english-v3.0"
 
 # Vocabulary used for every token count and chunk boundary in the engine. Server-level:
 # these counts back budgets that stand in for a model's context window, and a bank that
@@ -1785,12 +1506,6 @@ DEFAULT_LOG_LEVEL = "info"
 DEFAULT_LOG_FORMAT = "text"  # Options: "text", "json"
 DEFAULT_WORKERS = 1
 DEFAULT_ACCESS_LOG = False
-DEFAULT_XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
-DEFAULT_XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
-DEFAULT_XAI_OAUTH_REFRESH_SKEW_SECONDS = 60.0
-DEFAULT_XAI_OAUTH_REFRESH_TIMEOUT_SECONDS = 20.0
-DEFAULT_XAI_OAUTH_BASE_URL = "https://api.x.ai/v1"
-DEFAULT_XAI_OAUTH_DEBUG_HEADERS = False
 # Long enough that a fold has a real chance to drain the backlog — retrying into a
 # still-full store just sheds again and burns the claim — and short enough that a
 # cleared backlog is not left waiting. Deferrals do not count against max_retries.
@@ -1967,7 +1682,6 @@ DEFAULT_RETAIN_ENTITY_RESOLUTION_BATCH_SIZE = 100  # Unique entity names per pg_
 # signal is noise, while the cost is a synchronous SequenceMatcher call per candidate.
 DEFAULT_RETAIN_ENTITY_RESOLUTION_MAX_CANDIDATES = 200
 DEFAULT_RETAIN_BATCH_ENABLED = False  # Use LLM Batch API for fact extraction (only when async=True)
-DEFAULT_LLM_PROMPT_CACHE_ENABLED = True  # Reuse the fixed system prefix via provider prompt caching
 DEFAULT_LLM_DEBUG_DUMP_4XX = False  # Log the exact request behind any LLM 4xx (diagnostic, off by default)
 DEFAULT_RETAIN_BATCH_POLL_INTERVAL_SECONDS = 60  # Batch API polling interval in seconds
 
@@ -1982,14 +1696,9 @@ Transcribe only the visible text in the image. Do not describe the image, summar
 DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE_MB = 100  # Max total batch size in MB (all files combined)
 DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE = 10  # Max files per batch upload
 # Knowledge banks: one embedder per server, its modalities deciding which media types can be ingested
-# (knowledge/embedders.py). Multimodal: "local" (EmbeddingGemma 2 in-process), "gemini" / "vertex"
-# (Gemini Embedding 2), "voyage" (text, image, video), "cohere" (text, image), "openai" (any compatible
-# server). Text only: "text", any memory-bank embeddings provider (see EMBEDDINGS_SIDE_KNOWLEDGE_TEXT).
+# (knowledge/embedders.py). Supported providers are local, openai and text.
 DEFAULT_KNOWLEDGE_EMBEDDINGS_PROVIDER = "local"
 DEFAULT_KNOWLEDGE_EMBEDDINGS_LOCAL_MODEL = "google/embeddinggemma-2"
-DEFAULT_KNOWLEDGE_EMBEDDINGS_GEMINI_MODEL = "gemini-embedding-2"
-DEFAULT_KNOWLEDGE_EMBEDDINGS_VOYAGE_MODEL = "voyage-multimodal-3.5"
-DEFAULT_KNOWLEDGE_EMBEDDINGS_COHERE_MODEL = "embed-v4.0"
 DEFAULT_KNOWLEDGE_EMBEDDINGS_BATCH_SIZE = 8
 DEFAULT_KNOWLEDGE_IMAGE_TOKENS = 280  # EmbeddingGemma 2 vision token budget per image (70..1120)
 DEFAULT_KNOWLEDGE_MAX_FILE_MB = 500
@@ -2782,24 +2491,6 @@ def _env_default_model(provider_env: str) -> str | None:
     return _get_default_model_for_provider(provider) if provider else None
 
 
-def _parse_llm_router_config(env_var: str) -> dict | None:
-    """
-    Parse a LiteLLM Router configuration from a JSON env var.
-
-    The value is forwarded verbatim to ``litellm.Router(**config)``. We only
-    check that it parses as JSON; LiteLLM Router is authoritative about the
-    shape (``model_list``, ``fallbacks``, ``routing_strategy``, …). See
-    https://docs.litellm.ai/docs/routing.
-    """
-    raw = os.getenv(env_var, "").strip()
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid {env_var}: invalid JSON: {e}") from e
-
-
 @dataclass
 class LLMMemberConfig:
     """One extra LLM in a multi-LLM chain, configured via indexed env vars.
@@ -2822,14 +2513,8 @@ class LLMMemberConfig:
     reasoning_effort: str | None = None
     extra_body: dict | None = None
     default_headers: dict | None = None
-    bedrock_service_tier: str | None = None
-    gemini_service_tier: str | None = None
     cache_affinity: str | None = None
     codex_home: str | None = None
-    vertexai_project_id: str | None = None
-    vertexai_region: str | None = None
-    vertexai_service_account_key: str | None = None
-    litellmrouter_config: dict | None = None
     timeout: float | None = None
     max_retries: int | None = None
 
@@ -2983,7 +2668,6 @@ def _parse_llm_members(prefix: str) -> list[LLMMemberConfig]:
                 f"{base}API_KEY is required for provider '{provider}' (member {index} of the multi-LLM chain)."
             )
 
-        gemini_service_tier = os.getenv(base + "GEMINI_SERVICE_TIER")
         members.append(
             LLMMemberConfig(
                 provider=provider,
@@ -2994,15 +2678,7 @@ def _parse_llm_members(prefix: str) -> list[LLMMemberConfig]:
                 extra_body=json.loads(os.getenv(base + "EXTRA_BODY", "null")),
                 default_headers=json.loads(os.getenv(base + "DEFAULT_HEADERS", "null")),
                 cache_affinity=os.getenv(base + "CACHE_AFFINITY") or None,
-                bedrock_service_tier=os.getenv(base + "BEDROCK_SERVICE_TIER") or None,
-                gemini_service_tier=(
-                    parse_gemini_service_tier(gemini_service_tier) if provider.lower() == "gemini" else None
-                ),
                 codex_home=os.getenv(base + "CODEX_HOME") or None,
-                vertexai_project_id=os.getenv(base + "VERTEXAI_PROJECT_ID") or None,
-                vertexai_region=os.getenv(base + "VERTEXAI_REGION") or None,
-                vertexai_service_account_key=os.getenv(base + "VERTEXAI_SERVICE_ACCOUNT_KEY") or None,
-                litellmrouter_config=_parse_llm_router_config(base + "LITELLMROUTER_CONFIG"),
                 timeout=_member_opt_float(base, "TIMEOUT", None),
                 max_retries=_member_opt_int(base, "MAX_RETRIES", None),
             )
@@ -3051,9 +2727,8 @@ class RerankerMemberConfig:
     Member 0 is the **primary**: the unindexed ``HINDSIGHT_API_RERANKER_*``
     settings, built by :meth:`HindsightConfig.reranker_chain`. Members 1..N come
     from ``HINDSIGHT_API_RERANKER_<n>_*`` and are read in isolation — an indexed
-    member inherits nothing from the primary and nothing from the shared provider
-    keys (``HINDSIGHT_API_COHERE_API_KEY`` and friends), so every setting it needs
-    must be spelled out with its own index. Settings left unset fall back to the
+    member inherits nothing from the primary, so every setting it needs must be
+    spelled out with its own index. Settings left unset fall back to the
     same built-in defaults the primary uses.
 
     The fields mirror the ``reranker_*`` fields of :class:`HindsightConfig`, minus
@@ -3079,50 +2754,12 @@ class RerankerMemberConfig:
     tei_batch_size: int
     tei_max_concurrent: int
     tei_http_timeout: float
-    # cohere
-    cohere_api_key: str | None
-    cohere_model: str
-    cohere_base_url: str | None
-    cohere_timeout: float
-    cohere_max_concurrent: int
-    # openrouter
-    openrouter_api_key: str | None
-    openrouter_model: str
-    openrouter_base_url: str
-    openrouter_timeout: float
     # flashrank
     flashrank_model: str
     flashrank_cache_dir: str | None
     flashrank_cpu_mem_arena: bool
     flashrank_batch_size: int
     onnx: OnnxRerankerConfig
-    # litellm (proxy)
-    litellm_api_base: str
-    litellm_api_key: str | None
-    litellm_model: str
-    litellm_timeout: float
-    # litellm-sdk
-    litellm_sdk_api_key: str | None
-    litellm_sdk_model: str
-    litellm_sdk_api_base: str | None
-    litellm_sdk_timeout: float
-    # zeroentropy
-    zeroentropy_api_key: str | None
-    zeroentropy_model: str
-    zeroentropy_base_url: str | None
-    zeroentropy_timeout: float
-    # siliconflow
-    siliconflow_api_key: str | None
-    siliconflow_model: str
-    siliconflow_base_url: str
-    siliconflow_timeout: float
-    # nvidia
-    nvidia_api_key: str | None
-    nvidia_model: str
-    nvidia_base_url: str
-    nvidia_timeout: float
-    nvidia_batch_size: int
-    nvidia_max_concurrent: int
     # typesafe
     typesafe_api_key: str | None
     typesafe_model: str
@@ -3130,17 +2767,6 @@ class RerankerMemberConfig:
     typesafe_timeout: float
     typesafe_max_concurrent: int
     typesafe_prune_candidates: bool
-    # alibaba
-    alibaba_api_key: str | None
-    alibaba_model: str
-    alibaba_timeout: float
-    # google
-    google_model: str
-    google_project_id: str | None
-    google_service_account_key: str | None
-    google_timeout: float
-    # hindsight inference
-    hindsight_api_key: str | None
 
     def env_name(self, suffix: str) -> str:
         """The env var this member reads ``suffix`` from, for error messages.
@@ -3228,11 +2854,8 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
             RerankerMemberConfig(
                 index=index,
                 provider=provider,
-                # Generic name, falling back to the deprecated LiteLLM-specific alias.
                 max_tokens_per_candidate=_member_opt_int(
-                    base,
-                    "MAX_TOKENS_PER_CANDIDATE",
-                    _member_opt_int(base, "LITELLM_MAX_TOKENS_PER_DOC", DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE),
+                    base, "MAX_TOKENS_PER_CANDIDATE", DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE
                 ),
                 local_model=_member_str(base, "LOCAL_MODEL", DEFAULT_RERANKER_LOCAL_MODEL),
                 local_force_cpu=_member_bool(base, "LOCAL_FORCE_CPU", DEFAULT_RERANKER_LOCAL_FORCE_CPU),
@@ -3250,17 +2873,6 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 tei_batch_size=_member_int(base, "TEI_BATCH_SIZE", DEFAULT_RERANKER_TEI_BATCH_SIZE),
                 tei_max_concurrent=_member_int(base, "TEI_MAX_CONCURRENT", DEFAULT_RERANKER_TEI_MAX_CONCURRENT),
                 tei_http_timeout=_member_float(base, "TEI_HTTP_TIMEOUT", DEFAULT_RERANKER_TEI_HTTP_TIMEOUT),
-                cohere_api_key=_member_opt_str(base, "COHERE_API_KEY"),
-                cohere_model=_member_str(base, "COHERE_MODEL", DEFAULT_RERANKER_COHERE_MODEL),
-                cohere_base_url=_member_opt_str(base, "COHERE_BASE_URL"),
-                cohere_timeout=_member_float(base, "COHERE_TIMEOUT", DEFAULT_RERANKER_COHERE_TIMEOUT),
-                cohere_max_concurrent=_member_int(
-                    base, "COHERE_MAX_CONCURRENT", DEFAULT_RERANKER_COHERE_MAX_CONCURRENT
-                ),
-                openrouter_api_key=_member_opt_str(base, "OPENROUTER_API_KEY"),
-                openrouter_model=_member_str(base, "OPENROUTER_MODEL", DEFAULT_RERANKER_OPENROUTER_MODEL),
-                openrouter_base_url=_member_str(base, "OPENROUTER_BASE_URL", DEFAULT_RERANKER_OPENROUTER_BASE_URL),
-                openrouter_timeout=_member_float(base, "OPENROUTER_TIMEOUT", DEFAULT_RERANKER_OPENROUTER_TIMEOUT),
                 flashrank_model=_member_str(base, "FLASHRANK_MODEL", DEFAULT_RERANKER_FLASHRANK_MODEL),
                 flashrank_cache_dir=_member_opt_str(base, "FLASHRANK_CACHE_DIR"),
                 flashrank_cpu_mem_arena=_member_bool(
@@ -3268,32 +2880,7 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 ),
                 flashrank_batch_size=_member_int(base, "FLASHRANK_BATCH_SIZE", DEFAULT_RERANKER_FLASHRANK_BATCH_SIZE),
                 onnx=OnnxRerankerConfig.from_env(base),
-                litellm_api_base=_member_str(base, "LITELLM_API_BASE", DEFAULT_LITELLM_API_BASE),
-                litellm_api_key=_member_opt_str(base, "LITELLM_API_KEY"),
-                litellm_model=_member_str(base, "LITELLM_MODEL", DEFAULT_RERANKER_LITELLM_MODEL),
-                litellm_timeout=_member_float(base, "LITELLM_TIMEOUT", DEFAULT_RERANKER_LITELLM_TIMEOUT),
-                litellm_sdk_api_key=_member_opt_str(base, "LITELLM_SDK_API_KEY"),
-                litellm_sdk_model=_member_str(base, "LITELLM_SDK_MODEL", DEFAULT_RERANKER_LITELLM_SDK_MODEL),
-                litellm_sdk_api_base=_member_opt_str(base, "LITELLM_SDK_API_BASE"),
-                litellm_sdk_timeout=_member_float(base, "LITELLM_SDK_TIMEOUT", DEFAULT_RERANKER_LITELLM_SDK_TIMEOUT),
-                zeroentropy_api_key=_member_opt_str(base, "ZEROENTROPY_API_KEY"),
-                zeroentropy_model=_member_str(base, "ZEROENTROPY_MODEL", DEFAULT_RERANKER_ZEROENTROPY_MODEL),
-                zeroentropy_base_url=_member_opt_str(base, "ZEROENTROPY_BASE_URL"),
-                zeroentropy_timeout=_member_float(base, "ZEROENTROPY_TIMEOUT", DEFAULT_RERANKER_ZEROENTROPY_TIMEOUT),
-                siliconflow_api_key=_member_opt_str(base, "SILICONFLOW_API_KEY"),
-                siliconflow_model=_member_str(base, "SILICONFLOW_MODEL", DEFAULT_RERANKER_SILICONFLOW_MODEL),
-                siliconflow_base_url=_member_str(base, "SILICONFLOW_BASE_URL", DEFAULT_RERANKER_SILICONFLOW_BASE_URL),
-                siliconflow_timeout=_member_float(base, "SILICONFLOW_TIMEOUT", DEFAULT_RERANKER_SILICONFLOW_TIMEOUT),
-                nvidia_api_key=_member_opt_str(base, "NVIDIA_API_KEY"),
-                nvidia_model=_member_str(base, "NVIDIA_MODEL", DEFAULT_RERANKER_NVIDIA_MODEL),
-                nvidia_base_url=_member_str(base, "NVIDIA_BASE_URL", DEFAULT_RERANKER_NVIDIA_BASE_URL),
-                nvidia_timeout=_member_float(base, "NVIDIA_TIMEOUT", DEFAULT_RERANKER_NVIDIA_TIMEOUT),
-                nvidia_batch_size=_member_int(base, "NVIDIA_BATCH_SIZE", DEFAULT_RERANKER_NVIDIA_BATCH_SIZE),
-                nvidia_max_concurrent=_member_int(
-                    base, "NVIDIA_MAX_CONCURRENT", DEFAULT_RERANKER_NVIDIA_MAX_CONCURRENT
-                ),
                 typesafe_api_key=_member_opt_str(base, "TYPESAFE_API_KEY"),
-                hindsight_api_key=_member_opt_str(base, "HINDSIGHT_API_KEY"),
                 typesafe_model=_member_str(base, "TYPESAFE_MODEL", DEFAULT_RERANKER_TYPESAFE_MODEL),
                 typesafe_base_url=_member_str(base, "TYPESAFE_BASE_URL", DEFAULT_RERANKER_TYPESAFE_BASE_URL),
                 typesafe_timeout=_member_float(base, "TYPESAFE_TIMEOUT", DEFAULT_RERANKER_TYPESAFE_TIMEOUT),
@@ -3303,13 +2890,6 @@ def _parse_reranker_members() -> list[RerankerMemberConfig]:
                 typesafe_prune_candidates=_member_bool(
                     base, "TYPESAFE_PRUNE_CANDIDATES", DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES
                 ),
-                alibaba_api_key=_member_opt_str(base, "ALIBABA_API_KEY"),
-                alibaba_model=_member_str(base, "ALIBABA_MODEL", DEFAULT_RERANKER_ALIBABA_MODEL),
-                alibaba_timeout=_member_float(base, "ALIBABA_TIMEOUT", DEFAULT_RERANKER_ALIBABA_TIMEOUT),
-                google_model=_member_str(base, "GOOGLE_MODEL", DEFAULT_RERANKER_GOOGLE_MODEL),
-                google_project_id=_member_opt_str(base, "GOOGLE_PROJECT_ID"),
-                google_service_account_key=_member_opt_str(base, "GOOGLE_SERVICE_ACCOUNT_KEY"),
-                google_timeout=_member_float(base, "GOOGLE_TIMEOUT", DEFAULT_RERANKER_GOOGLE_TIMEOUT),
             )
         )
         index += 1
@@ -3411,9 +2991,8 @@ def _embeddings_side_env_prefix(side: str) -> str:
 def _scoped_embeddings_getenv(side: str) -> _Getenv:
     """An ``os.getenv`` that prefers a side's own variable over the main embeddings one.
 
-    Only ``HINDSIGHT_API_EMBEDDINGS_*`` names are scoped. The shared-key fallbacks the
-    embeddings fields also consult (``HINDSIGHT_API_LLM_API_KEY``, ``COHERE_API_KEY``, ...)
-    stay process-wide, so a side inherits them exactly like the main config does.
+    Only ``HINDSIGHT_API_EMBEDDINGS_*`` names are scoped. Other shared settings,
+    such as the LLM API key, remain process-wide.
     """
     prefix = _embeddings_side_env_prefix(side)
 
@@ -3492,21 +3071,14 @@ class HindsightConfig:
     # each model runs at its own default effort. A configured value is a statement about
     # the deployment and is sent as given (issue #3449).
     llm_reasoning_effort: str | None
-    llm_groq_service_tier: str  # Groq: "on_demand", "flex", or "auto"
     llm_openai_service_tier: str | None  # OpenAI: None (default) or "flex" (50% cheaper)
-    llm_bedrock_service_tier: str | None  # Bedrock: None (default), "flex", "priority", or "reserved"
-    llm_gemini_service_tier: str | None  # Gemini: None (default) or "flex" (50% cheaper)
     llm_extra_body: (
         dict | None
     )  # Extra body params merged into OpenAI-compatible API calls (e.g. {"chat_template_kwargs": {"enable_thinking": true}})
     llm_default_headers: (
         dict | None
     )  # Custom headers passed as default_headers to provider SDK clients (e.g. {"X-Component-Id": "hindsight"} for proxies / request tracing)
-    # Backend prompt-cache pinning for the OpenAI-compatible providers and Fireworks:
-    # "none" (default),
-    # "xai_conv_id", "openai_prompt_cache_key" or "auto". Static (server-level) like the
-    # two fields above -- it is a transport detail of the configured endpoint, not a
-    # per-bank behaviour. See ENV_LLM_CACHE_AFFINITY and engine/cache_affinity.py.
+    # Prompt-cache mode: none, openai_prompt_cache_key or auto.
     llm_cache_affinity: str | None
     llm_strict_schema: bool  # Grammar-enforce structured output via the provider's strongest schema mode (see DEFAULT_LLM_STRICT_SCHEMA)
     # Per-operation strict-schema overrides. Resolved from the per-operation env
@@ -3519,10 +3091,6 @@ class HindsightConfig:
         default=DEFAULT_LLM_SUPPORTS_STRING_PATTERN,
         kw_only=True,
     )  # Whether structured-output schemas accept JSON Schema pattern
-    llm_structured_output_in_prompt: bool = field(
-        default=DEFAULT_LLM_STRUCTURED_OUTPUT_IN_PROMPT,
-        kw_only=True,
-    )  # LiteLLM-backed providers: the structured-output schema in the prompt, not response_format
     # Tags outbound OpenAI-compatible LLM + embedding calls with `user=<bank_id>` for
     # per-bank cost attribution. Downstream cost gateways (OpenRouter usage accounting,
     # LiteLLM, Helicone) key attribution on the OpenAI `user` field. Opt-in; never
@@ -3547,12 +3115,6 @@ class HindsightConfig:
     llm_temperature_consolidation: float | None
     llm_temperature_mental_model_refresh: float | None
 
-    # LiteLLM Router chain (provider-specific; consumed by the "litellmrouter" provider).
-    # List of deployment dicts evaluated in order with fallback on transient errors.
-    # Each entry: {"provider": str, "model": str, "api_key": str | None, "base_url": str | None}.
-    # Treated as a credential field because entries embed api keys.
-    llm_litellmrouter_config: dict | None
-
     # Codex credentials directory for the primary LLM. Server-level only (not
     # bank-configurable): it is a filesystem path to a credential store, so
     # accepting it over the config API would let a bank point the server at an
@@ -3562,18 +3124,6 @@ class HindsightConfig:
     # chatgpt credential directory (None = ~/.hindsight/chatgpt). Server-level
     # only, for the same reason as llm_codex_home.
     llm_chatgpt_home: str | None
-
-    # Vertex AI configuration
-    llm_vertexai_project_id: str | None
-    llm_vertexai_region: str
-    llm_vertexai_service_account_key: str | None
-
-    # Gemini safety settings (None = use Gemini defaults; list of dicts with category/threshold)
-    llm_gemini_safety_settings: list | None
-
-    # Gemini prompt caching toggle. When True, retain extraction reuses a
-    # CachedContent prefix for its system prompt + response schema.
-    llm_prompt_cache_enabled: bool
 
     # Opt-in diagnostic: log the exact request behind any LLM 4xx. Off by default;
     # server-level only (not per-bank overridable). See engine/providers/llm_debug.py.
@@ -3612,15 +3162,9 @@ class HindsightConfig:
     retain_llm_initial_backoff: float | None
     retain_llm_max_backoff: float | None
     retain_llm_timeout: float | None
-    retain_llm_litellmrouter_config: dict | None
     retain_llm_reasoning_effort: str | None
     retain_llm_extra_body: dict | None
     retain_llm_cache_affinity: str | None
-
-    # Fireworks AI batch inference (static, server-level)
-    fireworks_account_id: str | None
-    fireworks_batch_base_url: str
-    fireworks_batch_max_wait_seconds: int
 
     reflect_llm_provider: str | None
     reflect_llm_api_key: str | None
@@ -3631,7 +3175,6 @@ class HindsightConfig:
     reflect_llm_initial_backoff: float | None
     reflect_llm_max_backoff: float | None
     reflect_llm_timeout: float | None
-    reflect_llm_litellmrouter_config: dict | None
     reflect_llm_reasoning_effort: str | None
     reflect_llm_extra_body: dict | None
     reflect_llm_cache_affinity: str | None
@@ -3645,7 +3188,6 @@ class HindsightConfig:
     consolidation_llm_initial_backoff: float | None
     consolidation_llm_max_backoff: float | None
     consolidation_llm_timeout: float | None
-    consolidation_llm_litellmrouter_config: dict | None
     consolidation_llm_reasoning_effort: str | None
     consolidation_llm_extra_body: dict | None
     consolidation_llm_cache_affinity: str | None
@@ -3662,7 +3204,6 @@ class HindsightConfig:
     mental_model_refresh_llm_initial_backoff: float | None
     mental_model_refresh_llm_max_backoff: float | None
     mental_model_refresh_llm_timeout: float | None
-    mental_model_refresh_llm_litellmrouter_config: dict | None
     mental_model_refresh_llm_reasoning_effort: str | None
     mental_model_refresh_llm_extra_body: dict | None
     mental_model_refresh_llm_cache_affinity: str | None
@@ -3694,36 +3235,6 @@ class HindsightConfig:
     embeddings_openai_api_key: str | None
     embeddings_openai_model: str
     embeddings_openai_base_url: str | None
-    embeddings_cohere_api_key: str | None
-    embeddings_cohere_model: str
-    embeddings_cohere_base_url: str | None
-    embeddings_cohere_output_dimensions: int | None
-    embeddings_openrouter_api_key: str | None
-    embeddings_openrouter_model: str
-    embeddings_requesty_api_key: str | None
-    embeddings_requesty_model: str
-    embeddings_litellm_api_base: str
-    embeddings_litellm_api_key: str | None
-    embeddings_litellm_model: str
-    embeddings_litellm_dimensions: int | None
-    embeddings_litellm_sdk_api_key: str | None
-    embeddings_litellm_sdk_model: str
-    # Bedrock only: the real invoke target (e.g. an application inference profile
-    # ARN) when it differs from the model string LiteLLM uses to pick the payload
-    # shape. None means "invoke the configured model".
-    embeddings_litellm_sdk_model_id: str | None
-    embeddings_litellm_sdk_api_base: str | None
-    embeddings_litellm_sdk_output_dimensions: int | None
-    embeddings_litellm_sdk_encoding_format: str | None
-    # Gemini/Vertex AI embeddings
-    embeddings_gemini_api_key: str | None
-    embeddings_gemini_model: str
-    embeddings_gemini_output_dimensionality: int | None
-    embeddings_gemini_force_ipv4: bool
-    embeddings_vertexai_project_id: str | None
-    embeddings_vertexai_region: str | None
-    embeddings_vertexai_service_account_key: str | None
-
     # Reranker
     reranker_provider: str
     # Provider-agnostic per-candidate token cap; None disables truncation.
@@ -3756,50 +3267,12 @@ class HindsightConfig:
     recency_decay_function: str
     recency_decay_linear_window_days: float
     recency_decay_halflife_days: float
-    reranker_cohere_api_key: str | None
-    reranker_cohere_model: str
-    reranker_cohere_base_url: str | None
-    reranker_cohere_timeout: float
-    reranker_cohere_max_concurrent: int
-    reranker_openrouter_api_key: str | None
-    reranker_openrouter_model: str
-    reranker_openrouter_base_url: str
-    reranker_openrouter_timeout: float
-    reranker_litellm_api_base: str
-    reranker_litellm_api_key: str | None
-    reranker_litellm_model: str
-    reranker_litellm_timeout: float
-    reranker_litellm_sdk_api_key: str | None
-    reranker_litellm_sdk_model: str
-    reranker_litellm_sdk_api_base: str | None
-    reranker_litellm_sdk_timeout: float
-    reranker_zeroentropy_api_key: str | None
-    reranker_zeroentropy_model: str
-    reranker_zeroentropy_base_url: str | None
-    reranker_zeroentropy_timeout: float
-    reranker_siliconflow_api_key: str | None
-    reranker_siliconflow_model: str
-    reranker_siliconflow_base_url: str
-    reranker_siliconflow_timeout: float
-    reranker_nvidia_api_key: str | None
-    reranker_nvidia_model: str
-    reranker_nvidia_base_url: str
-    reranker_nvidia_timeout: float
-    reranker_nvidia_batch_size: int
-    reranker_nvidia_max_concurrent: int
     reranker_typesafe_api_key: str | None
     reranker_typesafe_model: str
     reranker_typesafe_base_url: str
     reranker_typesafe_timeout: float
     reranker_typesafe_max_concurrent: int
     reranker_typesafe_prune_candidates: bool
-    reranker_alibaba_api_key: str | None
-    reranker_alibaba_model: str
-    reranker_alibaba_timeout: float
-    reranker_google_model: str
-    reranker_google_project_id: str | None
-    reranker_google_service_account_key: str | None
-    reranker_google_timeout: float
 
     # Server
     # None when unset. The bind default is applied by the CLI, which also needs to
@@ -3816,15 +3289,8 @@ class HindsightConfig:
     mcp_auth_token: str | None
     file_storage_extension: str | None  # "module.path:ClassName"
     backpressure_defer_seconds: int
-    xai_oauth_token_path: str | None  # None = ~/.hindsight/xai_oauth.json
-    xai_oauth_client_id: str
-    xai_oauth_scope: str
-    xai_oauth_refresh_timeout_seconds: float
-    xai_oauth_refresh_skew_seconds: float
     # None when unset: the provider only treats this as a deployment-wide override of the
     # caller's base_url when the operator actually set it.
-    xai_oauth_base_url: str | None
-    xai_oauth_debug_headers: bool
     log_format: str
     log_json_fields: list[str] | None  # None = all fields; explicit list = allowlist
     mcp_enabled: bool
@@ -4109,30 +3575,15 @@ class HindsightConfig:
     embeddings_openai_batch_size: int = DEFAULT_EMBEDDINGS_OPENAI_BATCH_SIZE
     embeddings_tei_batch_size: int = DEFAULT_EMBEDDINGS_TEI_BATCH_SIZE
     embeddings_max_concurrent_requests: int = DEFAULT_EMBEDDINGS_MAX_CONCURRENT_REQUESTS
-    embeddings_gemini_batch_size: int = DEFAULT_EMBEDDINGS_GEMINI_BATCH_SIZE
     embeddings_openai_dimensions: int | None = None
     embeddings_openai_extra_body: dict | None = None
     embeddings_query_prefix: str = DEFAULT_EMBEDDINGS_QUERY_PREFIX
     embeddings_passage_prefix: str = DEFAULT_EMBEDDINGS_PASSAGE_PREFIX
-    embeddings_zeroentropy_api_key: str | None = None
-    embeddings_zeroentropy_model: str = DEFAULT_EMBEDDINGS_ZEROENTROPY_MODEL
-    embeddings_zeroentropy_base_url: str = DEFAULT_ZEROENTROPY_BASE_URL
-    embeddings_zeroentropy_dimensions: int = DEFAULT_EMBEDDINGS_ZEROENTROPY_DIMENSIONS
-    embeddings_zeroentropy_encoding_format: str = DEFAULT_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT
-    embeddings_zeroentropy_batch_size: int = DEFAULT_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE
-    embeddings_zeroentropy_latency: str | None = DEFAULT_EMBEDDINGS_ZEROENTROPY_LATENCY
     # hindsight: configure the provider API key explicitly.
-    embeddings_hindsight_api_key: str | None = None
     # Per-side embeddings configs (see EMBEDDINGS_SIDE_QUERY). None means the side uses the
     # main embeddings config above. Static: a vector space is a deployment-wide choice.
     query_embeddings: "HindsightConfig | None" = None
     passage_embeddings: "HindsightConfig | None" = None
-    reranker_hindsight_api_key: str | None = None
-    embeddings_nvidia_api_key: str | None = None
-    embeddings_nvidia_model: str = DEFAULT_EMBEDDINGS_NVIDIA_MODEL
-    embeddings_nvidia_base_url: str = DEFAULT_EMBEDDINGS_NVIDIA_BASE_URL
-    embeddings_nvidia_dimensions: int = DEFAULT_EMBEDDINGS_NVIDIA_DIMENSIONS
-    embeddings_nvidia_batch_size: int = DEFAULT_EMBEDDINGS_NVIDIA_BATCH_SIZE
     file_parser_markitdown_ocr_enabled: bool = DEFAULT_FILE_PARSER_MARKITDOWN_OCR_ENABLED
     file_parser_markitdown_ocr_api_key: str | None = None
     file_parser_markitdown_ocr_base_url: str | None = None
@@ -4269,12 +3720,6 @@ class HindsightConfig:
         "reflect_llm_api_key",
         "consolidation_llm_api_key",
         "mental_model_refresh_llm_api_key",
-        # LiteLLM Router chains — entries embed api_keys and base_urls
-        "llm_litellmrouter_config",
-        "retain_llm_litellmrouter_config",
-        "reflect_llm_litellmrouter_config",
-        "consolidation_llm_litellmrouter_config",
-        "mental_model_refresh_llm_litellmrouter_config",
         # Multi-LLM chains — members embed api_keys and base_urls
         "llm_members",
         "retain_llm_members",
@@ -4292,25 +3737,10 @@ class HindsightConfig:
         "mental_model_refresh_llm_base_url",
         "embeddings_tei_base_url",
         "reranker_tei_base_url",
-        "reranker_cohere_base_url",
-        "reranker_openrouter_base_url",
-        "embeddings_zeroentropy_base_url",
-        "embeddings_nvidia_base_url",
-        "reranker_zeroentropy_base_url",
-        "reranker_siliconflow_base_url",
-        "reranker_nvidia_base_url",
         "reranker_typesafe_base_url",
         # Service Account Keys
-        "llm_vertexai_service_account_key",
-        "embeddings_vertexai_service_account_key",
-        "reranker_google_service_account_key",
         # Embeddings API keys
-        "embeddings_gemini_api_key",
         "embeddings_openai_api_key",
-        "embeddings_zeroentropy_api_key",
-        "embeddings_nvidia_api_key",
-        "embeddings_hindsight_api_key",
-        "reranker_hindsight_api_key",
         # File storage credentials
         # File parser credentials
         "file_parser_markitdown_ocr_api_key",
@@ -4319,11 +3749,6 @@ class HindsightConfig:
         "file_parser_llama_parse_api_key",
         # Legacy MCP bearer token, checked ahead of the tenant extension's own auth.
         "mcp_auth_token",
-        # xai-oauth: the client id and the token-store path both describe how this
-        # deployment authenticates, and the store path points at a file holding a grant.
-        "xai_oauth_client_id",
-        "xai_oauth_token_path",
-        "xai_oauth_base_url",
         # Decision model keys and endpoints, global and per operation
         "decision_model_api_key",
         "decision_model_base_url",
@@ -4419,8 +3844,6 @@ class HindsightConfig:
         "disposition_skepticism",
         "disposition_literalism",
         "disposition_empathy",
-        # Gemini safety settings (controls content filtering for Gemini/VertexAI providers)
-        "llm_gemini_safety_settings",
         # Memory Defense policy (validated against DefensePolicy schema on write)
         "memory_defense",
         # Knowledge banks a memory bank reads as authoritative documents
@@ -4446,11 +3869,8 @@ class HindsightConfig:
     def reranker_chain(self) -> list[RerankerMemberConfig]:
         """The reranker failover chain: the primary (index 0) plus indexed members.
 
-        The primary mirrors the unindexed ``reranker_*`` fields, so it keeps their
-        shared-key fallbacks (``HINDSIGHT_API_COHERE_API_KEY``,
-        ``HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID``, ...). Indexed members do not —
-        see :class:`RerankerMemberConfig`. A chain of length 1 means no fallback is
-        configured, which is the default.
+        The primary mirrors the unindexed ``reranker_*`` fields. Indexed members
+        use their own settings; a chain of length 1 has no fallback.
         """
         primary = RerankerMemberConfig(
             index=0,
@@ -4468,15 +3888,6 @@ class HindsightConfig:
             tei_batch_size=self.reranker_tei_batch_size,
             tei_max_concurrent=self.reranker_tei_max_concurrent,
             tei_http_timeout=self.reranker_tei_http_timeout,
-            cohere_api_key=self.reranker_cohere_api_key,
-            cohere_model=self.reranker_cohere_model,
-            cohere_base_url=self.reranker_cohere_base_url,
-            cohere_timeout=self.reranker_cohere_timeout,
-            cohere_max_concurrent=self.reranker_cohere_max_concurrent,
-            openrouter_api_key=self.reranker_openrouter_api_key,
-            openrouter_model=self.reranker_openrouter_model,
-            openrouter_base_url=self.reranker_openrouter_base_url,
-            openrouter_timeout=self.reranker_openrouter_timeout,
             # flashrank has no HindsightConfig fields — it is read from the env directly
             flashrank_model=os.environ.get(ENV_RERANKER_FLASHRANK_MODEL, DEFAULT_RERANKER_FLASHRANK_MODEL),
             flashrank_cache_dir=os.environ.get(ENV_RERANKER_FLASHRANK_CACHE_DIR, DEFAULT_RERANKER_FLASHRANK_CACHE_DIR),
@@ -4491,42 +3902,12 @@ class HindsightConfig:
             ),
             # onnx, like flashrank, has no HindsightConfig fields — read from the env directly
             onnx=OnnxRerankerConfig.from_env("HINDSIGHT_API_RERANKER_"),
-            litellm_api_base=self.reranker_litellm_api_base,
-            litellm_api_key=self.reranker_litellm_api_key,
-            litellm_model=self.reranker_litellm_model,
-            litellm_timeout=self.reranker_litellm_timeout,
-            litellm_sdk_api_key=self.reranker_litellm_sdk_api_key,
-            litellm_sdk_model=self.reranker_litellm_sdk_model,
-            litellm_sdk_api_base=self.reranker_litellm_sdk_api_base,
-            litellm_sdk_timeout=self.reranker_litellm_sdk_timeout,
-            zeroentropy_api_key=self.reranker_zeroentropy_api_key,
-            zeroentropy_model=self.reranker_zeroentropy_model,
-            zeroentropy_base_url=self.reranker_zeroentropy_base_url,
-            zeroentropy_timeout=self.reranker_zeroentropy_timeout,
-            siliconflow_api_key=self.reranker_siliconflow_api_key,
-            siliconflow_model=self.reranker_siliconflow_model,
-            siliconflow_base_url=self.reranker_siliconflow_base_url,
-            siliconflow_timeout=self.reranker_siliconflow_timeout,
-            nvidia_api_key=self.reranker_nvidia_api_key,
-            nvidia_model=self.reranker_nvidia_model,
-            nvidia_base_url=self.reranker_nvidia_base_url,
-            nvidia_timeout=self.reranker_nvidia_timeout,
-            nvidia_batch_size=self.reranker_nvidia_batch_size,
-            nvidia_max_concurrent=self.reranker_nvidia_max_concurrent,
             typesafe_api_key=self.reranker_typesafe_api_key,
-            hindsight_api_key=self.reranker_hindsight_api_key,
             typesafe_model=self.reranker_typesafe_model,
             typesafe_base_url=self.reranker_typesafe_base_url,
             typesafe_timeout=self.reranker_typesafe_timeout,
             typesafe_max_concurrent=self.reranker_typesafe_max_concurrent,
             typesafe_prune_candidates=self.reranker_typesafe_prune_candidates,
-            alibaba_api_key=self.reranker_alibaba_api_key,
-            alibaba_model=self.reranker_alibaba_model,
-            alibaba_timeout=self.reranker_alibaba_timeout,
-            google_model=self.reranker_google_model,
-            google_project_id=self.reranker_google_project_id,
-            google_service_account_key=self.reranker_google_service_account_key,
-            google_timeout=self.reranker_google_timeout,
         )
         return [primary, *self.reranker_members]
 
@@ -4672,19 +4053,6 @@ class HindsightConfig:
 
         if self.bm25_max_query_terms < 0:
             raise ValueError(f"Invalid bm25_max_query_terms: {self.bm25_max_query_terms}. Must be >= 0")
-
-        # Validate bedrock_service_tier
-        valid_bedrock_tiers = (None, "flex", "priority", "reserved")
-        if self.llm_bedrock_service_tier not in valid_bedrock_tiers:
-            raise ValueError(
-                f"Invalid HINDSIGHT_API_LLM_BEDROCK_SERVICE_TIER: "
-                f"{self.llm_bedrock_service_tier!r}. Must be one of: "
-                f"{', '.join(t for t in valid_bedrock_tiers if t is not None)}. "
-                f"Note: 'standard' is not a valid Bedrock service tier -- use unset for default tier."
-            )
-
-        # Validate gemini_service_tier
-        self.llm_gemini_service_tier = parse_gemini_service_tier(self.llm_gemini_service_tier)
 
         # When LLM provider is "none", force chunks-only mode and disable LLM-dependent features
         if self.llm_provider == "none":
@@ -4890,14 +4258,7 @@ class HindsightConfig:
             llm_connect_timeout=float(os.getenv(ENV_LLM_CONNECT_TIMEOUT, str(DEFAULT_LLM_CONNECT_TIMEOUT))),
             llm_http_log_level=os.getenv(ENV_LLM_HTTP_LOG_LEVEL, DEFAULT_LLM_HTTP_LOG_LEVEL),
             llm_reasoning_effort=os.getenv(ENV_LLM_REASONING_EFFORT) or None,
-            llm_groq_service_tier=os.getenv(ENV_LLM_GROQ_SERVICE_TIER, DEFAULT_LLM_GROQ_SERVICE_TIER),
             llm_openai_service_tier=os.getenv(ENV_LLM_OPENAI_SERVICE_TIER, DEFAULT_LLM_OPENAI_SERVICE_TIER),
-            llm_bedrock_service_tier=os.getenv(ENV_LLM_BEDROCK_SERVICE_TIER) or None,
-            llm_gemini_service_tier=(
-                parse_gemini_service_tier(os.getenv(ENV_LLM_GEMINI_SERVICE_TIER) or DEFAULT_LLM_GEMINI_SERVICE_TIER)
-                if llm_provider.lower() == "gemini"
-                else None
-            ),
             llm_extra_body=json.loads(os.getenv(ENV_LLM_EXTRA_BODY, "null")),
             llm_default_headers=json.loads(os.getenv(ENV_LLM_DEFAULT_HEADERS, "null")),
             llm_cache_affinity=os.getenv(ENV_LLM_CACHE_AFFINITY, DEFAULT_LLM_CACHE_AFFINITY) or None,
@@ -4908,10 +4269,6 @@ class HindsightConfig:
             llm_supports_string_pattern=_parse_boolean_env(
                 ENV_LLM_SUPPORTS_STRING_PATTERN,
                 DEFAULT_LLM_SUPPORTS_STRING_PATTERN,
-            ),
-            llm_structured_output_in_prompt=_parse_boolean_env(
-                ENV_LLM_STRUCTURED_OUTPUT_IN_PROMPT,
-                DEFAULT_LLM_STRUCTURED_OUTPUT_IN_PROMPT,
             ),
             llm_send_bank_as_user=os.getenv(ENV_LLM_SEND_BANK_AS_USER, str(DEFAULT_LLM_SEND_BANK_AS_USER)).lower()
             in ("true", "1"),
@@ -4936,21 +4293,9 @@ class HindsightConfig:
             llm_temperature_mental_model_refresh=_resolve_inherited_temperature(
                 ENV_LLM_TEMPERATURE_MENTAL_MODEL_REFRESH, llm_temperature_consolidation
             ),
-            llm_litellmrouter_config=_parse_llm_router_config(ENV_LLM_LITELLMROUTER_CONFIG),
             # Codex (ChatGPT OAuth) credentials directory
             llm_codex_home=os.getenv(ENV_LLM_CODEX_HOME) or DEFAULT_LLM_CODEX_HOME,
             llm_chatgpt_home=os.getenv(ENV_LLM_CHATGPT_HOME, "").strip() or DEFAULT_LLM_CHATGPT_HOME,
-            # Vertex AI
-            llm_vertexai_project_id=os.getenv(ENV_LLM_VERTEXAI_PROJECT_ID) or DEFAULT_LLM_VERTEXAI_PROJECT_ID,
-            llm_vertexai_region=os.getenv(ENV_LLM_VERTEXAI_REGION, DEFAULT_LLM_VERTEXAI_REGION),
-            llm_vertexai_service_account_key=os.getenv(ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY)
-            or DEFAULT_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY,
-            # Gemini safety settings (JSON-encoded list of {category, threshold} dicts)
-            llm_gemini_safety_settings=json.loads(os.getenv(ENV_LLM_GEMINI_SAFETY_SETTINGS, "null")),
-            llm_prompt_cache_enabled=os.getenv(
-                ENV_LLM_PROMPT_CACHE_ENABLED, str(DEFAULT_LLM_PROMPT_CACHE_ENABLED)
-            ).lower()
-            in ("1", "true", "yes", "on"),
             llm_debug_dump_4xx=os.getenv(ENV_LLM_DEBUG_DUMP_4XX, str(DEFAULT_LLM_DEBUG_DUMP_4XX)).lower()
             in ("1", "true", "yes", "on"),
             # Built-in llama.cpp configuration
@@ -4977,17 +4322,11 @@ class HindsightConfig:
             vlm_max_retries=_env_int(ENV_VLM_MAX_RETRIES),
             vlm_initial_backoff=_env_float(ENV_VLM_INITIAL_BACKOFF),
             vlm_max_backoff=_env_float(ENV_VLM_MAX_BACKOFF),
-            fireworks_account_id=os.getenv(ENV_FIREWORKS_ACCOUNT_ID) or None,
-            fireworks_batch_base_url=os.getenv(ENV_FIREWORKS_BATCH_BASE_URL) or DEFAULT_FIREWORKS_BATCH_BASE_URL,
-            fireworks_batch_max_wait_seconds=int(
-                os.getenv(ENV_FIREWORKS_BATCH_MAX_WAIT_SECONDS, str(DEFAULT_FIREWORKS_BATCH_MAX_WAIT_SECONDS))
-            ),
             retain_llm_max_concurrent=_env_int(ENV_RETAIN_LLM_MAX_CONCURRENT),
             retain_llm_max_retries=_env_int(ENV_RETAIN_LLM_MAX_RETRIES),
             retain_llm_initial_backoff=_env_float(ENV_RETAIN_LLM_INITIAL_BACKOFF),
             retain_llm_max_backoff=_env_float(ENV_RETAIN_LLM_MAX_BACKOFF),
             retain_llm_timeout=_env_float(ENV_RETAIN_LLM_TIMEOUT),
-            retain_llm_litellmrouter_config=_parse_llm_router_config(ENV_RETAIN_LLM_LITELLMROUTER_CONFIG),
             retain_llm_reasoning_effort=os.getenv(ENV_RETAIN_LLM_REASONING_EFFORT) or None,
             retain_llm_extra_body=json.loads(os.getenv(ENV_RETAIN_LLM_EXTRA_BODY, "null")),
             retain_llm_cache_affinity=os.getenv(ENV_RETAIN_LLM_CACHE_AFFINITY) or None,
@@ -5000,7 +4339,6 @@ class HindsightConfig:
             reflect_llm_initial_backoff=_env_float(ENV_REFLECT_LLM_INITIAL_BACKOFF),
             reflect_llm_max_backoff=_env_float(ENV_REFLECT_LLM_MAX_BACKOFF),
             reflect_llm_timeout=_resolve_reflect_llm_timeout(),
-            reflect_llm_litellmrouter_config=_parse_llm_router_config(ENV_REFLECT_LLM_LITELLMROUTER_CONFIG),
             reflect_llm_reasoning_effort=os.getenv(ENV_REFLECT_LLM_REASONING_EFFORT) or None,
             reflect_llm_extra_body=json.loads(os.getenv(ENV_REFLECT_LLM_EXTRA_BODY, "null")),
             reflect_llm_cache_affinity=os.getenv(ENV_REFLECT_LLM_CACHE_AFFINITY) or None,
@@ -5014,7 +4352,6 @@ class HindsightConfig:
             consolidation_llm_initial_backoff=_env_float(ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF),
             consolidation_llm_max_backoff=_env_float(ENV_CONSOLIDATION_LLM_MAX_BACKOFF),
             consolidation_llm_timeout=_env_float(ENV_CONSOLIDATION_LLM_TIMEOUT),
-            consolidation_llm_litellmrouter_config=_parse_llm_router_config(ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG),
             consolidation_llm_reasoning_effort=os.getenv(ENV_CONSOLIDATION_LLM_REASONING_EFFORT) or None,
             consolidation_llm_extra_body=json.loads(os.getenv(ENV_CONSOLIDATION_LLM_EXTRA_BODY, "null")),
             consolidation_llm_cache_affinity=os.getenv(ENV_CONSOLIDATION_LLM_CACHE_AFFINITY) or None,
@@ -5028,9 +4365,6 @@ class HindsightConfig:
             mental_model_refresh_llm_initial_backoff=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_INITIAL_BACKOFF),
             mental_model_refresh_llm_max_backoff=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_MAX_BACKOFF),
             mental_model_refresh_llm_timeout=_env_float(ENV_MENTAL_MODEL_REFRESH_LLM_TIMEOUT),
-            mental_model_refresh_llm_litellmrouter_config=_parse_llm_router_config(
-                ENV_MENTAL_MODEL_REFRESH_LLM_LITELLMROUTER_CONFIG
-            ),
             mental_model_refresh_llm_reasoning_effort=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT) or None,
             mental_model_refresh_llm_extra_body=json.loads(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_EXTRA_BODY, "null")),
             mental_model_refresh_llm_cache_affinity=os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_CACHE_AFFINITY) or None,
@@ -5047,11 +4381,10 @@ class HindsightConfig:
             mental_model_refresh_llm_strategy=_parse_llm_strategy(os.getenv(ENV_MENTAL_MODEL_REFRESH_LLM_STRATEGY)),
             # Embeddings
             embeddings_provider=getenv(ENV_EMBEDDINGS_PROVIDER, DEFAULT_EMBEDDINGS_PROVIDER),
-            # Generic name, falling back to the deprecated LiteLLM-SDK-specific alias.
             # 0 (or any non-positive value) means "no cap" — the only way to opt out
             # now that the default is a real limit rather than None.
             embeddings_max_input_tokens=(int(v) if int(v) > 0 else None)
-            if (v := getenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS) or getenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS))
+            if (v := getenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS))
             else DEFAULT_EMBEDDINGS_MAX_INPUT_TOKENS,
             embeddings_local_model=getenv(ENV_EMBEDDINGS_LOCAL_MODEL, DEFAULT_EMBEDDINGS_LOCAL_MODEL),
             embeddings_local_force_cpu=getenv(
@@ -5181,114 +4514,10 @@ class HindsightConfig:
                 os.getenv(ENV_RERANKER_RETRY_BUDGET),
                 DEFAULT_RERANKER_RETRY_BUDGET,
             ),
-            # Cohere embeddings (with backward-compatible fallback to shared API key)
-            embeddings_cohere_api_key=getenv(ENV_EMBEDDINGS_COHERE_API_KEY) or getenv(ENV_COHERE_API_KEY),
-            embeddings_cohere_model=getenv(ENV_EMBEDDINGS_COHERE_MODEL, DEFAULT_EMBEDDINGS_COHERE_MODEL),
-            embeddings_cohere_base_url=getenv(ENV_EMBEDDINGS_COHERE_BASE_URL) or None,
-            embeddings_cohere_output_dimensions=int(v)
-            if (v := getenv(ENV_EMBEDDINGS_COHERE_OUTPUT_DIMENSIONS))
-            else None,
-            # OpenRouter embeddings (with fallback to shared OpenRouter key, then LLM key)
-            embeddings_openrouter_api_key=getenv(ENV_EMBEDDINGS_OPENROUTER_API_KEY)
-            or getenv(ENV_OPENROUTER_API_KEY)
-            or getenv(ENV_LLM_API_KEY),
-            embeddings_openrouter_model=getenv(ENV_EMBEDDINGS_OPENROUTER_MODEL, DEFAULT_EMBEDDINGS_OPENROUTER_MODEL),
-            # Requesty embeddings (with fallback to shared Requesty key, then LLM key)
-            embeddings_requesty_api_key=getenv(ENV_EMBEDDINGS_REQUESTY_API_KEY)
-            or getenv(ENV_REQUESTY_API_KEY)
-            or getenv(ENV_LLM_API_KEY),
-            embeddings_requesty_model=getenv(ENV_EMBEDDINGS_REQUESTY_MODEL, DEFAULT_EMBEDDINGS_REQUESTY_MODEL),
-            # ZeroEntropy embeddings
-            embeddings_zeroentropy_api_key=getenv(ENV_EMBEDDINGS_ZEROENTROPY_API_KEY) or getenv("ZEROENTROPY_API_KEY"),
-            embeddings_zeroentropy_model=getenv(ENV_EMBEDDINGS_ZEROENTROPY_MODEL, DEFAULT_EMBEDDINGS_ZEROENTROPY_MODEL),
-            embeddings_zeroentropy_base_url=getenv(ENV_EMBEDDINGS_ZEROENTROPY_BASE_URL, DEFAULT_ZEROENTROPY_BASE_URL),
-            embeddings_zeroentropy_dimensions=_parse_positive_int(
-                ENV_EMBEDDINGS_ZEROENTROPY_DIMENSIONS,
-                getenv(ENV_EMBEDDINGS_ZEROENTROPY_DIMENSIONS),
-                DEFAULT_EMBEDDINGS_ZEROENTROPY_DIMENSIONS,
-            ),
-            embeddings_zeroentropy_encoding_format=_parse_optional_choice(
-                ENV_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT,
-                getenv(ENV_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT),
-                frozenset({"float", "base64"}),
-            )
-            or DEFAULT_EMBEDDINGS_ZEROENTROPY_ENCODING_FORMAT,
-            embeddings_zeroentropy_latency=_parse_optional_choice(
-                ENV_EMBEDDINGS_ZEROENTROPY_LATENCY,
-                getenv(ENV_EMBEDDINGS_ZEROENTROPY_LATENCY),
-                frozenset({"fast", "slow"}),
-            ),
-            embeddings_zeroentropy_batch_size=_parse_positive_int(
-                ENV_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE,
-                getenv(ENV_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE),
-                DEFAULT_EMBEDDINGS_ZEROENTROPY_BATCH_SIZE,
-            ),
-            # NVIDIA NIM embeddings
-            embeddings_nvidia_api_key=getenv(ENV_EMBEDDINGS_NVIDIA_API_KEY),
-            embeddings_nvidia_model=getenv(ENV_EMBEDDINGS_NVIDIA_MODEL, DEFAULT_EMBEDDINGS_NVIDIA_MODEL),
-            embeddings_nvidia_base_url=getenv(ENV_EMBEDDINGS_NVIDIA_BASE_URL, DEFAULT_EMBEDDINGS_NVIDIA_BASE_URL),
-            embeddings_nvidia_dimensions=_parse_positive_int(
-                ENV_EMBEDDINGS_NVIDIA_DIMENSIONS,
-                getenv(ENV_EMBEDDINGS_NVIDIA_DIMENSIONS),
-                DEFAULT_EMBEDDINGS_NVIDIA_DIMENSIONS,
-            ),
-            embeddings_nvidia_batch_size=_parse_positive_int(
-                ENV_EMBEDDINGS_NVIDIA_BATCH_SIZE,
-                getenv(ENV_EMBEDDINGS_NVIDIA_BATCH_SIZE),
-                DEFAULT_EMBEDDINGS_NVIDIA_BATCH_SIZE,
-            ),
-            # LiteLLM embeddings (with backward-compatible fallback to shared config)
-            embeddings_litellm_api_base=getenv(ENV_EMBEDDINGS_LITELLM_API_BASE)
-            or getenv(ENV_LITELLM_API_BASE, DEFAULT_LITELLM_API_BASE),
-            embeddings_litellm_api_key=getenv(ENV_EMBEDDINGS_LITELLM_API_KEY) or getenv(ENV_LITELLM_API_KEY),
-            embeddings_litellm_model=getenv(ENV_EMBEDDINGS_LITELLM_MODEL, DEFAULT_EMBEDDINGS_LITELLM_MODEL),
-            embeddings_litellm_dimensions=_parse_optional_positive_int(
-                ENV_EMBEDDINGS_LITELLM_DIMENSIONS,
-                getenv(ENV_EMBEDDINGS_LITELLM_DIMENSIONS),
-            ),
-            # LiteLLM SDK embeddings (direct API access)
-            embeddings_litellm_sdk_api_key=getenv(ENV_EMBEDDINGS_LITELLM_SDK_API_KEY),
-            embeddings_litellm_sdk_model=getenv(ENV_EMBEDDINGS_LITELLM_SDK_MODEL, DEFAULT_EMBEDDINGS_LITELLM_SDK_MODEL),
-            embeddings_litellm_sdk_model_id=getenv(ENV_EMBEDDINGS_LITELLM_SDK_MODEL_ID) or None,
-            embeddings_litellm_sdk_api_base=getenv(ENV_EMBEDDINGS_LITELLM_SDK_API_BASE) or None,
-            embeddings_litellm_sdk_output_dimensions=int(v)
-            if (v := getenv(ENV_EMBEDDINGS_LITELLM_SDK_OUTPUT_DIMENSIONS))
-            else None,
-            embeddings_litellm_sdk_encoding_format=getenv(
-                ENV_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT, DEFAULT_EMBEDDINGS_LITELLM_SDK_ENCODING_FORMAT
-            ),
-            # Gemini/Vertex AI embeddings (with fallback to LLM keys)
-            embeddings_gemini_api_key=getenv(ENV_EMBEDDINGS_GEMINI_API_KEY) or getenv(ENV_LLM_API_KEY),
-            embeddings_gemini_model=getenv(ENV_EMBEDDINGS_GEMINI_MODEL, DEFAULT_EMBEDDINGS_GEMINI_MODEL),
-            embeddings_gemini_output_dimensionality=int(
-                getenv(
-                    ENV_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY,
-                    str(DEFAULT_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY),
-                )
-            ),
-            embeddings_gemini_force_ipv4=getenv(
-                ENV_EMBEDDINGS_GEMINI_FORCE_IPV4,
-                str(DEFAULT_EMBEDDINGS_GEMINI_FORCE_IPV4),
-            ).lower()
-            in ("true", "1"),
-            embeddings_gemini_batch_size=_parse_positive_int(
-                ENV_EMBEDDINGS_GEMINI_BATCH_SIZE,
-                getenv(ENV_EMBEDDINGS_GEMINI_BATCH_SIZE),
-                DEFAULT_EMBEDDINGS_GEMINI_BATCH_SIZE,
-            ),
-            embeddings_vertexai_project_id=getenv(ENV_EMBEDDINGS_VERTEXAI_PROJECT_ID)
-            or getenv(ENV_LLM_VERTEXAI_PROJECT_ID),
-            embeddings_vertexai_region=getenv(ENV_EMBEDDINGS_VERTEXAI_REGION) or getenv(ENV_LLM_VERTEXAI_REGION),
-            embeddings_vertexai_service_account_key=getenv(ENV_EMBEDDINGS_VERTEXAI_SERVICE_ACCOUNT_KEY)
-            or getenv(ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY),
             # Reranker
             reranker_provider=os.getenv(ENV_RERANKER_PROVIDER, DEFAULT_RERANKER_PROVIDER),
-            # Generic name, falling back to the deprecated LiteLLM-specific alias.
             reranker_max_tokens_per_candidate=int(v)
-            if (
-                v := os.getenv(ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE)
-                or os.getenv(ENV_RERANKER_LITELLM_MAX_TOKENS_PER_DOC)
-            )
+            if (v := os.getenv(ENV_RERANKER_MAX_TOKENS_PER_CANDIDATE))
             else DEFAULT_RERANKER_MAX_TOKENS_PER_CANDIDATE,
             reranker_send_bank_as_header=os.getenv(
                 ENV_RERANKER_SEND_BANK_AS_HEADER,
@@ -5367,75 +4596,8 @@ class HindsightConfig:
             recency_decay_halflife_days=float(
                 os.getenv(ENV_RECENCY_DECAY_HALFLIFE_DAYS, str(DEFAULT_RECENCY_DECAY_HALFLIFE_DAYS))
             ),
-            # Cohere reranker (with backward-compatible fallback to shared API key)
-            reranker_cohere_api_key=os.getenv(ENV_RERANKER_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),
-            reranker_cohere_model=os.getenv(ENV_RERANKER_COHERE_MODEL, DEFAULT_RERANKER_COHERE_MODEL),
-            reranker_cohere_base_url=os.getenv(ENV_RERANKER_COHERE_BASE_URL) or None,
-            reranker_cohere_timeout=float(os.getenv(ENV_RERANKER_COHERE_TIMEOUT, str(DEFAULT_RERANKER_COHERE_TIMEOUT))),
-            reranker_cohere_max_concurrent=int(
-                os.getenv(ENV_RERANKER_COHERE_MAX_CONCURRENT, str(DEFAULT_RERANKER_COHERE_MAX_CONCURRENT))
-            ),
-            # OpenRouter reranker (with fallback to shared OpenRouter key, then LLM key)
-            reranker_openrouter_api_key=os.getenv(ENV_RERANKER_OPENROUTER_API_KEY)
-            or os.getenv(ENV_OPENROUTER_API_KEY)
-            or os.getenv(ENV_LLM_API_KEY),
-            reranker_openrouter_model=os.getenv(ENV_RERANKER_OPENROUTER_MODEL, DEFAULT_RERANKER_OPENROUTER_MODEL),
-            reranker_openrouter_base_url=os.getenv(
-                ENV_RERANKER_OPENROUTER_BASE_URL, DEFAULT_RERANKER_OPENROUTER_BASE_URL
-            ),
-            reranker_openrouter_timeout=float(
-                os.getenv(ENV_RERANKER_OPENROUTER_TIMEOUT, str(DEFAULT_RERANKER_OPENROUTER_TIMEOUT))
-            ),
-            # LiteLLM reranker (with backward-compatible fallback to shared config)
-            reranker_litellm_api_base=os.getenv(ENV_RERANKER_LITELLM_API_BASE)
-            or os.getenv(ENV_LITELLM_API_BASE, DEFAULT_LITELLM_API_BASE),
-            reranker_litellm_api_key=os.getenv(ENV_RERANKER_LITELLM_API_KEY) or os.getenv(ENV_LITELLM_API_KEY),
-            reranker_litellm_model=os.getenv(ENV_RERANKER_LITELLM_MODEL, DEFAULT_RERANKER_LITELLM_MODEL),
-            reranker_litellm_timeout=float(
-                os.getenv(ENV_RERANKER_LITELLM_TIMEOUT, str(DEFAULT_RERANKER_LITELLM_TIMEOUT))
-            ),
-            # LiteLLM SDK reranker (direct API access)
-            reranker_litellm_sdk_api_key=os.getenv(ENV_RERANKER_LITELLM_SDK_API_KEY),
-            reranker_litellm_sdk_model=os.getenv(ENV_RERANKER_LITELLM_SDK_MODEL, DEFAULT_RERANKER_LITELLM_SDK_MODEL),
-            reranker_litellm_sdk_api_base=os.getenv(ENV_RERANKER_LITELLM_SDK_API_BASE) or None,
-            reranker_litellm_sdk_timeout=float(
-                os.getenv(ENV_RERANKER_LITELLM_SDK_TIMEOUT, str(DEFAULT_RERANKER_LITELLM_SDK_TIMEOUT))
-            ),
-            # ZeroEntropy reranker
-            reranker_zeroentropy_api_key=os.getenv(ENV_RERANKER_ZEROENTROPY_API_KEY),
-            reranker_zeroentropy_model=os.getenv(ENV_RERANKER_ZEROENTROPY_MODEL, DEFAULT_RERANKER_ZEROENTROPY_MODEL),
-            reranker_zeroentropy_base_url=os.getenv(ENV_RERANKER_ZEROENTROPY_BASE_URL) or None,
-            reranker_zeroentropy_timeout=float(
-                os.getenv(ENV_RERANKER_ZEROENTROPY_TIMEOUT, str(DEFAULT_RERANKER_ZEROENTROPY_TIMEOUT))
-            ),
-            # SiliconFlow reranker (Cohere-compatible /rerank endpoint)
-            reranker_siliconflow_api_key=os.getenv(ENV_RERANKER_SILICONFLOW_API_KEY),
-            reranker_siliconflow_model=os.getenv(ENV_RERANKER_SILICONFLOW_MODEL, DEFAULT_RERANKER_SILICONFLOW_MODEL),
-            reranker_siliconflow_base_url=os.getenv(
-                ENV_RERANKER_SILICONFLOW_BASE_URL, DEFAULT_RERANKER_SILICONFLOW_BASE_URL
-            ),
-            reranker_siliconflow_timeout=float(
-                os.getenv(ENV_RERANKER_SILICONFLOW_TIMEOUT, str(DEFAULT_RERANKER_SILICONFLOW_TIMEOUT))
-            ),
-            # NVIDIA NIM reranker (native /retrieval/<model>/reranking endpoint)
-            reranker_nvidia_api_key=os.getenv(ENV_RERANKER_NVIDIA_API_KEY),
-            reranker_nvidia_model=os.getenv(ENV_RERANKER_NVIDIA_MODEL, DEFAULT_RERANKER_NVIDIA_MODEL),
-            reranker_nvidia_base_url=os.getenv(ENV_RERANKER_NVIDIA_BASE_URL, DEFAULT_RERANKER_NVIDIA_BASE_URL),
-            reranker_nvidia_timeout=float(os.getenv(ENV_RERANKER_NVIDIA_TIMEOUT, str(DEFAULT_RERANKER_NVIDIA_TIMEOUT))),
-            reranker_nvidia_batch_size=_parse_positive_int(
-                ENV_RERANKER_NVIDIA_BATCH_SIZE,
-                os.getenv(ENV_RERANKER_NVIDIA_BATCH_SIZE),
-                DEFAULT_RERANKER_NVIDIA_BATCH_SIZE,
-            ),
-            reranker_nvidia_max_concurrent=_parse_positive_int(
-                ENV_RERANKER_NVIDIA_MAX_CONCURRENT,
-                os.getenv(ENV_RERANKER_NVIDIA_MAX_CONCURRENT),
-                DEFAULT_RERANKER_NVIDIA_MAX_CONCURRENT,
-            ),
             # TypeSafe reranker
             reranker_typesafe_api_key=os.getenv(ENV_RERANKER_TYPESAFE_API_KEY),
-            reranker_hindsight_api_key=os.getenv(ENV_RERANKER_HINDSIGHT_API_KEY) or None,
-            embeddings_hindsight_api_key=getenv(ENV_EMBEDDINGS_HINDSIGHT_API_KEY) or None,
             reranker_typesafe_model=os.getenv(ENV_RERANKER_TYPESAFE_MODEL, DEFAULT_RERANKER_TYPESAFE_MODEL),
             reranker_typesafe_base_url=os.getenv(ENV_RERANKER_TYPESAFE_BASE_URL, DEFAULT_RERANKER_TYPESAFE_BASE_URL),
             reranker_typesafe_timeout=float(
@@ -5447,19 +4609,6 @@ class HindsightConfig:
             reranker_typesafe_prune_candidates=_parse_boolean_env(
                 ENV_RERANKER_TYPESAFE_PRUNE_CANDIDATES, DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES
             ),
-            # Alibaba Cloud DashScope reranker
-            reranker_alibaba_api_key=os.getenv(ENV_RERANKER_ALIBABA_API_KEY),
-            reranker_alibaba_model=os.getenv(ENV_RERANKER_ALIBABA_MODEL, DEFAULT_RERANKER_ALIBABA_MODEL),
-            reranker_alibaba_timeout=float(
-                os.getenv(ENV_RERANKER_ALIBABA_TIMEOUT, str(DEFAULT_RERANKER_ALIBABA_TIMEOUT))
-            ),
-            # Google Discovery Engine reranker (with fallback to LLM Vertex AI keys)
-            reranker_google_model=os.getenv(ENV_RERANKER_GOOGLE_MODEL, DEFAULT_RERANKER_GOOGLE_MODEL),
-            reranker_google_project_id=os.getenv(ENV_RERANKER_GOOGLE_PROJECT_ID)
-            or os.getenv(ENV_LLM_VERTEXAI_PROJECT_ID),
-            reranker_google_service_account_key=os.getenv(ENV_RERANKER_GOOGLE_SERVICE_ACCOUNT_KEY)
-            or os.getenv(ENV_LLM_VERTEXAI_SERVICE_ACCOUNT_KEY),
-            reranker_google_timeout=float(os.getenv(ENV_RERANKER_GOOGLE_TIMEOUT, str(DEFAULT_RERANKER_GOOGLE_TIMEOUT))),
             reranker_members=_parse_reranker_members(),
             # Decision model
             decision_model_provider=os.getenv(ENV_DECISION_MODEL_PROVIDER) or DEFAULT_DECISION_MODEL_PROVIDER,
@@ -5512,18 +4661,6 @@ class HindsightConfig:
             backpressure_defer_seconds=int(
                 os.getenv(ENV_BACKPRESSURE_DEFER_SECONDS, str(DEFAULT_BACKPRESSURE_DEFER_SECONDS))
             ),
-            xai_oauth_token_path=os.getenv(ENV_XAI_OAUTH_TOKEN_PATH, "").strip() or None,
-            xai_oauth_client_id=os.getenv(ENV_XAI_OAUTH_CLIENT_ID, "").strip() or DEFAULT_XAI_OAUTH_CLIENT_ID,
-            xai_oauth_scope=os.getenv(ENV_XAI_OAUTH_SCOPE, "").strip() or DEFAULT_XAI_OAUTH_SCOPE,
-            xai_oauth_refresh_timeout_seconds=_parse_float_env(
-                ENV_XAI_OAUTH_REFRESH_TIMEOUT_SECONDS, DEFAULT_XAI_OAUTH_REFRESH_TIMEOUT_SECONDS
-            ),
-            xai_oauth_refresh_skew_seconds=_parse_float_env(
-                ENV_XAI_OAUTH_REFRESH_SKEW_SECONDS, DEFAULT_XAI_OAUTH_REFRESH_SKEW_SECONDS
-            ),
-            xai_oauth_base_url=(os.getenv(ENV_XAI_OAUTH_BASE_URL, "").strip() or None),
-            xai_oauth_debug_headers=os.getenv(ENV_XAI_OAUTH_DEBUG_HEADERS, str(DEFAULT_XAI_OAUTH_DEBUG_HEADERS)).lower()
-            == "true",
             log_format=os.getenv(ENV_LOG_FORMAT, DEFAULT_LOG_FORMAT).lower(),
             log_json_fields=_parse_str_list(os.getenv(ENV_LOG_JSON_FIELDS, "")) or None,
             mcp_enabled=os.getenv(ENV_MCP_ENABLED, str(DEFAULT_MCP_ENABLED)).lower() == "true",

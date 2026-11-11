@@ -540,20 +540,6 @@
           "description": "Minimum seconds between two automatic refreshes of the same mental model in this bank. 0 (the default) means no floor. Overridable per model via the trigger's min_refresh_interval_seconds.",
           "title": "Mental Model Min Refresh Interval Seconds"
         },
-        "llm_gemini_safety_settings": {
-          "anyOf": [
-            {
-              "items": {},
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Per-bank Gemini/VertexAI safety filter settings",
-          "title": "Llm Gemini Safety Settings"
-        },
         "recall_budget_function": {
           "anyOf": [
             {
@@ -1236,7 +1222,7 @@
             }
           ],
           "default": null,
-          "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes (API, MCP, control plane) ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor).",
+          "description": "Minimum seconds between two automatic refreshes of this mental model. A triggered refresh that arrives sooner is not dropped: it is queued and parked until the window expires, and every further trigger in the meantime folds into that one queued refresh, so a burst of retains costs one refresh instead of one per retain. Applies to every automatic trigger: refresh_after_consolidation, refresh_cron and full_refresh_cron. Explicit refreshes via the API or MCP ignore it and run immediately. 0 disables the floor for this model; null falls back to the bank/global mental_model_min_refresh_interval_seconds setting (itself 0 by default, i.e. no floor).",
           "title": "Min Refresh Interval Seconds"
         },
         "fact_types": {

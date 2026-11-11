@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from .db.base import DatabaseBackend, DatabaseConnection
 from .db_utils import acquire_with_retry
-from .schema import _is_oracle, fq_table
+from .schema import fq_table
 
 
 class BankDeletedError(Exception):
@@ -36,7 +36,7 @@ async def _internal_id_on_conn(conn: DatabaseConnection, bank_id: str, *, lock: 
     # write it is checking instead of committing between the check and the write. Of what runs
     # against a bank row, only deleting it (or FOR UPDATE) waits on it. Oracle has no shared row
     # lock, so there the check is a plain read.
-    suffix = " FOR KEY SHARE" if lock and not _is_oracle() else ""
+    suffix = " FOR KEY SHARE" if lock else ""
     value = await conn.fetchval(f"SELECT internal_id FROM {fq_table('banks')} WHERE bank_id = $1{suffix}", bank_id)
     return None if value is None else str(value)
 

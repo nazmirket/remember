@@ -4,9 +4,7 @@ The cap lives at the single choke point (`generate_embeddings_batch`) so every
 provider and every call path (retain, recall queries, consolidation, import) gets
 identical, model-agnostic truncation before any backend's `encode()` runs.
 
-Config is exposed as the generic `HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS`, with the
-old LiteLLM-SDK-specific `HINDSIGHT_API_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS` kept as
-a deprecated alias for backward compatibility. It defaults to 8192 — the input limit of
+Config is exposed as the generic `HINDSIGHT_API_EMBEDDINGS_MAX_INPUT_TOKENS`, and defaults to 8192 — the input limit of
 essentially every remote embedding model — because leaving it off let a page
 sized to its own 8192-token generation budget fail its refresh permanently (#4165); 0
 opts out.
@@ -19,7 +17,6 @@ from unittest.mock import patch
 import pytest
 
 from hindsight_api.config import (
-    ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS,
     ENV_EMBEDDINGS_MAX_INPUT_TOKENS,
     HindsightConfig,
 )
@@ -107,28 +104,15 @@ class TestGenerateEmbeddingsBatch:
 class TestConfigWiring:
     def test_generic_env_parsed(self, monkeypatch):
         monkeypatch.setenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS, "8192")
-        monkeypatch.delenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS, raising=False)
-        assert HindsightConfig.from_env().embeddings_max_input_tokens == 8192
-
-    def test_deprecated_litellm_alias_still_works(self, monkeypatch):
-        monkeypatch.delenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS, raising=False)
-        monkeypatch.setenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS, "4096")
-        assert HindsightConfig.from_env().embeddings_max_input_tokens == 4096
-
-    def test_generic_takes_precedence_over_alias(self, monkeypatch):
-        monkeypatch.setenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS, "8192")
-        monkeypatch.setenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS, "4096")
         assert HindsightConfig.from_env().embeddings_max_input_tokens == 8192
 
     def test_default_is_the_common_model_limit(self, monkeypatch):
         monkeypatch.delenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS, raising=False)
-        monkeypatch.delenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS, raising=False)
         assert HindsightConfig.from_env().embeddings_max_input_tokens == 8192
 
     def test_zero_opts_out(self, monkeypatch):
         """0 is the only way to send text uncapped now that the default is a real limit."""
         monkeypatch.setenv(ENV_EMBEDDINGS_MAX_INPUT_TOKENS, "0")
-        monkeypatch.delenv(ENV_EMBEDDINGS_LITELLM_SDK_MAX_INPUT_TOKENS, raising=False)
         assert HindsightConfig.from_env().embeddings_max_input_tokens is None
 
 

@@ -288,20 +288,17 @@ def test_llm_provider_constructor_ignores_global_config(monkeypatch):
 
     from hindsight_api.config import (
         ENV_LLM_DEFAULT_HEADERS,
-        ENV_LLM_PROMPT_CACHE_ENABLED,
         clear_config_cache,
     )
     from hindsight_api.engine.llm_wrapper import LLMProvider
 
-    # Global config sets a non-default header map and enables prompt caching...
+    # Global config sets a non-default header map...
     monkeypatch.setenv(ENV_LLM_DEFAULT_HEADERS, json.dumps({"x-from": "global"}))
-    monkeypatch.setenv(ENV_LLM_PROMPT_CACHE_ENABLED, "true")  # also the global default
     clear_config_cache()
 
-    # ...but a directly-constructed provider that omits them does NOT inherit them.
+    # ...but a directly-constructed provider that omits it does NOT inherit it.
     provider = LLMProvider(provider="mock", api_key="", base_url="", model="m")
     assert provider.default_headers is None
-    assert provider.prompt_cache_enabled is False  # constructor default, not the global True
 
     clear_config_cache()
 

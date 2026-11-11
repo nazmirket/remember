@@ -66,7 +66,7 @@ def create_app(
         logger.info("HTTP REST API enabled")
     else:
         # Create minimal FastAPI app
-        app = FastAPI(title="Hindsight API", version="0.0.7")
+        app = FastAPI(title="Hindsight API", version="0.0.7", docs_url=None, redoc_url=None)
         logger.info("HTTP REST API disabled")
 
     # Add MCP middleware and chain its lifespan if enabled

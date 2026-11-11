@@ -546,58 +546,11 @@ def create_llm_provider(
     # another one's slot. New parameters go at the end.
     codex_home: str | None = None,
 ) -> Any:  # Returns LLMInterface
-    """
-    Factory function to create the appropriate LLM provider implementation.
+    """Create a supported LLM implementation or a registered custom provider.
 
-    Args:
-        provider: Provider name ("openai", "groq", "ollama", "gemini", "anthropic", etc.).
-        api_key: API key (may be None for local providers or OAuth providers).
-        base_url: Base URL for the API.
-        model: Model name.
-        reasoning_effort: Reasoning effort level for supported providers, or None when
-            the operator configured none (providers then fall back to the default level
-            and may skip the parameter entirely).
-        groq_service_tier: Groq service tier (for Groq provider) - "on_demand", "flex", or "auto".
-        openai_service_tier: OpenAI service tier (for OpenAI provider) - None (default) or "flex" (50% cheaper).
-        bedrock_service_tier: Bedrock service tier (for Bedrock provider) - None (default), "flex", "priority", or "reserved".
-        gemini_service_tier: Gemini service tier (for Gemini provider) - None (default) or "flex" (50% cheaper).
-        ollama_num_ctx: Native Ollama context window override. None lets Ollama use the
-            model/server default.
-        extra_body: Extra request-body params merged into the provider's native
-            call. Threaded into OpenAI-compatible, Fireworks, Anthropic, Gemini/
-            VertexAI and LiteLLM providers (each merges them in its own parameter
-            space). Keys must use each provider's native names (e.g. ``max_tokens``
-            for OpenAI/Anthropic vs ``max_output_tokens`` for Gemini).
-        default_headers: Custom headers passed to provider SDK clients (used by operators
-            routing through proxies / request-tracing middleware). Wired into the Anthropic
-            provider, the ``OpenAICompatibleLLM`` branch, ``fireworks``, ``nous`` and the
-            Responses API (SDK ``default_headers``), and into the LiteLLM-backed providers —
-            ``litellm``, ``litellmrouter`` and ``bedrock`` — as the LiteLLM ``extra_headers``
-            completion kwarg; other providers may opt in as needed.
-        cache_affinity: Backend prompt-cache pinning mode, forwarded to the
-            ``OpenAICompatibleLLM`` branch, ``fireworks`` and ``nous`` (all three share the
-            OpenAI-compatible wire format): "none" (default), "xai_conv_id",
-            "openai_prompt_cache_key", or "auto". Providers on other branches do their own
-            cache work or none at all. See ``engine/cache_affinity.py``.
-        structured_output_in_prompt: Give the LiteLLM-backed providers (``litellm``,
-            ``litellmrouter``, ``bedrock``) the structured-output schema in the prompt
-            instead of ``response_format``. For backends that reject the response_format
-            route — see ``HINDSIGHT_API_LLM_STRUCTURED_OUTPUT_IN_PROMPT``. Other
-            providers ignore it.
-        vertexai_project_id: Vertex AI project ID (for VertexAI provider).
-        vertexai_region: Vertex AI region (for VertexAI provider).
-        vertexai_credentials: Vertex AI credentials object (for VertexAI provider).
-        timeout: Per-request LLM timeout in seconds (resolved by the caller from the
-            per-operation/global config). Threaded into the providers that honour a
-            configurable request timeout (LiteLLM, LiteLLM Router, OpenAI-compatible,
-            Nous). ``None`` lets each provider fall back to its own default
-            (``HINDSIGHT_API_LLM_TIMEOUT`` / ``DEFAULT_LLM_TIMEOUT`` for those four;
-            Anthropic and Gemini keep their provider-specific defaults).
-        codex_home: Codex credentials directory (for the openai-codex provider); overrides
-            the process-wide ``CODEX_HOME``.
-
-    Returns:
-        LLMInterface implementation for the specified provider.
+    The caller resolves credentials, model, timeout and per-operation settings.
+    Provider-specific parameters from removed adapters remain in the signature
+    for positional call compatibility and do not enable those adapters.
     """
     ollama_num_ctx = _validate_ollama_num_ctx(ollama_num_ctx)
 
@@ -719,7 +672,6 @@ def create_llm_provider(
             base_url=base_url,
             model=model,
             reasoning_effort=reasoning_effort,
-            groq_service_tier=groq_service_tier,
             openai_service_tier=openai_service_tier,
             extra_body=extra_body,
             default_headers=default_headers,
@@ -735,7 +687,7 @@ class LLMProvider:
     """
     Unified LLM provider.
 
-    Supports OpenAI, Groq, Ollama (OpenAI-compatible), and Gemini.
+    Supports OpenAI, Anthropic, local OpenAI-compatible models, and custom providers.
     """
 
     def __init__(
@@ -769,67 +721,12 @@ class LLMProvider:
         # land in the wrong slot.
         codex_home: str | None = None,
     ):
-        """
-        Initialize LLM provider.
+        """Initialize an LLM provider using settings resolved by the caller.
 
-        Args:
-            provider: Provider name ("openai", "groq", "ollama", "gemini", "anthropic", "lmstudio").
-            api_key: API key.
-            base_url: Base URL for the API.
-            model: Model name.
-            reasoning_effort: Reasoning effort level for supported providers, or None
-                when the operator configured none.
-            groq_service_tier: Groq service tier ("on_demand", "flex", "auto") - from config.
-            openai_service_tier: OpenAI service tier (None or "flex") - from config.
-            bedrock_service_tier: Bedrock service tier (None, "flex", "priority", "reserved") - from config.
-            gemini_service_tier: Gemini service tier (None or "flex") - from config.
-            ollama_num_ctx: Native Ollama context window override. ``None`` lets Ollama
-                use the model/server default.
-            gemini_safety_settings: Safety settings for Gemini/VertexAI providers.
-            extra_body: Extra request-body params merged into the provider's native call
-                (OpenAI-compatible, Fireworks, Anthropic, Gemini/VertexAI, LiteLLM).
-            default_headers: Custom headers passed as ``default_headers`` to provider SDK clients.
-                Used by operators routing through proxies / request-tracing middleware.
-            cache_affinity: Backend prompt-cache pinning mode for the OpenAI-compatible and
-                Fireworks providers ("none", "xai_conv_id", "openai_prompt_cache_key",
-                "auto"). Validated here for every provider so a typo never fails silently;
-                providers on other factory branches ignore it. Used verbatim — callers
-                resolve the per-operation/global fallback.
-            litellmrouter_config: Provider-specific config for ``provider="litellmrouter"``.
-                JSON object passed verbatim to ``litellm.Router(**config)`` — see
-                https://docs.litellm.ai/docs/routing. Ignored unless ``provider == "litellmrouter"``.
-            vertexai_project_id: Vertex AI project ID for ``provider="vertexai"`` (required for
-                that provider).
-            vertexai_region: Vertex AI region for ``provider="vertexai"`` (defaults to
-                ``"us-central1"`` when ``None``).
-            vertexai_service_account_key: Path to a Vertex AI service-account key file for
-                ``provider="vertexai"`` (uses ADC when ``None``).
-            timeout: Per-request LLM timeout in seconds. Resolved by the caller from the
-                per-operation/global config (``retain_llm_timeout`` falling back to
-                ``llm_timeout``, etc.). ``None`` lets each provider apply its own default.
-            max_retries: Default retry-attempt budget for ``call`` / ``call_with_tools``
-                when the per-call argument is omitted. Resolved by the caller from the
-                per-operation/global config (``reflect_llm_max_retries`` falling back to
-                ``llm_max_retries``, etc.). ``None`` keeps each method's own fallback.
-            initial_backoff: Default initial retry backoff (seconds), same resolution as
-                ``max_retries``. ``None`` keeps each method's own fallback.
-            max_backoff: Default maximum retry backoff (seconds), same resolution as
-                ``max_retries``. ``None`` keeps each method's own fallback.
-            structured_output_in_prompt: The structured-output schema in the prompt
-                instead of ``response_format``, for the LiteLLM-backed providers - from
-                config (``HINDSIGHT_API_LLM_STRUCTURED_OUTPUT_IN_PROMPT``).
-            codex_home: Codex credentials directory for ``provider="openai-codex"`` — the
-                directory holding the ``auth.json`` this provider authenticates with. ``None``
-                uses the process-wide ``CODEX_HOME`` (else ``~/.codex``). Set it per member of a
-                multi-LLM chain to run two independently authorized ChatGPT profiles, so that
-                failover away from a rate-limited profile actually reaches a different account.
-
-        This constructor uses every argument as passed and does not read global
-        ``HindsightConfig``: resolving the server-level default for a ``None`` argument is the
-        caller's responsibility (see ``MemoryEngine``'s per-op builds, ``_member_to_llm``, and
-        ``LLMProvider.from_env``). Keeping it config-free makes a provider's effective settings a
-        pure function of its arguments — which is what lets each member of a multi-LLM chain be
-        configured independently.
+        OpenAI, Anthropic, Codex, Claude Code, local providers and custom
+        implementations use the applicable model, timeout, headers and request
+        settings. Historical parameters for removed adapters remain accepted for
+        positional compatibility; they do not enable those providers.
         """
         # A custom provider is a class path, and class names are case-sensitive.
         self.provider = provider if is_custom_llm_provider(provider) else provider.lower()
@@ -846,26 +743,12 @@ class LLMProvider:
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
         self.max_backoff = max_backoff
-        self.litellmrouter_config = litellmrouter_config
         # Codex credentials directory (openai-codex only). Used verbatim — the caller
         # resolves the server-level default, like the fields around it.
         self.codex_home = codex_home
         # Service tiers from hierarchical config (not env vars)
-        self.groq_service_tier = groq_service_tier
         self.openai_service_tier = openai_service_tier
-        self.bedrock_service_tier = bedrock_service_tier
-        self.gemini_service_tier = gemini_service_tier
-        # Structured-output transport for the LiteLLM-backed providers. Used verbatim —
-        # the caller resolves the server-level default, like the fields above.
-        self.structured_output_in_prompt = structured_output_in_prompt
         self.ollama_num_ctx = _validate_ollama_num_ctx(ollama_num_ctx)
-        # Gemini safety settings (instance default; can be overridden per-request via context var)
-        self.gemini_safety_settings = gemini_safety_settings
-        # Gemini prompt caching: when True, retain extraction (and any future
-        # caller that opts in) will reuse a CachedContent prefix to cut
-        # input-token cost. Off by default so the change is observable behind
-        # a flip rather than a silent behaviour change on upgrade.
-        self.prompt_cache_enabled = prompt_cache_enabled
         # Extra body params for OpenAI-compatible providers (e.g. chat_template_kwargs)
         self.extra_body = extra_body
         # Default headers passed to provider SDK clients (e.g. proxy auth, request tracing).
@@ -905,21 +788,6 @@ class LLMProvider:
             elif self.provider == "lmstudio":
                 self.base_url = "http://localhost:1234/v1"
 
-        # Prepare Vertex AI config (if applicable). Values are used as passed; the
-        # caller resolves the global-config fallback (MemoryEngine builds /
-        # _member_to_llm / from_env). The region keeps a constant default here.
-        vertexai_credentials = None
-
-        # Normalize the Gemini service tier (pure: maps/validates the passed value,
-        # no global config read). Non-Gemini providers never carry a tier. The
-        # server-level default is resolved by the caller, like the other fields.
-        self.gemini_service_tier = None
-
-        # gemini_safety_settings / prompt_cache_enabled / litellmrouter_config are
-        # used as passed — the caller resolves the global-config fallback. Providers
-        # that don't support prompt caching ignore the flag.
-        router_config: dict[str, Any] | None = self.litellmrouter_config
-
         # Create provider implementation using factory
         try:
             self._provider_impl = create_llm_provider(
@@ -928,23 +796,13 @@ class LLMProvider:
                 base_url=self.base_url,
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
-                groq_service_tier=self.groq_service_tier,
                 openai_service_tier=self.openai_service_tier,
-                bedrock_service_tier=self.bedrock_service_tier,
-                gemini_service_tier=self.gemini_service_tier,
                 codex_home=self.codex_home,
                 extra_body=self.extra_body,
                 default_headers=self.default_headers,
-                vertexai_project_id=vertexai_project_id,
-                vertexai_region=vertexai_region,
-                vertexai_credentials=vertexai_credentials,
-                gemini_safety_settings=self.gemini_safety_settings,
-                prompt_cache_enabled=self.prompt_cache_enabled,
-                litellmrouter_config=router_config,
                 ollama_num_ctx=self.ollama_num_ctx,
                 timeout=self.timeout,
                 cache_affinity=self.cache_affinity,
-                structured_output_in_prompt=self.structured_output_in_prompt,
             )
         except ProviderUnavailableError as e:
             from .providers.none_llm import UnavailableLLM
@@ -998,7 +856,7 @@ class LLMProvider:
         await self._provider_impl.verify_connection()
 
     async def supports_batch_api(self) -> bool:
-        """Whether the underlying provider supports the OpenAI/Groq Batch API."""
+        """Whether the underlying provider supports the OpenAI Batch API."""
         return await self._provider_impl.supports_batch_api()
 
     def supports_vision(self) -> bool | None:
@@ -1171,10 +1029,8 @@ class LLMProvider:
         # Resolve strict-schema once, here, rather than in each provider: the
         # per-call argument, falling back to the server-level
         # HINDSIGHT_API_LLM_STRICT_SCHEMA flag when the caller expressed no
-        # preference. Providers with a json_schema response_format (OpenAI-compatible,
-        # LiteLLM) then grammar-enforce structured output instead of the fragile
-        # soft json_object path; Gemini already enforces its native response_schema,
-        # and providers without a strict mode simply ignore the flag.
+        # preference. Supported OpenAI-compatible providers grammar-enforce
+        # structured output; providers without strict mode ignore the flag.
         from ..config import get_config
 
         # An explicit per-call value wins in BOTH directions -- `or` would have made a
@@ -1223,7 +1079,7 @@ class LLMProvider:
                     set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
-                # from get_or_create_cached_prefix() (e.g. Gemini); it's None for
+                # from get_or_create_cached_prefix(); it's None for
                 # the rest. Forward it only when present so providers that don't
                 # implement caching keep their call() signature untouched.
                 cache_kwarg = {"cached_prefix": cached_prefix} if cached_prefix is not None else {}
@@ -1654,8 +1510,7 @@ class LLMProvider:
         """
         Return a configured wrapper for a specific bank operation.
 
-        The wrapper applies per-bank overrides (e.g. Gemini safety settings)
-        to every ``call()`` / ``call_with_tools()`` invocation without
+        The wrapper attaches the operation trace context to each call without
         changing the underlying provider or its long-lived client connection.
 
         Args:
@@ -1672,7 +1527,7 @@ class LLMProvider:
         from .llm_trace import operation_trace_context
 
         trace_ctx = operation_trace_context(bank_id, operation, metadata)
-        return ConfiguredLLMProvider(self, config.llm_gemini_safety_settings, trace_ctx)
+        return ConfiguredLLMProvider(self, None, trace_ctx)
 
     async def cleanup(self) -> None:
         """Clean up resources (e.g. stop llamacpp subprocess)."""
@@ -1686,15 +1541,13 @@ class LLMProvider:
         Every ``HINDSIGHT_API_*`` value is parsed in one place — ``config.py`` — so this
         factory reads fields rather than re-deriving them from ``os.environ``. A second
         parser is how the two paths drift: the env-only loader this replaced had already
-        grown its own copies of the provider defaulting, the Gemini tier gating and the
+        grown its own copies of provider defaults and the
         cache-affinity default, each needing a comment to say it must not disagree with
         config.
         """
         from ..config import ENV_LLM_API_KEY, _get_raw_config
 
-        # The raw dataclass, not get_config(): gemini_safety_settings is bank-configurable,
-        # and the static proxy refuses those. This is the process-wide default provider, so
-        # the global value is the correct one to read here.
+        # Construct the process-wide provider from the raw resolved configuration.
         config = _get_raw_config()
 
         provider = config.llm_provider
@@ -1714,32 +1567,19 @@ class LLMProvider:
             extra_body=config.llm_extra_body,
             default_headers=config.llm_default_headers,
             cache_affinity=config.llm_cache_affinity,
-            groq_service_tier=config.llm_groq_service_tier,
             openai_service_tier=config.llm_openai_service_tier,
-            bedrock_service_tier=config.llm_bedrock_service_tier,
-            gemini_service_tier=config.llm_gemini_service_tier,
-            gemini_safety_settings=config.llm_gemini_safety_settings,
-            prompt_cache_enabled=config.llm_prompt_cache_enabled,
             ollama_num_ctx=config.llm_ollama_num_ctx,
-            litellmrouter_config=config.llm_litellmrouter_config,
             codex_home=config.llm_codex_home,
-            vertexai_project_id=config.llm_vertexai_project_id,
-            vertexai_region=config.llm_vertexai_region,
-            vertexai_service_account_key=config.llm_vertexai_service_account_key,
             timeout=config.llm_timeout,
-            structured_output_in_prompt=config.llm_structured_output_in_prompt,
         )
 
 
 class ConfiguredLLMProvider:
     """
-    Thin wrapper around LLMProvider that applies bank-specific config to every call.
+    Thin wrapper around LLMProvider that attaches the operation trace to every call.
 
-    Obtained via ``LLMProvider.with_config(resolved_config)``.  The wrapper
-    sets any provider-specific overrides (currently Gemini safety settings)
-    immediately before each call using a ContextVar token, then resets it
-    afterwards — so nesting is safe and the configuration cannot leak across
-    operations.
+    Obtained via ``LLMProvider.with_config(resolved_config)``. The wrapper
+    binds the trace context for each call and resets it afterwards.
 
     All attribute access falls through to the underlying provider so callers
     that read ``llm.provider``, ``llm.model``, etc. continue to work without
@@ -1754,7 +1594,6 @@ class ConfiguredLLMProvider:
     ) -> None:
         # Use object.__setattr__ to avoid triggering __getattr__
         object.__setattr__(self, "_provider", provider)
-        object.__setattr__(self, "_gemini_safety_settings", gemini_safety_settings)
         object.__setattr__(self, "_trace_ctx", trace_ctx)
 
     # ── attribute passthrough ──────────────────────────────────────────────────
@@ -1803,7 +1642,7 @@ class ConfiguredLLMProvider:
             return self
         return ConfiguredLLMProvider(
             member,
-            object.__getattribute__(self, "_gemini_safety_settings"),
+            None,  # Legacy positional argument.
             object.__getattribute__(self, "_trace_ctx"),
         )
 

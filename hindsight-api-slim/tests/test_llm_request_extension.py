@@ -115,7 +115,7 @@ def _anthropic_provider(seen: list[httpx.Request], content: str = "ok") -> LLMPr
 
 def _bank_config() -> object:
     class _Config:
-        llm_gemini_safety_settings = None
+        pass
 
     return _Config()
 
@@ -341,7 +341,6 @@ async def test_a_chosen_llm_inherits_none_of_the_servers_credentials(install, mo
     server_config = dataclasses.replace(
         config_module._get_raw_config(),
         llm_default_headers={"x-portkey-api-key": "server-gateway-key"},
-        llm_vertexai_service_account_key="/server/sa.json",
         llm_codex_home="/server/codex",
     )
     monkeypatch.setattr(config_module, "_get_raw_config", lambda: server_config)
@@ -357,8 +356,8 @@ async def test_a_chosen_llm_inherits_none_of_the_servers_credentials(install, mo
 
     assert bound.llm is not None and not bound.llm.default_headers and not bound.llm.codex_home
     (config,) = built_from
-    assert config.llm_vertexai_service_account_key is None
-    assert config.llm_litellmrouter_config is None
+    assert config.llm_default_headers is None
+    assert config.llm_codex_home is None
 
 
 async def test_prompt_cache_goes_to_the_chosen_llm(install):

@@ -24,7 +24,7 @@ def setup_test_env():
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL",
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE",
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS",
-        "HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY",
+        "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY",
         "HINDSIGHT_API_EMBEDDINGS_OPENAI_EXTRA_BODY",
         "HINDSIGHT_API_LLM_API_KEY",
         "HINDSIGHT_API_LLM_PROVIDER",
@@ -90,20 +90,6 @@ def test_openai_embeddings_provider_uses_configured_batch_size():
     embeddings = create_embeddings_from_env()
     assert isinstance(embeddings, OpenAIEmbeddings)
     assert embeddings.batch_size == 10
-
-
-def test_openrouter_provider_uses_configured_batch_size():
-    """'openrouter' provider also honors the shared batch-size config (both paths use OpenAIEmbeddings)."""
-    from hindsight_api.engine.embeddings import OpenAIEmbeddings, create_embeddings_from_env
-
-    os.environ["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = "openrouter"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY"] = "sk-or-test"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE"] = "8"
-
-    embeddings = create_embeddings_from_env()
-    assert isinstance(embeddings, OpenAIEmbeddings)
-    assert embeddings.batch_size == 8
 
 
 def test_openai_codex_provider_uses_codex_oauth_token_and_configured_batch_size(tmp_path, monkeypatch):
@@ -234,7 +220,7 @@ async def test_openai_encode_passes_configured_dimensions():
     assert len(vectors[0]) == 384
 
 
-async def test_openrouter_extra_body_reaches_every_embeddings_request(monkeypatch):
+async def test_openai_extra_body_reaches_every_embeddings_request(monkeypatch):
     """HINDSIGHT_API_EMBEDDINGS_OPENAI_EXTRA_BODY rides on dimension detection and batch calls (#6209)."""
     from types import SimpleNamespace
 
@@ -242,9 +228,10 @@ async def test_openrouter_extra_body_reaches_every_embeddings_request(monkeypatc
 
     extra = {"provider": {"zdr": True, "only": ["deepinfra/us"]}}
     os.environ["HINDSIGHT_API_LLM_PROVIDER"] = "mock"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = "openrouter"
-    os.environ["HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY"] = "sk-or-test"
+    os.environ["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] = "openai"
+    os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] = "sk-or-test"
     os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_EXTRA_BODY"] = json.dumps(extra)
+    os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] = "custom-local-model"
 
     emb = create_embeddings_from_env()
     calls: list[dict | None] = []

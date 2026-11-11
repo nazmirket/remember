@@ -3,8 +3,7 @@ set -e
 
 # Regenerate schemas/bank-template-schema.json from the
 # BankTemplateManifest Pydantic model. This file is the source of truth
-# for local validation and
-# is served verbatim at /bank-template-schema.json on the docs site.
+# for local validation.
 
 cd "$(dirname "$0")/.."
 

@@ -44,10 +44,9 @@ async def test_missing_llama_cpp_fails_before_downloading_the_model(monkeypatch)
         await _provider()._ensure_initialized()
 
     message = str(exc_info.value)
-    # Both supported ways out of this state have to be spelled out: the extra
-    # for local installs, the sidecar for the published image.
+    # Both supported local options should be actionable.
     assert "local-llm" in message
-    assert "docker/docker-compose/local-llm" in message
+    assert "HINDSIGHT_API_LLM_BASE_URL" in message
 
 
 @pytest.mark.asyncio

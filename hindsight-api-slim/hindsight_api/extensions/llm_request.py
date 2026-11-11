@@ -313,9 +313,7 @@ def _llm_for(overrides: LLMRequestOverrides, caller: LLMProvider) -> LLMProvider
     no_server_credentials = dataclasses.replace(
         _get_raw_config(),
         llm_default_headers=None,
-        llm_vertexai_service_account_key=None,
         llm_codex_home=None,
-        llm_litellmrouter_config=None,
     )
     built = _member_to_llm(member, StaticConfigProxy(no_server_credentials), defaults)
     with _chosen_llms_lock:

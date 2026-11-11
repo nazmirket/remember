@@ -22,7 +22,6 @@ from hindsight_api.engine.bank_attribution import apply_bank_attribution
 from hindsight_api.engine.cache_affinity import (
     CacheAffinityMode,
     apply_cache_affinity,
-    apply_opencode_session,
     parse_cache_affinity,
     resolve_cache_affinity,
 )
@@ -57,8 +56,6 @@ from ..response_models import LLMCallResult
 
 logger = logging.getLogger(__name__)
 
-# Seed applied to every Groq request for deterministic behavior
-DEFAULT_LLM_SEED = 4242
 JSON_MODE_USER_HINT = "Return valid json only."
 DEFAULT_VERIFICATION_MAX_COMPLETION_TOKENS = 512
 OPENAI_BATCH_ENDPOINT: Literal["/v1/chat/completions"] = "/v1/chat/completions"
@@ -410,11 +407,6 @@ def record_retried_attempt(
         error=error,
         served_by=error.served_by,
     )
-
-
-def _is_openrouter(provider: str, base_url: str | None) -> bool:
-    """True for the openrouter provider and for openai pointed at an OpenRouter base URL."""
-    return provider == "openrouter" or urlparse(base_url or "").hostname == "openrouter.ai"
 
 
 def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -> tuple[str, Any]:
@@ -890,7 +882,7 @@ class OpenAICompatibleLLM(LLMInterface):
             default_headers: Custom headers passed to the AsyncOpenAI client (proxies,
                 request-tracing middleware). None sends no extra headers.
             cache_affinity: Backend prompt-cache pinning mode — "none" (default),
-                "xai_conv_id", "openai_prompt_cache_key", or "auto" (resolved once here
+                "openai_prompt_cache_key", or "auto" (resolved once here
                 from the provider + base-URL host). See ``engine/cache_affinity.py``.
             ollama_num_ctx: Native Ollama context window override. None lets Ollama use
                 the model/server default.
@@ -924,7 +916,6 @@ class OpenAICompatibleLLM(LLMInterface):
             raise ValueError("API key is required for openai")
 
         # Service tier configuration (from config, not env vars)
-        self.groq_service_tier = groq_service_tier
         self.openai_service_tier = kwargs.get("openai_service_tier")
         self.ollama_num_ctx = _validate_ollama_num_ctx(ollama_num_ctx)
         # User-configured extra body params (merged into every API call)
@@ -1085,7 +1076,7 @@ class OpenAICompatibleLLM(LLMInterface):
     def _max_tokens_param_name(self) -> str:
         """Return the correct parameter name for limiting response tokens.
 
-        Native OpenAI, Azure OpenAI, Groq, and llamacpp accept 'max_completion_tokens'.
+        Native OpenAI, Azure OpenAI, and llamacpp accept 'max_completion_tokens'.
         Mistral and other OpenAI-compatible endpoints that haven't adopted the newer
         parameter name require 'max_tokens', so when the openai provider is configured
         with a non-Azure custom base_url we fall back to the widely-supported
@@ -1099,8 +1090,8 @@ class OpenAICompatibleLLM(LLMInterface):
         # Azure OpenAI + GPT-5 is the canonical example: issue #978.
         if self._supports_reasoning_model():
             return "max_completion_tokens"
-        # Native OpenAI (no custom base URL), Groq, and llamacpp use max_completion_tokens
-        if self.provider in ("groq", "llamacpp"):
+        # Native OpenAI (no custom base URL) and llamacpp use max_completion_tokens
+        if self.provider == "llamacpp":
             return "max_completion_tokens"
         if self.provider == "openai" and not self.base_url:
             return "max_completion_tokens"
@@ -1108,16 +1099,9 @@ class OpenAICompatibleLLM(LLMInterface):
         # can keep provider=openai + an Azure base_url (the documented setup).
         if self.provider == "openai" and self.base_url and ".openai.azure.com" in self.base_url:
             return "max_completion_tokens"
-        # openai with custom base_url, ollama, lmstudio, minimax, volcano —
+        # openai with custom base_url, ollama, and lmstudio —
         # use the widely-supported max_tokens
         return "max_tokens"
-
-    def _apply_provider_extra_body_defaults(self, extra_body: dict[str, Any]) -> None:
-        """Apply provider-specific extra_body defaults while preserving user overrides."""
-        if self.provider == "minimax":
-            # M3.1 always thinks: ``thinking.type="disabled"`` is an HTTP 400 there (#5718).
-            thinking = "adaptive" if "m3.1" in self.model.lower() else "disabled"
-            extra_body.setdefault("thinking", {"type": thinking})
 
     async def call(
         self,
@@ -1203,8 +1187,6 @@ class OpenAICompatibleLLM(LLMInterface):
             call_params[self._max_tokens_param_name()] = max_completion_tokens
         if temperature is not None and not is_reasoning_model:
             # MiniMax requires temperature in (0.0, 1.0] — clamp accordingly
-            if self.provider == "minimax":
-                temperature = max(0.01, min(temperature, 1.0))
             call_params["temperature"] = temperature
 
         # Set reasoning_effort when configured, or for models recognised as reasoning models
@@ -1213,20 +1195,9 @@ class OpenAICompatibleLLM(LLMInterface):
 
         # Provider-specific parameters
         extra_body: dict[str, Any] = {**self._config_extra_body}
-        self._apply_provider_extra_body_defaults(extra_body)
-        # OpenAI takes service_tier as a native top-level param; other servers on this
-        # class (lmstudio, ollama, ...) don't know it, and Groq sends its own tier via
-        # extra_body below. This path used to drop the tier entirely (#5439).
+        # OpenAI accepts service_tier as a native top-level parameter.
         if self.provider == "openai" and self.openai_service_tier:
             call_params["service_tier"] = self.openai_service_tier
-        if self.provider == "groq":
-            call_params["seed"] = DEFAULT_LLM_SEED
-            # Add service_tier if configured
-            if self.groq_service_tier:
-                extra_body["service_tier"] = self.groq_service_tier
-            # Add reasoning parameters for reasoning models
-            if is_reasoning_model:
-                extra_body["include_reasoning"] = False
         if extra_body:
             call_params["extra_body"] = extra_body
 
@@ -1265,15 +1236,6 @@ class OpenAICompatibleLLM(LLMInterface):
                     call_params["messages"] = _ensure_json_word_in_user_message(call_params["messages"])
                     call_params["response_format"] = {"type": "json_object"}
 
-        # OpenRouter load-balances one model across upstreams, and an upstream that
-        # does not support response_format may answer with empty content and
-        # finish_reason=stop instead of an error (#3494). require_parameters limits
-        # routing to upstreams that honour every parameter sent. Operator-set
-        # provider routing keys win; the provider dict is copied, not mutated.
-        if "response_format" in call_params and _is_openrouter(self.provider, self.base_url):
-            body = call_params.setdefault("extra_body", {})
-            body["provider"] = {"require_parameters": True, **body.get("provider", {})}
-
         apply_bank_attribution(call_params)
         # Cache pinning, alongside the other identity injection above and, like
         # call_params itself, built ONCE before the retry loop so every attempt
@@ -1283,7 +1245,6 @@ class OpenAICompatibleLLM(LLMInterface):
         # deterministic (the schema text is fixed per response_format), so the id
         # stays stable across the calls of one run.
         apply_cache_affinity(call_params, self._cache_affinity)
-        apply_opencode_session(call_params, base_url=self.base_url)
 
         last_exception = None
 
@@ -1922,11 +1883,11 @@ class OpenAICompatibleLLM(LLMInterface):
 
     async def supports_batch_api(self) -> bool:
         """Check if this provider supports batch API operations."""
-        # Only OpenAI and Groq support batch API
-        return self.provider in ("openai", "groq")
+        # Only OpenAI supports batch API
+        return self.provider == "openai"
 
     async def submit_batch(self, requests: list[BatchRequest]) -> BatchSubmission:
-        """Upload the requests as a JSONL file and create an OpenAI/Groq batch over it."""
+        """Upload the requests as a JSONL file and create an OpenAI batch over it."""
         if not await self.supports_batch_api():
             raise NotImplementedError(f"Batch API not supported for provider: {self.provider}")
 
@@ -1954,7 +1915,7 @@ class OpenAICompatibleLLM(LLMInterface):
         return BatchSubmission(batch_id=batch_response.id, status=batch_response.status)
 
     async def get_batch_status(self, batch_id: str) -> BatchStatus:
-        """Get the status of an OpenAI/Groq batch."""
+        """Get the status of an OpenAI batch."""
         if not await self.supports_batch_api():
             raise NotImplementedError(f"Batch API not supported for provider: {self.provider}")
 
@@ -1972,7 +1933,7 @@ class OpenAICompatibleLLM(LLMInterface):
         )
 
     async def retrieve_batch_results(self, batch_id: str) -> list[BatchResult]:
-        """Download a completed OpenAI/Groq batch's output file."""
+        """Download a completed OpenAI batch's output file."""
         if not await self.supports_batch_api():
             raise NotImplementedError(f"Batch API not supported for provider: {self.provider}")
 

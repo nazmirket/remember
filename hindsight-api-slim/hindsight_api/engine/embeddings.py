@@ -537,8 +537,7 @@ class OnnxEmbeddings(Embeddings):
                 if self.device == "cuda":
                     raise ImportError(
                         "CUDA OnnxEmbeddings requires transformers and a compatible onnxruntime-gpu installation "
-                        "with CUDA/cuDNN libraries. See docker/docker-compose/cuda-onnx/ for a custom image recipe; "
-                        "the local-onnx extra alone installs the CPU runtime."
+                        "with CUDA/cuDNN libraries. The local-onnx extra alone installs the CPU runtime."
                     ) from exc
                 raise ImportError(
                     "onnxruntime and transformers are required for OnnxEmbeddings. "

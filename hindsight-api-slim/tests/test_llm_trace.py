@@ -101,17 +101,6 @@ def test_recorder_scope_allowlist():
     assert r.is_enabled("retain_extract_facts") is False
 
 
-def test_recorder_disabled_on_oracle_backend(monkeypatch):
-    # llm_requests is a PostgreSQL-only table, so on Oracle the recorder must
-    # report disabled and write nothing — otherwise every LLM call fires an
-    # INSERT that fails with ORA-00903 and spams the error log.
-    monkeypatch.setattr("hindsight_api.engine.schema._is_oracle", lambda: True)
-    rec = _CapturingRecorder()
-    assert rec.is_enabled("memory") is False
-    rec.record_llm_call(provider="mock", model="mock", scope="memory", messages=[], duration=0.1)
-    assert rec.records == []
-
-
 # ── recorder: record_llm_call builds correct records ──────────────────────────
 
 
@@ -519,54 +508,12 @@ async def test_retain_extract_success_records_usage_once(registered_recorder):
 # ── real provider: litellm tool-call arg-parse failure keeps usage (#2387) ────
 
 
-def _litellm_tool_response_with_usage(arguments: str):
-    """A successful LiteLLM (OpenAI-shaped) tool-call response carrying usage,
-    like ``call_with_tools`` sees right before it ``json.loads`` the tool
-    arguments."""
-    function = SimpleNamespace(name="extract", arguments=arguments)
-    tool_call = SimpleNamespace(id="call_1", function=function)
-    message = SimpleNamespace(content=None, tool_calls=[tool_call])
-    choice = SimpleNamespace(finish_reason="tool_calls", message=message)
-    usage = SimpleNamespace(
-        prompt_tokens=140,
-        completion_tokens=18,
-        total_tokens=158,
-        prompt_tokens_details=SimpleNamespace(cached_tokens=20),
-    )
-    return SimpleNamespace(error=None, usage=usage, choices=[choice])
-
-
-@pytest.mark.asyncio
-async def test_litellm_tool_call_arg_parse_failure_keeps_usage(registered_recorder):
-    """A tool turn whose reply is not JSON is billed all the same: the provider reported
-    the tokens before the reply was parsed. The turn comes back with no call (a model
-    that did not follow the schema), and the error trace keeps the provider's usage."""
-    llm = LLMProvider(provider="litellm", api_key="test-key", base_url="https://example.test/v1", model="gpt-4o-mini")
-    # Valid response + usage, but the reply is not valid JSON.
-    llm._provider_impl._acompletion = AsyncMock(return_value=_litellm_tool_response_with_usage("{not valid json"))
-
-    result = await llm.call_with_tools(
-        messages=[{"role": "user", "content": "x"}],
-        tools=[{"type": "function", "function": {"name": "recall", "parameters": {"type": "object"}}}],
-        scope="tools",
-        max_retries=0,
-    )
-
-    assert result.tool_calls == []
-    assert len(registered_recorder.records) == 1
-    r = registered_recorder.records[0]
-    assert r.status == "error"
-    assert r.input_tokens == 140
-    assert r.output_tokens == 18
-    assert r.cached_tokens == 20
-
-
 @pytest.mark.asyncio
 async def test_configured_provider_binds_bank_context(registered_recorder):
     llm = LLMProvider(provider="mock", api_key="", base_url="", model="mock")
 
     class _Cfg:
-        llm_gemini_safety_settings = None
+        pass
 
     configured = llm.with_config(_Cfg(), bank_id="bank-42", operation="reflect")
     await configured.call(messages=[{"role": "user", "content": "x"}], scope="memory")
@@ -747,24 +694,6 @@ async def test_list_and_stats_report_retention_days(trace_api_client, bank_id, m
         stats = await trace_api_client.get(f"/v1/default/banks/{bank_id}/llm-requests/stats", params={"period": "30d"})
         assert listing.json()["retention_days"] == expected
         assert stats.json()["retention_days"] == expected
-
-
-@pytest.mark.asyncio
-async def test_llm_requests_read_returns_empty_on_oracle(trace_api_client, bank_id, monkeypatch):
-    # llm_requests is PostgreSQL-only, so the list and stats read paths must
-    # return an empty result on Oracle rather than querying a table that does
-    # not exist there (ORA-00942). The bank still resolves (no 404).
-    await trace_api_client.put(f"/v1/default/banks/{bank_id}", json={"name": "Trace Bank"})
-    monkeypatch.setattr("hindsight_api.engine.schema._is_oracle", lambda: True)
-
-    listing = await trace_api_client.get(f"/v1/default/banks/{bank_id}/llm-requests")
-    assert listing.status_code == 200
-    assert listing.json()["items"] == []
-    assert listing.json()["total"] == 0
-
-    stats = await trace_api_client.get(f"/v1/default/banks/{bank_id}/llm-requests/stats")
-    assert stats.status_code == 200
-    assert stats.json()["buckets"] == []
 
 
 @pytest.mark.asyncio
