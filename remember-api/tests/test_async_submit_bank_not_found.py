@@ -16,7 +16,7 @@ import uuid
 
 import pytest
 
-from remember_api.extensions.operation_validator import OperationValidationError
+from remember_api.errors import OperationValidationError
 
 pytestmark = pytest.mark.xdist_group("async_submit_bank_not_found_tests")
 

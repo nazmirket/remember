@@ -102,10 +102,7 @@ async def test_retry_skipped_when_other_pending_consolidation_exists(memory):
     }
 
     transient = RuntimeError("upstream LLM 503")
-    with (
-        patch.object(memory, "_handle_consolidation", side_effect=transient),
-        patch.object(memory, "_fire_consolidation_webhook") as webhook,
-    ):
+    with patch.object(memory, "_handle_consolidation", side_effect=transient):
         # Returns normally: no RetryTaskAt, and no raise for the poller to turn into 'failed'.
         await memory.execute_task(task_dict)
 
@@ -121,7 +118,6 @@ async def test_retry_skipped_when_other_pending_consolidation_exists(memory):
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     assert metadata["superseded_by"] == str(peer_pending_op_id)
-    webhook.assert_not_called()
 
     # Peer pending op must be untouched by the dedup guard.
     peer_row = await pool.fetchrow(
@@ -282,3 +278,31 @@ async def test_retry_is_indefinite(memory):
     assert cap <= delta <= cap + 10, f"At retry_count=100 expected backoff at cap (~{cap}s), got {delta:.2f}s"
 
     await _cleanup(pool, bank_id, op_id)
+
+
+@pytest.mark.asyncio
+async def test_completed_consolidation_marks_operation_complete(monkeypatch):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from remember_api.engine.memory_engine import MemoryEngine
+
+    engine = MemoryEngine.__new__(MemoryEngine)
+    engine._audit_logger = None
+    engine._handle_consolidation = AsyncMock(return_value={"observations_created": 1})
+    engine._mark_operation_completed = AsyncMock()
+
+    @asynccontextmanager
+    async def audit(*args, **kwargs):
+        yield SimpleNamespace(response=None)
+
+    monkeypatch.setattr("remember_api.engine.memory_engine.audit_context", audit)
+    await engine._dispatch_task(
+        {"type": "consolidation", "bank_id": "project", "operation_id": "op-1"},
+        "consolidation",
+        "op-1",
+        None,
+    )
+    engine._handle_consolidation.assert_awaited_once()
+    engine._mark_operation_completed.assert_awaited_once_with("op-1")

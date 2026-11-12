@@ -27,182 +27,13 @@ class TestMainModuleExtensionLoading:
         with patch("remember_api.main._port_bind_error", return_value=None):
             yield
 
-    def test_main_loads_tenant_extension_when_configured(self, monkeypatch):
-        """
-        Verify that main.py loads tenant extension from REMEMBER_API_TENANT_EXTENSION.
-
-        This ensures extension loading works in the single-worker code path.
-        """
-        # Set up environment to configure a tenant extension
-        monkeypatch.setenv(
-            "REMEMBER_API_TENANT_EXTENSION",
-            "tests.test_main_module:MockTenantExtension",
-        )
-        # Ensure single worker mode
-        monkeypatch.setenv("REMEMBER_API_WORKERS", "1")
-
-        # Track what extensions were loaded via load_extension
-        loaded_extensions = {}
-
-        # Get the real load_extension function
-        from remember_api.extensions.loader import load_extension as real_load_extension
-
-        def tracking_load_extension(name, base_class):
-            """Track calls to load_extension and delegate to original."""
-            result = real_load_extension(name, base_class)
-            loaded_extensions[name] = result
-            return result
-
-        with (
-            patch("remember_api.main.MemoryEngine") as mock_engine,
-            patch("remember_api.main.create_app") as mock_create_app,
-            patch("remember_api.main._get_raw_config") as mock_get_config,
-            patch("remember_api.main.load_extension", side_effect=tracking_load_extension),
-            patch("remember_api.main.print_banner"),
-            patch("uvicorn.run"),
-        ):  # Don't actually start uvicorn
-            mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
-            mock_config.port = 8888
-            mock_config.log_level = "info"
-            # argparse defaults: a MagicMock would compare against ints later on.
-            mock_config.workers = 1
-            mock_config.access_log = False
-            mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
-            mock_get_config.return_value = mock_config
-            mock_engine.return_value = MagicMock()
-            mock_create_app.return_value = MagicMock()
-
-            # Mock sys.argv to simulate CLI invocation
-            with patch.object(sys, "argv", ["remember-api"]):
-                from remember_api.main import main
-
-                main()
-
-        # Verify TENANT extension was loaded
-        assert "TENANT" in loaded_extensions, (
-            "main.py did not call load_extension('TENANT', ...) - extensions not loaded!"
-        )
-        assert loaded_extensions["TENANT"] is not None, (
-            "load_extension('TENANT', ...) returned None despite env var being set"
-        )
-        assert isinstance(loaded_extensions["TENANT"], MockTenantExtension), (
-            f"Expected MockTenantExtension, got {type(loaded_extensions['TENANT'])}"
-        )
-
-    def test_main_loads_operation_validator_when_configured(self, monkeypatch):
-        """
-        Verify that main.py loads operation validator from REMEMBER_API_OPERATION_VALIDATOR_EXTENSION.
-        """
-        monkeypatch.setenv(
-            "REMEMBER_API_OPERATION_VALIDATOR_EXTENSION",
-            "tests.test_main_module:MockOperationValidator",
-        )
-        monkeypatch.setenv("REMEMBER_API_WORKERS", "1")
-
-        loaded_extensions = {}
-
-        from remember_api.extensions.loader import load_extension as real_load_extension
-
-        def tracking_load_extension(name, base_class):
-            result = real_load_extension(name, base_class)
-            loaded_extensions[name] = result
-            return result
-
-        with (
-            patch("remember_api.main.MemoryEngine") as mock_engine,
-            patch("remember_api.main.create_app") as mock_create_app,
-            patch("remember_api.main._get_raw_config") as mock_get_config,
-            patch("remember_api.main.load_extension", side_effect=tracking_load_extension),
-            patch("remember_api.main.print_banner"),
-            patch("uvicorn.run"),
-        ):
-            mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
-            mock_config.port = 8888
-            mock_config.log_level = "info"
-            # argparse defaults: a MagicMock would compare against ints later on.
-            mock_config.workers = 1
-            mock_config.access_log = False
-            mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
-            mock_get_config.return_value = mock_config
-            mock_engine.return_value = MagicMock()
-            mock_create_app.return_value = MagicMock()
-
-            with patch.object(sys, "argv", ["remember-api"]):
-                from remember_api.main import main
-
-                main()
-
-        assert "OPERATION_VALIDATOR" in loaded_extensions, (
-            "main.py did not call load_extension('OPERATION_VALIDATOR', ...)"
-        )
-        assert loaded_extensions["OPERATION_VALIDATOR"] is not None
-        assert isinstance(loaded_extensions["OPERATION_VALIDATOR"], MockOperationValidator)
-
-    def test_main_passes_extensions_to_memory_engine(self, monkeypatch):
-        """
-        Verify that main.py passes loaded extensions to MemoryEngine constructor.
-
-        This is the critical test - even if extensions are loaded, they must be
-        passed to MemoryEngine for authentication to work.
-        """
-        monkeypatch.setenv(
-            "REMEMBER_API_TENANT_EXTENSION",
-            "tests.test_main_module:MockTenantExtension",
-        )
-        monkeypatch.setenv("REMEMBER_API_WORKERS", "1")
-
-        memory_engine_calls = []
-
-        def capture_memory_engine(*args, **kwargs):
-            memory_engine_calls.append({"args": args, "kwargs": kwargs})
-            return MagicMock()
-
-        with (
-            patch("remember_api.main.MemoryEngine", side_effect=capture_memory_engine),
-            patch("remember_api.main.create_app") as mock_create_app,
-            patch("remember_api.main._get_raw_config") as mock_get_config,
-            patch("remember_api.main.print_banner"),
-            patch("uvicorn.run"),
-        ):
-            mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
-            mock_config.port = 8888
-            mock_config.log_level = "info"
-            # argparse defaults: a MagicMock would compare against ints later on.
-            mock_config.workers = 1
-            mock_config.access_log = False
-            mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
-            mock_get_config.return_value = mock_config
-            mock_create_app.return_value = MagicMock()
-
-            with patch.object(sys, "argv", ["remember-api"]):
-                from remember_api.main import main
-
-                main()
-
-        # Verify MemoryEngine was called
-        assert len(memory_engine_calls) == 1, "MemoryEngine should be called exactly once"
-
-        call_kwargs = memory_engine_calls[0]["kwargs"]
-
-        # THE CRITICAL ASSERTION: tenant_extension must be passed and not None
-        assert "tenant_extension" in call_kwargs, "MemoryEngine was not called with tenant_extension parameter!"
-        assert call_kwargs["tenant_extension"] is not None, (
-            "tenant_extension was None - main.py did not pass loaded extension to MemoryEngine!"
-        )
-
     def test_main_works_without_extensions(self, monkeypatch):
         """
         Verify that main.py works correctly when no extensions are configured.
         """
         # Ensure no extension env vars are set
-        monkeypatch.delenv("REMEMBER_API_TENANT_EXTENSION", raising=False)
-        monkeypatch.delenv("REMEMBER_API_OPERATION_VALIDATOR_EXTENSION", raising=False)
+        monkeypatch.setenv("REMEMBER_API_TENANT_EXTENSION", "nonexistent:Tenant")
+        monkeypatch.setenv("REMEMBER_API_OPERATION_VALIDATOR_EXTENSION", "nonexistent:Validator")
         monkeypatch.setenv("REMEMBER_API_WORKERS", "1")
 
         memory_engine_calls = []
@@ -219,14 +50,16 @@ class TestMainModuleExtensionLoading:
             patch("uvicorn.run"),
         ):
             mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
+            mock_config.host = "127.0.0.1"
             mock_config.port = 8888
             mock_config.log_level = "info"
             # argparse defaults: a MagicMock would compare against ints later on.
             mock_config.workers = 1
             mock_config.access_log = False
             mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
+            mock_config.database_url = "pg0"
+            mock_config.read_database_url = None
+            mock_config.migration_database_url = None
             mock_get_config.return_value = mock_config
             mock_create_app.return_value = MagicMock()
 
@@ -240,8 +73,8 @@ class TestMainModuleExtensionLoading:
         call_kwargs = memory_engine_calls[0]["kwargs"]
 
         # Extensions should be None when not configured
-        assert call_kwargs.get("tenant_extension") is None
-        assert call_kwargs.get("operation_validator") is None
+        assert "tenant_extension" not in call_kwargs
+        assert "operation_validator" not in call_kwargs
 
     def test_main_uses_app_object_for_single_worker(self, monkeypatch):
         """
@@ -268,18 +101,20 @@ class TestMainModuleExtensionLoading:
             patch("uvicorn.run", side_effect=capture_uvicorn_run),
         ):
             mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
+            mock_config.host = "127.0.0.1"
             mock_config.port = 8888
             mock_config.log_level = "info"
             # argparse defaults: a MagicMock would compare against ints later on.
             mock_config.workers = 1
             mock_config.access_log = False
             mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
+            mock_config.database_url = "pg0"
+            mock_config.read_database_url = None
+            mock_config.migration_database_url = None
             mock_get_config.return_value = mock_config
             mock_engine.return_value = MagicMock()
 
-            with patch.object(sys, "argv", ["remember-api", "--workers", "1"]):
+            with patch.object(sys, "argv", ["remember-api"]):
                 from remember_api.main import main
 
                 main()
@@ -287,51 +122,6 @@ class TestMainModuleExtensionLoading:
         assert len(uvicorn_calls) == 1
         # With workers=1, should pass app object, not import string
         assert uvicorn_calls[0]["app"] is mock_app, "main.py should pass app object (not import string) when workers=1"
-
-    def test_main_uses_import_string_for_multiple_workers(self, monkeypatch):
-        """
-        Verify that main.py uses import string when workers > 1.
-
-        This is important because multi-worker mode requires server.py to be imported
-        by each worker process.
-        """
-        monkeypatch.setenv("REMEMBER_API_WORKERS", "2")
-        monkeypatch.delenv("REMEMBER_API_TENANT_EXTENSION", raising=False)
-
-        uvicorn_calls = []
-
-        def capture_uvicorn_run(**kwargs):
-            uvicorn_calls.append(kwargs)
-
-        with (
-            patch("remember_api.main.MemoryEngine") as mock_engine,
-            patch("remember_api.main.create_app") as mock_create_app,
-            patch("remember_api.main._get_raw_config") as mock_get_config,
-            patch("remember_api.main.print_banner"),
-            patch("uvicorn.run", side_effect=capture_uvicorn_run),
-        ):
-            mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
-            mock_config.port = 8888
-            mock_config.log_level = "info"
-            # argparse defaults: a MagicMock would compare against ints later on.
-            mock_config.workers = 1
-            mock_config.access_log = False
-            mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
-            mock_get_config.return_value = mock_config
-            mock_engine.return_value = MagicMock()
-            mock_create_app.return_value = MagicMock()
-
-            with patch.object(sys, "argv", ["remember-api", "--workers", "2"]):
-                from remember_api.main import main
-
-                main()
-
-        assert len(uvicorn_calls) == 1
-        # With workers > 1, should use import string
-        assert uvicorn_calls[0]["app"] == "remember_api.server:app", "main.py should use import string when workers > 1"
-        assert uvicorn_calls[0]["workers"] == 2
 
     def test_main_sets_keepalive_timeout(self, monkeypatch):
         """
@@ -355,14 +145,16 @@ class TestMainModuleExtensionLoading:
             patch("uvicorn.run", side_effect=capture_uvicorn_run),
         ):
             mock_config = MagicMock()
-            mock_config.host = "0.0.0.0"
+            mock_config.host = "127.0.0.1"
             mock_config.port = 8888
             mock_config.log_level = "info"
             # argparse defaults: a MagicMock would compare against ints later on.
             mock_config.workers = 1
             mock_config.access_log = False
             mock_config.run_migrations_on_startup = False
-            mock_config.database_url = "postgresql://test:test@localhost/test"
+            mock_config.database_url = "pg0"
+            mock_config.read_database_url = None
+            mock_config.migration_database_url = None
             mock_get_config.return_value = mock_config
             mock_engine.return_value = MagicMock()
             mock_create_app.return_value = MagicMock()
@@ -381,14 +173,9 @@ class TestMainModuleExtensionLoading:
 
 # Mock extensions for testing
 from remember_api.extensions import (
-    OperationValidatorExtension,
-    RecallContext,
-    ReflectContext,
     RequestContext,
-    RetainContext,
     TenantContext,
     TenantExtension,
-    ValidationResult,
 )
 
 
@@ -398,32 +185,11 @@ class MockTenantExtension(TenantExtension):
     async def authenticate(self, request_context: RequestContext) -> TenantContext:
         return TenantContext(schema_name="public")
 
-    async def list_tenants(self) -> list:
-        from remember_api.extensions.tenant import Tenant
-
-        return [Tenant(schema="public")]
-
-
-class MockOperationValidator(OperationValidatorExtension):
-    """Mock operation validator for testing main.py extension loading."""
-
-    def __init__(self, config: dict):
-        super().__init__(config)
-
-    async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_recall(self, ctx: RecallContext) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_reflect(self, ctx: ReflectContext) -> ValidationResult:
-        return ValidationResult.accept()
-
 
 class TestPortPreflight:
     """#4281: an occupied port must fail before MemoryEngine, embedded PG, models or migrations."""
 
-    @pytest.mark.parametrize("flags", [[], ["--workers", "2"], ["--reload"], ["--daemon"]])
+    @pytest.mark.parametrize("flags", [[], ["--daemon"]])
     def test_occupied_port_exits_before_initialization(self, monkeypatch, capsys, flags):
         with socket.create_server(("127.0.0.1", 0)) as listener:
             port = listener.getsockname()[1]
@@ -433,7 +199,6 @@ class TestPortPreflight:
                 patch("remember_api.main.load_dotenv_for_entrypoint"),
                 patch("remember_api.main.daemonize") as mock_daemonize,
                 patch("remember_api.main.MemoryEngine") as mock_engine,
-                patch("remember_api.main.load_extension") as mock_load_extension,
                 patch("uvicorn.run") as mock_uvicorn_run,
             ):
                 from remember_api.main import main
@@ -445,7 +210,6 @@ class TestPortPreflight:
             assert f"cannot bind 127.0.0.1:{port}" in capsys.readouterr().err
             mock_daemonize.assert_not_called()
             mock_engine.assert_not_called()
-            mock_load_extension.assert_not_called()
             mock_uvicorn_run.assert_not_called()
             # The existing listener is left alone and still serves.
             with socket.create_connection(("127.0.0.1", port), timeout=1):

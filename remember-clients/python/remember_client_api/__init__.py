@@ -19,10 +19,8 @@ __version__ = "0.0.7"
 # import apis into sdk package
 from remember_client_api.api.audit_api import AuditApi
 from remember_client_api.api.bank_templates_api import BankTemplatesApi
-from remember_client_api.api.bank_transfer_api import BankTransferApi
 from remember_client_api.api.banks_api import BanksApi
 from remember_client_api.api.directives_api import DirectivesApi
-from remember_client_api.api.document_transfer_api import DocumentTransferApi
 from remember_client_api.api.documents_api import DocumentsApi
 from remember_client_api.api.entities_api import EntitiesApi
 from remember_client_api.api.knowledge_base_api import KnowledgeBaseApi
@@ -32,7 +30,6 @@ from remember_client_api.api.mental_models_api import MentalModelsApi
 from remember_client_api.api.monitoring_api import MonitoringApi
 from remember_client_api.api.operations_api import OperationsApi
 from remember_client_api.api.pages_api import PagesApi
-from remember_client_api.api.webhooks_api import WebhooksApi
 
 # import ApiClient
 from remember_client_api.api_response import ApiResponse
@@ -68,7 +65,6 @@ from remember_client_api.models.bank_template_directive import BankTemplateDirec
 from remember_client_api.models.bank_template_import_response import BankTemplateImportResponse
 from remember_client_api.models.bank_template_manifest import BankTemplateManifest
 from remember_client_api.models.bank_template_mental_model import BankTemplateMentalModel
-from remember_client_api.models.bank_transfer_submit_response import BankTransferSubmitResponse
 from remember_client_api.models.base64_attachment_source import Base64AttachmentSource
 from remember_client_api.models.budget import Budget
 from remember_client_api.models.cancel_operation_response import CancelOperationResponse
@@ -94,7 +90,6 @@ from remember_client_api.models.create_mental_model_request import CreateMentalM
 from remember_client_api.models.create_mental_model_response import CreateMentalModelResponse
 from remember_client_api.models.create_page_request import CreatePageRequest
 from remember_client_api.models.create_page_response import CreatePageResponse
-from remember_client_api.models.create_webhook_request import CreateWebhookRequest
 from remember_client_api.models.default_observation_scopes import DefaultObservationScopes
 from remember_client_api.models.default_scopes_preview import DefaultScopesPreview
 from remember_client_api.models.delete_document_response import DeleteDocumentResponse
@@ -105,9 +100,7 @@ from remember_client_api.models.directive_response import DirectiveResponse
 from remember_client_api.models.disposition_traits import DispositionTraits
 from remember_client_api.models.document_event import DocumentEvent
 from remember_client_api.models.document_event_kind import DocumentEventKind
-from remember_client_api.models.document_export_submit_response import DocumentExportSubmitResponse
 from remember_client_api.models.document_history_response import DocumentHistoryResponse
-from remember_client_api.models.document_import_submit_response import DocumentImportSubmitResponse
 from remember_client_api.models.document_list_item import DocumentListItem
 from remember_client_api.models.document_response import DocumentResponse
 from remember_client_api.models.dry_run_extract_request import DryRunExtractRequest
@@ -245,15 +238,9 @@ from remember_client_api.models.update_document_response import UpdateDocumentRe
 from remember_client_api.models.update_memory_request import UpdateMemoryRequest
 from remember_client_api.models.update_mental_model_request import UpdateMentalModelRequest
 from remember_client_api.models.update_node_request import UpdateNodeRequest
-from remember_client_api.models.update_webhook_request import UpdateWebhookRequest
 from remember_client_api.models.validation_error import ValidationError
 from remember_client_api.models.validation_error_loc_inner import ValidationErrorLocInner
 from remember_client_api.models.version_response import VersionResponse
-from remember_client_api.models.webhook_delivery_list_response import WebhookDeliveryListResponse
-from remember_client_api.models.webhook_delivery_response import WebhookDeliveryResponse
-from remember_client_api.models.webhook_http_config import WebhookHttpConfig
-from remember_client_api.models.webhook_list_response import WebhookListResponse
-from remember_client_api.models.webhook_response import WebhookResponse
 
 # Deprecated names from before pages were renamed. Remove in 2.x.
 KnowledgeNode = PageNode

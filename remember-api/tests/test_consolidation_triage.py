@@ -281,4 +281,3 @@ async def test_a_batch_whose_llm_call_fails_writes_no_triage_verdict():
         )
 
     assert failed
-    store.begin_write_batch.assert_not_called()

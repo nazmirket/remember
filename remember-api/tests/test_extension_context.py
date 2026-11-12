@@ -1,34 +1,10 @@
-"""The engine gives every extension it owns the one process-wide ExtensionContext.
-
-The tenant extension and the operation validator are constructed BEFORE the engine and
-handed to ``MemoryEngine.__init__``, so ``load_extension()`` never set a context on them.
-Without the engine doing it, a validator hook reaching ``self.context`` (e.g.
-``get_memory_engine()`` for the data-plane pool) raises "Extension context not set" --
-silently, for hooks that treat context access as best-effort.
-"""
+"""Built-in services share the engine context."""
 
 import os
 from unittest.mock import MagicMock, patch
 
 from remember_api.config import clear_config_cache
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.extensions.operation_validator import (
-    OperationValidatorExtension,
-    ValidationResult,
-)
-
-
-class _Validator(OperationValidatorExtension):
-    """Accepts everything -- just enough to instantiate."""
-
-    async def validate_retain(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_recall(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_reflect(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
 
 
 def _build_engine(**kwargs) -> MemoryEngine:
@@ -54,25 +30,8 @@ def _build_engine(**kwargs) -> MemoryEngine:
     return engine
 
 
-def test_validator_gets_the_engine_context() -> None:
-    validator = _Validator({})
-    engine = _build_engine(operation_validator=validator)
-
-    assert validator.context is engine._ext_ctx
-    assert validator.context.get_memory_engine() is engine
-
-
-def test_tenant_extension_gets_the_same_context() -> None:
+def test_built_in_services_need_no_external_context() -> None:
     engine = _build_engine()
-
-    assert engine._tenant_extension.context is engine._ext_ctx
-    assert engine._memory_defense.context is engine._ext_ctx
-
-
-def test_duck_typed_validator_without_set_context_still_builds() -> None:
-    class _Bare:
-        async def validate_retain(self, ctx):
-            return None
-
-    engine = _build_engine(operation_validator=_Bare())  # must not raise
-    assert engine._operation_validator is not None
+    assert engine._tenant_extension is not None
+    assert engine._memory_defense is not None
+    assert not hasattr(engine, "_ext_ctx")

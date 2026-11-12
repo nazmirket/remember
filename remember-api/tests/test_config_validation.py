@@ -508,14 +508,14 @@ def test_native_language_rejects_invalid_identifiers(monkeypatch, bad_value):
         RememberConfig.from_env()
 
 
-def test_text_search_extension_accepts_pgroonga(monkeypatch):
+@pytest.mark.parametrize("extension", ["pgroonga", "vchord", "pg_textsearch", "pg_search"])
+def test_local_text_search_rejects_other_extensions(monkeypatch, extension):
     from remember_api.config import RememberConfig
 
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION", "pgroonga")
+    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION", extension)
     monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension == "pgroonga"
+    with pytest.raises(ValueError, match="Invalid text_search_extension"):
+        RememberConfig.from_env()
 
 
 def test_text_search_extension_rejects_unknown(monkeypatch):
@@ -528,47 +528,6 @@ def test_text_search_extension_rejects_unknown(monkeypatch):
         RememberConfig.from_env()
 
 
-def test_pg_search_tokenizer_defaults_to_empty(monkeypatch):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.delenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER", raising=False)
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_tokenizer == ""
-
-
-def test_pg_search_tokenizer_loaded_from_env(monkeypatch):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER", "Jieba")
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_tokenizer == "jieba"
-
-
-def test_pg_search_tokenizer_accepts_lindera_alias(monkeypatch):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER", "chinese_lindera")
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_tokenizer == "lindera(chinese)"
-
-
-@pytest.mark.parametrize("bad_value", ["jieba;DROP TABLE", "ngram(3,2)", "unknown", "pdb.jieba"])
-def test_pg_search_tokenizer_rejects_invalid_values(monkeypatch, bad_value):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER", bad_value)
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    with pytest.raises(ValueError, match="Invalid REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER"):
-        RememberConfig.from_env()
-
-
 def test_pg_search_bm25_columns_apply_tokenizer():
     from remember_api._pg_search import pg_search_bm25_columns
 
@@ -576,46 +535,6 @@ def test_pg_search_bm25_columns_apply_tokenizer():
     assert pg_search_bm25_columns("id", ("text", "context"), "jieba") == "id, (text::pdb.jieba), (context::pdb.jieba)"
     assert pg_search_bm25_columns("id", ("text",), "ngram(2, 3)") == "id, (text::pdb.ngram(2,3))"
     assert pg_search_bm25_columns("id", ("text",), "edge_ngram(2, 5)") == "id, (text::pdb.edge_ngram(2,5))"
-
-
-def test_pg_search_function_schema_defaults_to_paradedb(monkeypatch):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.delenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA", raising=False)
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_function_schema == "paradedb"
-
-    # Empty string or whitespace also falls back to paradedb
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA", "")
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_function_schema == "paradedb"
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA", "   ")
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_function_schema == "paradedb"
-
-
-def test_pg_search_function_schema_loaded_from_env(monkeypatch):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA", "PgSearch")
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.text_search_extension_pg_search_function_schema == "pgsearch"
-
-
-@pytest.mark.parametrize("bad_schema", ["pgsearch;DROP TABLE", "123schema", "pg-search", "pg search"])
-def test_pg_search_function_schema_rejects_invalid_identifiers(monkeypatch, bad_schema):
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA", bad_schema)
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    with pytest.raises(ValueError, match="Invalid text_search_extension_pg_search_function_schema"):
-        RememberConfig.from_env()
 
 
 def test_llm_output_language_defaults_to_none(monkeypatch):

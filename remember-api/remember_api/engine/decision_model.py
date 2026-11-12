@@ -10,10 +10,6 @@ keyed by id) and always get a :class:`DecisionResponse` back; the client speaks 
 provider's wire format:
 
 - ``typesafe`` (Jev): System One at ``<base_url>/v1/systemone``.
-- ``cloudflare`` (Clef on Workers AI): the same System One body, posted to
-  ``<base_url>/@cf/cloudflare/<model>``, where ``base_url`` is the account's
-  ``.../client/v4/accounts/<account_id>/ai/run`` (or an AI Gateway ``.../workers-ai`` URL).
-  The REST API wraps the answer in Cloudflare's ``{"result": ...}`` envelope.
 - ``openai``: the Decisions API at ``<base_url>/v1/decisions``. Same three question kinds
   under other names (``predicate`` for noul, ``choices`` / ``levels`` for criteria), a list
   of named questions and answers instead of maps, and ``input`` instead of ``state``.
@@ -100,10 +96,6 @@ def overflowed_window(exc: BaseException) -> bool:
 
 class DecisionRefusedError(Exception):
     """The provider refused to answer a question (OpenAI's ``refusal`` answer)."""
-
-
-class _CloudflareEnvelope(BaseModel):
-    result: DecisionResponse
 
 
 class _OpenAIProbability(BaseModel):
@@ -207,16 +199,14 @@ def record_decision_call(
     )
 
 
-# Hindsight Inference refuses a body over 2 MB; this leaves room for the per-question counting
-# being approximate. aiohttp sends json.dumps' ASCII output, so characters are bytes.
+# Bound request bodies while allowing for approximate per-question counting.
 MAX_REQUEST_BYTES = 1_800_000
 
 
 class DecisionModel:
     # A request holds at most decision_rerank_interface.MAX_QUESTIONS questions. The token
     # ceiling is ``max_request_tokens``: it belongs to the model the endpoint serves, not to
-    # this client, so it is a setting. None when the endpoint fits each request to its model's
-    # window itself (Hindsight Inference): then only the body size is bounded.
+    # this client, so it is a setting. None leaves only the body-size bound.
     def __init__(
         self,
         provider: str,
@@ -380,9 +370,6 @@ class DecisionModel:
             "state": state,
             "questions": {name: q.system_one() for name, q in questions.items()},
         }
-        if self.provider == "cloudflare":
-            raw = await self._post(f"/@cf/cloudflare/{self.model}", body)
-            return _CloudflareEnvelope.model_validate(raw).result
         return DecisionResponse.model_validate(await self._post("/v1/systemone", body))
 
     async def _post(self, path: str, body: dict[str, Any]) -> Any:

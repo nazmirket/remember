@@ -16,9 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from remember_api.engine.memories import set_memories
 from remember_api.engine.retain.attachment_content import compute_attachment_hash, short_attachment_id
-from tests.test_attachments_store_owned import _CarryingStore
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -126,32 +124,7 @@ async def test_the_sweep_waits_for_a_retain_still_queued(api_client, memory, req
 
 
 @pytest.mark.asyncio
-async def test_a_store_owned_bank_is_answered_by_its_store(api_client, memory, request_context, monkeypatch):
-    """Its documents are not in SQL, so only the store can say which ones exist."""
-    set_memories(_CarryingStore(answers_full_recall=True))
-    try:
-        bank_id = f"swp-so-{uuid.uuid4().hex[:8]}"
-        assert (await api_client.put(f"/v1/default/banks/{bank_id}", json={})).status_code == 200
-        config = await api_client.patch(
-            f"/v1/default/banks/{bank_id}/config", json={"updates": {"retain_extraction_mode": "chunks"}}
-        )
-        assert config.status_code == 200, config.text
-        landed = await _retain(api_client, bank_id, "landed")
-        assert landed.status_code == 200, landed.text
-        await _failed_retain(api_client, memory, monkeypatch, bank_id, "failed")
-
-        assert await _sweep(memory, bank_id, request_context) == 1
-
-        backend = await memory._get_backend()
-        async with backend.acquire() as conn:
-            rows = await conn.fetch("SELECT document_id FROM attachments WHERE bank_id = $1", bank_id)
-        assert [row["document_id"] for row in rows] == ["landed"]
-    finally:
-        set_memories(None)
-
-
-@pytest.mark.asyncio
-async def test_the_daily_job_finds_the_bank_through_the_routine(api_client, memory, monkeypatch):
+async def test_the_daily_job_finds_the_local_bank(api_client, memory, monkeypatch):
     """One cross-tenant call finds the bank; the engine sweep then runs for it.
 
     The engine's sweep is spied rather than run: the job sees every bank in the test

@@ -20,7 +20,6 @@ from ..config import (
     ENV_RETAIN_LLM_MAX_CONCURRENT,
     _get_raw_config,
 )
-from ..provider_auth import is_custom_llm_provider
 
 # Re-exported: this module is where callers have always imported it from.
 from ..provider_auth import requires_api_key as requires_api_key
@@ -481,43 +480,6 @@ def _validate_ollama_num_ctx(value: Any) -> int | None:
     return value
 
 
-def _create_custom_llm_provider(
-    *,
-    provider: str,
-    api_key: str,
-    base_url: str,
-    model: str,
-    reasoning_effort: str | None,
-    timeout: float | None,
-    extra_body: dict[str, Any] | None,
-    default_headers: dict[str, str] | None,
-) -> LLMInterface:
-    """Build the operator's own provider named by ``provider`` (``package.module:ClassName``).
-
-    The class must subclass ``LLMInterface``. It is constructed with keyword arguments
-    only: the ``LLMInterface.__init__`` ones plus ``extra_body`` and ``default_headers``,
-    so a subclass of ``OpenAICompatibleLLM`` takes them as-is and a direct
-    ``LLMInterface`` subclass receives the last two in ``**kwargs``.
-    """
-    # Lazy: the extensions package imports the engine.
-    from ..extensions.loader import ExtensionLoadError, resolve_class_path
-
-    try:
-        provider_class = resolve_class_path(provider, LLMInterface)
-    except ExtensionLoadError as e:
-        raise ValueError(f"Cannot load custom LLM provider {provider!r}: {e}") from e
-    return provider_class(
-        provider=provider,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        timeout=timeout,
-        extra_body=extra_body,
-        default_headers=default_headers,
-    )
-
-
 def create_llm_provider(
     provider: str,
     api_key: str,
@@ -533,7 +495,7 @@ def create_llm_provider(
     cache_affinity: str | None = None,
     codex_home: str | None = None,
 ) -> Any:  # Returns LLMInterface
-    """Create a supported LLM implementation or a registered custom provider.
+    """Create a supported LLM implementation.
 
     The caller resolves credentials, model, timeout and per-operation settings.
     """
@@ -541,18 +503,6 @@ def create_llm_provider(
 
     # Each provider (and its SDK) loads only when chosen; see providers/__init__.py.
     from . import providers
-
-    if is_custom_llm_provider(provider):
-        return _create_custom_llm_provider(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-            extra_body=extra_body,
-            default_headers=default_headers,
-        )
 
     provider_lower = provider.lower()
 
@@ -672,7 +622,7 @@ class LLMProvider:
     """
     Unified LLM provider.
 
-    Supports OpenAI, Anthropic, local OpenAI-compatible models, and custom providers.
+    Supports OpenAI, Anthropic, and local OpenAI-compatible models.
     """
 
     def __init__(
@@ -696,12 +646,10 @@ class LLMProvider:
     ):
         """Initialize an LLM provider using settings resolved by the caller.
 
-        OpenAI, Anthropic, Codex, Claude Code, local providers and custom
-        implementations use the applicable model, timeout, headers and request
-        settings.
+        OpenAI, Anthropic, Codex, Claude Code, and local providers use the
+        applicable model, timeout, headers, and request settings.
         """
-        # A custom provider is a class path, and class names are case-sensitive.
-        self.provider = provider if is_custom_llm_provider(provider) else provider.lower()
+        self.provider = provider.lower()
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
@@ -747,11 +695,8 @@ class LLMProvider:
             "mock",
             "none",
         ]
-        if self.provider not in valid_providers and not is_custom_llm_provider(self.provider):
-            raise ValueError(
-                f"Invalid LLM provider: {self.provider}. Must be one of: {', '.join(valid_providers)}, "
-                "or package.module:ClassName for a custom provider."
-            )
+        if self.provider not in valid_providers:
+            raise ValueError(f"Invalid LLM provider: {self.provider}. Must be one of: {', '.join(valid_providers)}.")
 
         # Set default base URLs
         if not self.base_url:
@@ -897,32 +842,20 @@ class LLMProvider:
         strict_schema: bool | None = None,
         prompt_cache: PromptCachePrefix | None = None,
     ) -> LLMCallResult:
-        """Make an LLM API call with retry logic — see ``_call`` for the arguments.
-
-        An installed LLM request extension decides first how the call is sent: its
-        credentials, or a different LLM altogether, which then runs the call in this
-        one's place. Decided before anything else so a refused call creates nothing
-        (e.g. a provider-side prompt cache) on the way to being refused.
-        """
-        from ..extensions.llm_request import bind_llm_request
-
-        bound = await bind_llm_request(self)
-        try:
-            return await (bound.llm or self)._call(
-                messages=messages,
-                response_format=response_format,
-                max_completion_tokens=max_completion_tokens,
-                temperature=temperature,
-                scope=scope,
-                max_retries=max_retries,
-                initial_backoff=initial_backoff,
-                max_backoff=max_backoff,
-                skip_validation=skip_validation,
-                strict_schema=strict_schema,
-                prompt_cache=prompt_cache,
-            )
-        finally:
-            bound.reset()
+        """Make an LLM API call with retry logic."""
+        return await self._call(
+            messages=messages,
+            response_format=response_format,
+            max_completion_tokens=max_completion_tokens,
+            temperature=temperature,
+            scope=scope,
+            max_retries=max_retries,
+            initial_backoff=initial_backoff,
+            max_backoff=max_backoff,
+            skip_validation=skip_validation,
+            strict_schema=strict_schema,
+            prompt_cache=prompt_cache,
+        )
 
     async def _call(
         self,

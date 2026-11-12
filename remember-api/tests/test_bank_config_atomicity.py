@@ -16,8 +16,7 @@ import uuid
 import pytest
 
 from remember_api import MemoryEngine, RequestContext
-from remember_api.config_resolver import ConfigResolver, apply_strategy
-from remember_api.extensions.tenant import TenantExtension
+from remember_api.config_resolver import apply_strategy
 
 
 def bank_id(prefix: str) -> str:
@@ -189,58 +188,5 @@ async def test_updates_untouched_by_cross_field_constraints_still_merge(memory, 
         overrides = await memory._config_resolver._load_bank_config(bank)
         assert overrides["enable_reranking"] is False
         assert overrides["enable_observations"] is False
-    finally:
-        await memory.delete_bank(bank, request_context=request_context)
-
-
-class CountingTenantExtension(TenantExtension):
-    """Tenant extension that records how often each config hook is invoked."""
-
-    def __init__(self) -> None:
-        self.tenant_config_calls = 0
-        self.allowed_config_field_calls = 0
-
-    async def authenticate(self, context):
-        from remember_api.extensions.tenant import TenantContext
-
-        return TenantContext(schema_name="public")
-
-    async def list_tenants(self):
-        from remember_api.extensions.tenant import Tenant
-
-        return [Tenant(schema="public")]
-
-    async def get_tenant_config(self, context):
-        self.tenant_config_calls += 1
-        return {}
-
-    async def get_allowed_config_fields(self, context, bank_id):
-        self.allowed_config_field_calls += 1
-        return None
-
-
-@pytest.mark.asyncio
-async def test_config_write_calls_each_tenant_hook_once(memory, request_context):
-    """Re-validating under the row lock must not replay per-request hooks.
-
-    Permission and tenant-config hooks may reserve quota or make time-sensitive
-    decisions, so the write-time re-check reuses what validation already
-    resolved instead of calling them again.
-    """
-    bank = bank_id("hooks")
-    extension = CountingTenantExtension()
-    resolver = ConfigResolver(backend=memory._backend, tenant_extension=extension)
-    try:
-        await memory.update_bank_config(bank, {"enable_observations": True}, request_context=request_context)
-
-        # An update that touches a cross-field constrained field takes the
-        # re-check path; the unconstrained one skips it. Neither may re-run a hook.
-        await resolver.update_bank_config(bank, {"recall_budget_max": 900}, request_context)
-        assert extension.tenant_config_calls == 1
-        assert extension.allowed_config_field_calls == 1
-
-        await resolver.update_bank_config(bank, {"enable_reranking": False}, request_context)
-        assert extension.tenant_config_calls == 1
-        assert extension.allowed_config_field_calls == 2
     finally:
         await memory.delete_bank(bank, request_context=request_context)

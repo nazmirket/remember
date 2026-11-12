@@ -35,7 +35,7 @@ from ..schema import fq_table
 from .attachment_content import LoadedAttachment, RetainAttachment, short_attachment_id
 
 if TYPE_CHECKING:
-    from ..memories.base import MemoriesExtension
+    from ..memories.postgres import PostgresMemories
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +373,7 @@ _IN_FLIGHT_RETAIN_MARGIN = timedelta(hours=1)
 async def reclaim_unreferenced_attachments(
     conn,
     file_storage,
-    store: "MemoriesExtension",
+    store: "PostgresMemories",
     bank_id: str,
     *,
     created_after: datetime,

@@ -8,18 +8,14 @@ describe("RememberServer construction", () => {
   it("defaults base URL to http://127.0.0.1:8888", () => {
     const server = new RememberServer();
     expect(server.getBaseUrl()).toBe("http://127.0.0.1:8888");
-    expect(server.getProfile()).toBe("default");
   });
 
-  it("honours custom profile, port, and host", () => {
+  it("uses the selected local port", () => {
     const server = new RememberServer({
       embedPackagePath: "/fork/remember-embed",
-      profile: "app",
       port: 9077,
-      host: "0.0.0.0",
     });
-    expect(server.getProfile()).toBe("app");
-    expect(server.getBaseUrl()).toBe("http://0.0.0.0:9077");
+    expect(server.getBaseUrl()).toBe("http://127.0.0.1:9077");
   });
 
   it("accepts open env pass-through without complaining about unknown keys", () => {
@@ -62,16 +58,7 @@ describe("RememberServer construction", () => {
 
     expect(spawnMock).toHaveBeenCalledWith(
       "uv",
-      [
-        "run",
-        "--directory",
-        "/fork/remember-embed",
-        "remember-embed",
-        "daemon",
-        "--profile",
-        "default",
-        "stop",
-      ],
+      ["run", "--directory", "/fork/remember-embed", "remember-embed", "daemon", "stop"],
       expect.objectContaining({ stdio: "pipe", windowsHide: true })
     );
   });
@@ -100,7 +87,7 @@ describe("RememberServer construction", () => {
       });
       await server.start();
       await server.stop();
-      expect(spawnMock).toHaveBeenCalledTimes(3);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
       for (const call of spawnMock.mock.calls) {
         expect(call[2].env).toEqual(
           expect.objectContaining({

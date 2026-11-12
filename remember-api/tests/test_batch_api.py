@@ -847,17 +847,12 @@ async def test_worker_batch_recovery(memory, request_context):
         )
 
         # Create WorkerPoller
-        from remember_api.extensions.builtin.tenant import DefaultTenantExtension
-
-        tenant_extension = DefaultTenantExtension(config={"schema": schema} if schema else {})
-
         poller = WorkerPoller(
             backend=pool,
             worker_id="test_worker_recovery",
             executor=memory,
             poll_interval_ms=100,
             schema=schema,
-            tenant_extension=tenant_extension,
             max_slots=5,
             slot_reservations={"consolidation": 2},
         )

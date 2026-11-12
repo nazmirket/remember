@@ -4,7 +4,6 @@ import uuid
 
 import pytest
 
-from remember_api.engine.memories import get_memories
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.retain import chunk_storage
 from remember_api.models import RequestContext
@@ -104,8 +103,6 @@ async def test_delete_chunks_by_ids_sweeps_links_on_both_endpoints(
     for the FK cascade to delete in executor-chosen order, reopening the #2570 deadlock.
     """
     bank_id = f"test-link-sweep-{uuid.uuid4().hex[:8]}"
-    if get_memories().store_owned_for(bank_id):
-        pytest.skip("memory_links reference memory_units rows, which this store keeps outside SQL")
 
     await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
     pool = await memory._get_pool()

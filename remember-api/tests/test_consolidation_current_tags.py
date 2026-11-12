@@ -2,18 +2,13 @@
 
 import uuid
 from collections.abc import AsyncIterator
-from functools import partial
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
 from remember_api import RequestContext
 from remember_api.config import _get_raw_config
-from remember_api.engine.consolidation import consolidator as C
 from remember_api.engine.cross_encoder import RRFPassthroughCrossEncoder
-from remember_api.engine.memories.base import MemoriesExtension, StoredMemory
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.response_models import MemoryFact
 from tests.consolidation_actions import execute_create_action, execute_update_action
@@ -101,33 +96,3 @@ async def test_update_uses_current_tags_and_records_them_in_history(
         assert set(history[0]["previous_tags"]) == set(current_tags)
     finally:
         await memory.delete_bank(bank_id, request_context=context)
-
-
-@pytest.mark.asyncio
-async def test_store_owned_update_uses_current_tags() -> None:
-    # A store that owns its rows answers through the base default: an unlocked read of its copy.
-    source_id, observation_id = uuid.uuid4(), str(uuid.uuid4())
-    stored = StoredMemory(unit_id=observation_id, text="old", fact_type="observation", tags=["status:active"])
-
-    store = SimpleNamespace(
-        get_memories=AsyncMock(return_value=[stored]), rewrite_observation=AsyncMock(return_value=True)
-    )
-    store.lock_observation_tags = partial(MemoriesExtension.lock_observation_tags, store)
-    prepared = C._PreparedUpdate(
-        update=C._UpdateAction(text="updated", observation_id=observation_id, source_fact_ids=[str(source_id)]),
-        model=MemoryFact(id=observation_id, text="old", fact_type="observation", tags=["status:obsolete"]),
-        source_mems=[],
-        source_memory_ids=[source_id],
-        source_fact_tags=["source:new"],
-        source_bounds=C._TemporalBounds(),
-        embedding_str="[0,0,1]",
-    )
-    config = SimpleNamespace(enable_observation_history=False)
-    with (
-        patch.object(C, "get_memories", return_value=store),
-        patch.object(C, "_filter_live_source_memories", AsyncMock(return_value=[source_id])),
-        patch("remember_api.config.get_config", return_value=config),
-    ):
-        engine = SimpleNamespace(_backend=SimpleNamespace(ops=SimpleNamespace(uses_observation_sources_table=False)))
-        await C._apply_update_action(object(), engine, "bank", prepared)
-    assert set(store.rewrite_observation.await_args.kwargs["tags"]) == {"status:active", "source:new"}

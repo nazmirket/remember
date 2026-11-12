@@ -6,8 +6,7 @@ on application startup. It is designed to be safe for concurrent
 execution using PostgreSQL advisory locks to coordinate between
 distributed workers.
 
-Supports multi-tenant schema isolation: migrations can target a specific
-PostgreSQL schema, allowing each tenant to have isolated tables.
+Migrations target the configured local PostgreSQL schema.
 
 Important: All migrations must be backward-compatible to allow
 safe rolling deployments.
@@ -24,7 +23,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from alembic import command
 from alembic.config import Config
@@ -39,7 +37,6 @@ from ._pg_extensions import (
     extension_schema,
     relocate_extension_to_public,
 )
-from ._pg_search import normalize_pg_search_tokenizer, pg_search_bm25_columns
 from ._text_search import mental_models_text_document
 from ._vector_index import (
     bootstrap_extension,
@@ -77,7 +74,7 @@ def _set_alembic_main_option(config: Config, name: str, value: str) -> None:
 
 
 def _detect_vector_extension(conn, vector_extension: str = "pgvector") -> str:
-    """Validate configured vector extension and preserve Azure DiskANN detection."""
+    """Validate the configured pgvector extension."""
     return detect_vector_extension(conn, vector_extension)
 
 
@@ -180,23 +177,6 @@ def _drop_index(conn: Connection, schema_name: str, index_name: str) -> None:
     conn.execute(text(f'DROP INDEX IF EXISTS "{safe_schema}"."{safe_index}"'))
 
 
-def _drop_per_bank_vector_indexes(conn: Connection, schema_name: str) -> None:
-    """Drop per-bank partial memory_units vector indexes after global ScaNN is ready."""
-    # Matched by name and column, NOT by access method: this sweep exists to clear
-    # per-bank leftovers, and one whose access method drifted after a backend switch
-    # (or an INVALID build from an interrupted CREATE INDEX CONCURRENTLY) is exactly
-    # the kind that must go. The pg_indexes version this replaced did not filter on
-    # the method either.
-    for index_name in _vector_index_names(
-        conn,
-        schema_name,
-        "memory_units",
-        name_like="idx\\_mu\\_emb\\_%",
-        vector_access_methods_only=False,
-    ):
-        _drop_index(conn, schema_name, index_name)
-
-
 def _get_schema_lock_id(schema: str) -> int:
     """
     Generate a unique advisory lock ID for a schema.
@@ -284,34 +264,6 @@ def _run_migrations_internal(database_url: str, script_location: str, schema: st
     # Set the script location (where alembic versions are stored)
     _set_alembic_main_option(alembic_cfg, "script_location", script_location)
 
-    # Extension-owned revisions, applied on the same lifecycle as core's: same run,
-    # same advisory lock, same `alembic_version` table.
-    #
-    # `version_locations` must include core's own directory explicitly. Alembic does
-    # NOT fall back to `script_location/versions` once this is set, so omitting it
-    # would silently reduce the run to the extensions' revisions — a migration that
-    # appears to succeed while applying none of core's.
-    #
-    # Each extension tree is independent: its own base, its own head, its own row in
-    # `alembic_version`. That is why `command.upgrade(..., "heads")` below is plural
-    # and always was — it already applies every branch. Alembic gives no ordering
-    # BETWEEN independent branches, so a revision needing core first declares
-    # `depends_on`; see `Extension.alembic_version_locations`.
-    # Imported here, not at module import: the loader imports extension modules,
-    # and migrations.py is itself imported by paths that must not drag an
-    # extension's dependency tree in with them.
-    from .extensions.loader import collect_alembic_version_locations
-
-    extension_locations = collect_alembic_version_locations()
-    if extension_locations:
-        core_versions = str(Path(script_location) / "versions")
-        _set_alembic_main_option(
-            alembic_cfg,
-            "version_locations",
-            os.pathsep.join([core_versions, *extension_locations]),
-        )
-        logger.info("Including %d extension migration location(s) alongside core", len(extension_locations))
-
     # Set the database URL
     _set_alembic_main_option(alembic_cfg, "sqlalchemy.url", database_url)
 
@@ -383,14 +335,8 @@ def _run_in_migration_child(target: str, kwargs: dict) -> None:
     The migration itself is short, rare and not on any hot path, so paying a process
     spawn for it is free.
 
-    The payload goes over stdin, not argv: ``run_migrations_for_schemas`` is called
-    with every tenant schema at once, and at the scale that entrypoint is documented
-    for (20k schemas) the JSON is hundreds of KB — past ``ARG_MAX`` on macOS and close
-    to it on Linux, which would fail as ``E2BIG`` only on the largest deployments.
-
-    The child inherits stdout/stderr instead of having them captured. A full sweep can
-    run for the best part of an hour; capturing would hold every line until it finished
-    and show an operator nothing while it ran.
+    The payload travels over stdin so database credentials are not exposed in argv.
+    The child inherits stdout and stderr so migration output remains visible.
     """
     payload = json.dumps({"target": target, "kwargs": kwargs})
     env = {
@@ -423,9 +369,7 @@ def run_migrations(
     - Other workers wait for the lock, then verify migrations are complete
     - If schema is already up-to-date, this is a fast no-op
 
-    Supports multi-tenant schema isolation: when a schema is specified, migrations
-    run in that schema instead of public. This allows tenant extensions to provision
-    new tenant schemas with their own isolated tables.
+    A configured schema can be used instead of public.
 
     Args:
         database_url: SQLAlchemy database URL (e.g., "postgresql://user:pass@host/db")
@@ -442,8 +386,8 @@ def run_migrations(
         # Using default location and public schema
         run_migrations("postgresql://user:pass@host/db")
 
-        # Run migrations for a specific tenant schema
-        run_migrations("postgresql://user:pass@host/db", schema="tenant_acme")
+        # Run migrations for a configured local schema
+        run_migrations("postgresql://user:pass@host/db", schema="remember")
 
         # Using custom location (when importing from another project)
         run_migrations(
@@ -764,7 +708,6 @@ def ensure_embedding_dimension(
     required_dimension: int,
     schema: str | None = None,
     vector_extension: str = "pgvector",
-    store_owned_memories: bool = False,
 ) -> None:
     """
     Ensure the embedding column dimension matches the model's dimension for all tables.
@@ -779,10 +722,6 @@ def ensure_embedding_dimension(
         required_dimension: The embedding dimension required by the model
         schema: Target PostgreSQL schema name (None for public)
         vector_extension: Configured vector extension ("pgvector", "vchord", "pgvectorscale", or "scann")
-        store_owned_memories: A custom memories store owns the memory rows and the mental-model
-            search. memory_units is left untouched (its rows live in the store), and
-            mental_models.embedding still follows the model — Postgres keeps writing it — but
-            carries no vector index, because the store answers every mental-model vector query
 
     Raises:
         RuntimeError: If dimension mismatch with existing data
@@ -810,12 +749,11 @@ def ensure_embedding_dimension(
         vector_ext = _detect_vector_extension(conn, vector_extension)
         logger.info(f"Using vector extension: {vector_ext}")
 
-        if not store_owned_memories:
-            _migrate_table_embedding_dimension(conn, schema_name, "memory_units", required_dimension, vector_ext)
+        _migrate_table_embedding_dimension(conn, schema_name, "memory_units", required_dimension, vector_ext)
         _migrate_table_embedding_dimension(
-            conn, schema_name, "mental_models", required_dimension, vector_ext, indexed=not store_owned_memories
+            conn, schema_name, "mental_models", required_dimension, vector_ext, indexed=True
         )
-        if not store_owned_memories and not _has_embedding_vector_index(conn, schema_name, "mental_models"):
+        if not _has_embedding_vector_index(conn, schema_name, "mental_models"):
             # A deployment that ran with a custom store and moved back to Postgres has the column at
             # the right dimension but no index (the store-owned branch above dropped it). Without
             # this the resize path is the only thing that ever builds it, and a matching dimension
@@ -836,7 +774,6 @@ def ensure_vector_extension(
     database_url: str,
     vector_extension: str = "pgvector",
     schema: str | None = None,
-    store_owned_memories: bool = False,
 ) -> None:
     """
     Ensure the vector indexes match the configured vector extension.
@@ -849,11 +786,8 @@ def ensure_vector_extension(
 
     Args:
         database_url: SQLAlchemy database URL
-        vector_extension: Configured vector extension ("pgvector", "vchord", "pgvectorscale", or "scann")
+        vector_extension: Configured vector extension (pgvector)
         schema: Target PostgreSQL schema name (None for public)
-        store_owned_memories: Leave memory_units untouched because a custom memories store
-            keeps the memory rows (and their vectors) outside Postgres. mental_models is not
-            in this reconcile at all; its index is handled by ensure_embedding_dimension
 
     Raises:
         RuntimeError: If extension mismatch with existing data
@@ -872,8 +806,6 @@ def ensure_vector_extension(
             ("learnings", "idx_learnings_embedding"),
             ("pinned_reflections", "idx_pinned_reflections_embedding"),
         ]
-        if store_owned_memories:
-            tables_to_check = [entry for entry in tables_to_check if entry[0] != "memory_units"]
 
         target_index_type = index_type_keyword(target_ext)
 
@@ -918,7 +850,7 @@ def ensure_vector_extension(
                 {"schema": schema_name, "table_name": table_name, "index_pattern": "%embedding%"},
             ).fetchall()
 
-            if table_name == "memory_units" and uses_per_bank_vector_indexes(target_ext):
+            if table_name == "memory_units":
                 # Per-bank backends never use a GLOBAL memory_units vector index.
                 # Every vector search is bank + fact_type scoped, and is served
                 # either by the bank's own partial index or — for a bank below
@@ -965,13 +897,7 @@ def ensure_vector_extension(
                 continue
 
             indexdef = current_index_info[0].lower()
-            if "scann" in indexdef:
-                current_index_type = "scann"
-            elif "diskann" in indexdef:
-                current_index_type = "diskann"
-            elif "vchordrq" in indexdef:
-                current_index_type = "vchordrq"
-            elif "hnsw" in indexdef:
+            if "hnsw" in indexdef:
                 current_index_type = "hnsw"
             else:
                 logger.warning(f"Unknown index type for {table_name}: {indexdef}")
@@ -984,55 +910,32 @@ def ensure_vector_extension(
                 )
                 mismatched_tables.append((table_name, index_name, current_index_type, row_count))
 
-                if row_count > 0 and target_ext != "scann":
+                if row_count > 0:
                     tables_with_data.append((table_name, row_count, current_index_type))
             else:
                 logger.debug(f"Index type OK for {table_name}: {current_index_type}")
-                if target_ext == "scann" and table_name == "memory_units":
-                    _drop_per_bank_vector_indexes(conn, schema_name)
-                    conn.commit()
 
         # If no mismatches, we're done
         if not mismatched_tables:
             logger.debug(f"All vector indexes match configured extension: {target_ext}")
             return
 
-        # If there's data in any non-ScaNN mismatched table, raise error
+        # Do not replace an incompatible populated index automatically.
         if tables_with_data:
             table_list = ", ".join([f"{table}({count} rows)" for table, count, _ in tables_with_data])
             current_index_type = tables_with_data[0][2]
-            # Map index type back to extension name for error message
-            current_ext_name = {
-                "diskann": "pgvectorscale",
-                "vchordrq": "vchord",
-                "hnsw": "pgvector",
-                "scann": "scann",
-            }.get(current_index_type, current_index_type)
-
             raise RuntimeError(
                 f"Cannot change vector extension from {current_index_type} to {target_index_type}: "
                 f"the following tables contain data: {table_list}. "
                 f"To change vector extension, you must either:\n"
                 f"  1. Re-embed all data: DELETE FROM {schema_name}.memory_units; "
                 f"DELETE FROM {schema_name}.learnings; DELETE FROM {schema_name}.pinned_reflections; then restart\n"
-                f"  2. Use the current vector extension (set REMEMBER_API_VECTOR_EXTENSION='{current_ext_name}')"
+                f"  2. Inspect the existing index before changing the database."
             )
 
         logger.info(f"Reconciling vector indexes for {target_ext}")
 
         for table_name, index_name, current_type, row_count in mismatched_tables:
-            if should_defer_index_creation(target_ext, row_count):
-                minimum_rows = minimum_rows_for_index(target_ext)
-                logger.warning(
-                    "Skipping %s index creation on %s: AlloyDB ScaNN AUTO indexes need at least %s populated "
-                    "embedding rows; table currently has %s",
-                    target_ext,
-                    table_name,
-                    minimum_rows,
-                    row_count,
-                )
-                continue
-
             # Drop existing index if it exists
             if current_type:
                 logger.info(f"Dropping {current_type} index on {table_name}")
@@ -1055,8 +958,7 @@ def ensure_vector_extension(
                 if embed_dim and embed_dim > 2000:
                     raise RuntimeError(
                         f"Embedding dimension {embed_dim} on {table_name} exceeds pgvector HNSW index limit of 2000. "
-                        f"Use an embedding model with <= 2000 dimensions, or switch to a vector extension "
-                        f"that supports higher dimensions (e.g., pgvectorscale/DiskANN or AlloyDB ScaNN)."
+                        f"Use an embedding model with <= 2000 dimensions."
                     )
 
             logger.info(f"Creating {target_index_type} index on {table_name}")
@@ -1067,216 +969,32 @@ def ensure_vector_extension(
                     {index_using_clause(target_ext)}
                 """)
             )
-            if target_ext == "scann" and table_name == "memory_units":
-                _drop_per_bank_vector_indexes(conn, schema_name)
 
         conn.commit()
         logger.info(f"Successfully reconciled vector indexes for {target_ext}")
-
-
-def _reconcile_needs_no_backfill(
-    text_search_extension: str,
-    table_name: str,
-    current_column_type: str | None,
-    current_index_type: str | None,
-) -> bool:
-    """Is this mismatch safe to reconcile even though the table holds rows?
-
-    Only one transition qualifies: ``mental_models`` sitting on the migration-time
-    native tsvector projection while pgroonga is configured. pgroonga indexes
-    ``name + content`` directly, so the replacement ``search_vector`` is a dummy
-    column with nothing to backfill — dropping the derived tsvector loses no data
-    the reconciler would have to recompute.
-
-    This state exists on every pgroonga deployment because the reconciler used to
-    check the pre-rename ``reflections`` table name and therefore never converted
-    mental models (issue #3307). Every other transition (anything writing
-    ``memory_units``, or a target column that stores a per-row tsvector/bm25vector)
-    needs values only the write path can produce, so it stays fail-closed.
-    """
-    return (
-        text_search_extension == "pgroonga"
-        and table_name == "mental_models"
-        and current_column_type == "tsvector"
-        and current_index_type in {None, "gin"}
-    )
-
-
-def _ensure_pgroonga_extension(conn: Connection) -> None:
-    try:
-        create_extension(conn, "pgroonga", cascade=True)
-    except Exception:
-        # Extension might already exist or user lacks permissions — verify
-        has_ext = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pgroonga'")).fetchone()
-        if not has_ext:
-            raise
-
-
-def _create_text_search_index(
-    conn: Connection,
-    schema_name: str,
-    table_name: str,
-    text_search_extension: str,
-    pg_search_tokenizer: str | None,
-) -> None:
-    """Build ``idx_<table>_text_search`` for the configured backend over an existing column.
-
-    Re-executable (``IF NOT EXISTS``): replicas boot concurrently and each runs the reconcile.
-    """
-    index_name = f"idx_{table_name.replace('.', '_')}_text_search"
-    if text_search_extension == "vchord":
-        logger.info(f"Creating BM25 index on {table_name}")
-        conn.execute(
-            text(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON {schema_name}.{table_name}
-                USING bm25 (search_vector bm25_catalog.bm25_ops)
-            """)
-        )
-    elif text_search_extension == "pg_textsearch":
-        logger.info(f"Creating BM25 index on {table_name}")
-        # Different expression for each table
-        if table_name == "memory_units":
-            index_expr = "(COALESCE(text, '') || ' ' || COALESCE(context, ''))"
-        else:  # mental_models
-            index_expr = mental_models_text_document()
-
-        conn.execute(
-            text(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON {schema_name}.{table_name}
-                USING bm25({index_expr})
-                WITH (text_config='english')
-            """)
-        )
-    elif text_search_extension == "pgroonga":
-        # pgroonga index expression mirrors pg_textsearch
-        if table_name == "memory_units":
-            index_expr = "(COALESCE(text, '') || ' ' || COALESCE(context, '') || ' ' || COALESCE(text_signals, ''))"
-        else:  # mental_models — page_bm25_arm repeats this verbatim
-            index_expr = mental_models_text_document()
-
-        logger.info(f"Creating pgroonga index on {table_name}")
-        # TokenBigram is the polyglot default — falls back to whitespace
-        # tokenization for space-separated languages and bigram for CJK.
-        # NormalizerNFKC150 handles Unicode normalization (full/half-width,
-        # case folding, etc.) which materially improves Japanese recall.
-        conn.execute(
-            text(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON {schema_name}.{table_name}
-                USING pgroonga ({index_expr})
-                WITH (tokenizer='TokenBigram', normalizer='NormalizerNFKC150')
-            """)
-        )
-    elif text_search_extension == "pg_search":
-        # ParadeDB BM25 index over the table's primary key and text columns.
-        # Column list mirrors what the initial / text_signals migrations create.
-        if table_name == "memory_units":
-            bm25_cols = pg_search_bm25_columns("id", ("text", "context", "text_signals"), pg_search_tokenizer)
-        else:  # mental_models
-            bm25_cols = pg_search_bm25_columns("id", ("name", "content"), pg_search_tokenizer)
-
-        logger.info(f"Creating ParadeDB BM25 index on {table_name}")
-        conn.execute(
-            text(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON {schema_name}.{table_name}
-                USING bm25 ({bm25_cols})
-                WITH (key_field='id')
-            """)
-        )
-    else:  # native
-        logger.info(f"Creating GIN index on {table_name}")
-        conn.execute(
-            text(f"""
-                CREATE INDEX IF NOT EXISTS {index_name}
-                ON {schema_name}.{table_name}
-                USING gin(search_vector)
-            """)
-        )
 
 
 def ensure_text_search_extension(
     database_url: str,
     text_search_extension: str = "native",
     schema: str | None = None,
-    pg_search_tokenizer: str | None = None,
-    store_owned_memories: bool = False,
 ) -> None:
+    """Check the local native search columns and repair missing indexes.
+
+    A populated table with an incompatible search column is left untouched:
+    recreating it could discard search data that cannot be rebuilt here.
     """
-    Ensure the text search columns and indexes match the configured extension.
+    if text_search_extension != "native":
+        raise ValueError("Only native PostgreSQL text search is supported")
 
-    This function checks the current search_vector column type and index type
-    in the database and adjusts them if necessary:
-    - If they match configured extension: no action needed
-    - If they differ and tables are empty: drop old column/index, recreate with new type
-    - If they differ and tables have data: raise error with migration guidance,
-      except for the mental-model native-to-pgroonga transition, which needs no
-      backfill (pgroonga indexes the base columns) and so is safe while populated
-
-    Args:
-        database_url: SQLAlchemy database URL
-        text_search_extension: Configured text search extension — one of
-            "native", "vchord", "pg_textsearch", "pgroonga", or "pg_search"
-        schema: Target PostgreSQL schema name (None for public)
-        pg_search_tokenizer: Optional ParadeDB tokenizer to apply to pg_search
-            BM25 text fields when indexes are created. Empty keeps the
-            ParadeDB default.
-        store_owned_memories: A custom memories store owns the memory rows and the page
-            search, so neither table is reconciled and the mental_models BM25 index is dropped:
-            nothing reads it, yet on the native backend Postgres maintains it on every page write
-            (``search_vector`` is a generated column there)
-
-    Raises:
-        RuntimeError: If extension mismatch with existing data
-    """
     schema_name = schema or "public"
-    pg_search_tokenizer = normalize_pg_search_tokenizer(pg_search_tokenizer)
-
     engine = create_engine(to_libpq_url(database_url), poolclass=NullPool)
     with engine.connect() as conn:
-        if store_owned_memories:
-            conn.execute(text(f"DROP INDEX IF EXISTS {schema_name}.idx_mental_models_text_search"))
-            conn.commit()
-            return
-
-        # Tables with search_vector columns to check
-        tables_to_check = ["memory_units", "mental_models"]
-
-        # Determine target column type and index type
-        if text_search_extension == "vchord":
-            target_column_type = "bm25vector"
-            target_index_type = "bm25"
-        elif text_search_extension == "pg_textsearch":
-            target_column_type = "text"
-            target_index_type = "bm25"
-        elif text_search_extension == "pgroonga":
-            # pgroonga indexes the base text columns directly. We keep a dummy
-            # TEXT column named search_vector for symmetry with pg_textsearch
-            # and so the column-type mismatch detection above keeps working.
-            target_column_type = "text"
-            target_index_type = "pgroonga"
-        elif text_search_extension == "pg_search":
-            # ParadeDB: same column type / access method as pg_textsearch.
-            # Disambiguated below by inspecting the index reloptions (key_field).
-            target_column_type = "text"
-            target_index_type = "bm25"
-        else:  # native
-            target_column_type = "tsvector"
-            target_index_type = "gin"
-
-        mismatched_tables = []
-        tables_with_data = []
-        # Column already in the target shape, index gone. Rebuilding the index needs no backfill
-        # (it is derived from data already in the row), so unlike a real mismatch this is safe on
-        # a populated table. The state is what a deployment that ran with a custom memories store
-        # (which drops the mental_models index) leaves behind when it moves back to Postgres.
-        missing_index_tables = []
-
-        for table_name in tables_to_check:
-            # Check if table exists
-            table_exists = conn.execute(
+        mismatched = []
+        missing_indexes = []
+        populated = []
+        for table_name in ("memory_units", "mental_models"):
+            exists = conn.execute(
                 text("""
                     SELECT EXISTS (
                         SELECT 1 FROM information_schema.tables
@@ -1285,35 +1003,17 @@ def ensure_text_search_extension(
                 """),
                 {"schema": schema_name, "table_name": table_name},
             ).scalar()
-
-            if not table_exists:
-                logger.debug(f"Table {table_name} does not exist in schema '{schema_name}', skipping")
+            if not exists:
                 continue
-
-            # Get current column type from information_schema
-            current_column_info = conn.execute(
+            column = conn.execute(
                 text("""
-                    SELECT data_type, udt_name
-                    FROM information_schema.columns
-                    WHERE table_schema = :schema
-                      AND table_name = :table_name
+                    SELECT data_type, udt_name FROM information_schema.columns
+                    WHERE table_schema = :schema AND table_name = :table_name
                       AND column_name = 'search_vector'
                 """),
                 {"schema": schema_name, "table_name": table_name},
             ).fetchone()
-
-            if not current_column_info:
-                logger.warning(f"No search_vector column found for {table_name}, will create it")
-                mismatched_tables.append((table_name, None, None, False))
-                continue
-
-            # Check column type (udt_name contains the actual type: tsvector, bm25vector, etc.)
-            current_column_type = current_column_info[1]  # udt_name
-
-            # Get current index type and definition. The definition lets us
-            # disambiguate pg_textsearch vs pg_search (both register a `bm25`
-            # access method but only pg_search uses the `key_field` reloption).
-            current_index_info = conn.execute(
+            index = conn.execute(
                 text("""
                     SELECT am.amname, pg_get_indexdef(i.oid)
                     FROM pg_class t
@@ -1321,185 +1021,57 @@ def ensure_text_search_extension(
                     JOIN pg_index x ON x.indrelid = t.oid
                     JOIN pg_class i ON i.oid = x.indexrelid
                     JOIN pg_am am ON am.oid = i.relam
-                    WHERE n.nspname = :schema
-                      AND t.relname = :table_name
+                    WHERE n.nspname = :schema AND t.relname = :table_name
                       AND i.relname = :index_name
                 """),
-                {
-                    "schema": schema_name,
-                    "table_name": table_name,
-                    "index_name": f"idx_{table_name.replace('.', '_')}_text_search",
-                },
+                {"schema": schema_name, "table_name": table_name, "index_name": f"idx_{table_name}_text_search"},
             ).fetchone()
-
-            current_index_type = current_index_info[0] if current_index_info else None
-            current_index_def = current_index_info[1] if current_index_info else None
-
-            # Detect pg_search specifically (vs pg_textsearch) via the key_field reloption
-            current_is_pg_search = bool(current_index_def and "key_field" in current_index_def)
-            want_pg_search = text_search_extension == "pg_search"
-
-            # Check if column and index types match target
-            column_matches = current_column_type == target_column_type
-            index_matches = current_index_type == target_index_type if current_index_type else False
-            # When both target and current sit at column=text/index=bm25, the
-            # access-method check alone can't tell pg_textsearch from pg_search —
-            # require the key_field reloption to agree with the configured backend.
-            if column_matches and index_matches and target_index_type == "bm25" and target_column_type == "text":
-                if current_is_pg_search != want_pg_search:
-                    index_matches = False
-
-            if column_matches and current_index_type is None:
-                logger.info(f"Text search index missing on {table_name}; rebuilding it")
-                missing_index_tables.append(table_name)
+            column_type = column[1] if column else None
+            index_type = index[0] if index else None
+            if column_type == "tsvector" and index_type == "gin":
                 continue
+            if column_type == "tsvector" and index_type is None:
+                missing_indexes.append(table_name)
+                continue
+            mismatched.append((table_name, column_type, index_type))
+            row_count = conn.execute(text(f"SELECT COUNT(*) FROM {schema_name}.{table_name}")).scalar()
+            if row_count:
+                populated.append((table_name, row_count))
 
-            if not (column_matches and index_matches):
-                logger.info(
-                    f"Text search mismatch on {table_name}: "
-                    f"column={current_column_type} (want {target_column_type}), "
-                    f"index={current_index_type} (want {target_index_type})"
-                )
-                mismatched_tables.append((table_name, current_column_type, current_index_type, current_is_pg_search))
+        if populated:
+            table_list = ", ".join(f"{table}({count} rows)" for table, count in populated)
+            raise RuntimeError(f"Cannot rebuild incompatible text search columns on populated tables: {table_list}")
 
-                # Check if table has data
-                row_count = conn.execute(text(f"SELECT COUNT(*) FROM {schema_name}.{table_name}")).scalar()
-
-                if row_count > 0 and not _reconcile_needs_no_backfill(
-                    text_search_extension,
-                    table_name,
-                    current_column_type,
-                    current_index_type,
-                ):
-                    tables_with_data.append((table_name, row_count))
-            else:
-                logger.debug(f"Text search OK for {table_name}: {current_column_type}/{current_index_type}")
-
-        if missing_index_tables and text_search_extension == "pgroonga":
-            _ensure_pgroonga_extension(conn)
-        for table_name in missing_index_tables:
-            _create_text_search_index(conn, schema_name, table_name, text_search_extension, pg_search_tokenizer)
-        if missing_index_tables:
-            conn.commit()
-
-        # If no mismatches, we're done
-        if not mismatched_tables:
-            logger.debug(f"All text search columns/indexes match configured extension: {text_search_extension}")
-            return
-
-        # If there's data in any mismatched table, raise error
-        if tables_with_data:
-            table_list = ", ".join([f"{table}({count} rows)" for table, count in tables_with_data])
-            # Detect current extension from column type, index type, and (for the
-            # text/bm25 ambiguity) the key_field reloption. tsvector is
-            # unambiguous; text could be pg_textsearch, pgroonga, or pg_search.
-            current_col_type = mismatched_tables[0][1]
-            current_idx_type = mismatched_tables[0][2]
-            first_is_pg_search = mismatched_tables[0][3]
-            if current_col_type == "tsvector":
-                current_ext = "native"
-            elif current_col_type == "bm25vector":
-                current_ext = "vchord"
-            elif current_col_type == "text" and current_idx_type == "pgroonga":
-                current_ext = "pgroonga"
-            elif current_col_type == "text":
-                current_ext = "pg_search" if first_is_pg_search else "pg_textsearch"
-            else:
-                current_ext = "unknown"
-            raise RuntimeError(
-                f"Cannot change text search extension from {current_ext} to {text_search_extension}: "
-                f"the following tables contain data: {table_list}. "
-                f"To change text search extension, you must either:\n"
-                f"  1. Clear all data: DELETE FROM {schema_name}.memory_units; "
-                f"DELETE FROM {schema_name}.mental_models; then restart\n"
-                f"  2. Use the current text search extension (set REMEMBER_API_TEXT_SEARCH_EXTENSION='{current_ext}')"
-            )
-
-        # Tables are empty, except for the backfill-free mental-model
-        # native-to-pgroonga transition admitted above.
-        #
-        # Every statement below is written to be safely re-executable: replicas
-        # boot concurrently during a rolling restart and each runs this
-        # reconciliation, so a plain CREATE/ADD would crash whichever replica
-        # loses the race to the first one's committed DDL.
-        logger.info(f"Recreating text search columns/indexes for {text_search_extension}")
-
-        for table_name, current_col_type, current_idx_type, _was_pg_search in mismatched_tables:
-            # Drop existing index if it exists
-            if current_idx_type:
-                logger.info(f"Dropping {current_idx_type} index on {table_name}")
+        for table_name, column_type, index_type in mismatched:
+            if index_type:
+                conn.execute(text(f"DROP INDEX IF EXISTS {schema_name}.idx_{table_name}_text_search"))
+            if column_type:
+                conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} DROP COLUMN IF EXISTS search_vector"))
+            if table_name == "mental_models":
                 conn.execute(
                     text(f"""
-                        DROP INDEX IF EXISTS {schema_name}.idx_{table_name.replace(".", "_")}_text_search
-                    """)
+                    ALTER TABLE {schema_name}.{table_name}
+                    ADD COLUMN IF NOT EXISTS search_vector tsvector
+                    GENERATED ALWAYS AS (
+                        to_tsvector('english', {mental_models_text_document()})
+                    ) STORED
+                """)
                 )
-
-            # Drop existing column if it exists
-            if current_col_type:
-                logger.info(f"Dropping {current_col_type} column on {table_name}")
-                conn.execute(text(f"ALTER TABLE {schema_name}.{table_name} DROP COLUMN IF EXISTS search_vector"))
-
-            # Create new column with appropriate type
-            if text_search_extension == "vchord":
-                logger.info(f"Creating bm25vector column on {table_name}")
-                # Note: vchord_bm25 extension creates types in bm25_catalog schema
+            else:
                 conn.execute(
-                    text(
-                        f"ALTER TABLE {schema_name}.{table_name} "
-                        f"ADD COLUMN IF NOT EXISTS search_vector bm25_catalog.bm25vector"
-                    )
+                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector tsvector")
                 )
-            elif text_search_extension == "pg_textsearch":
-                logger.info(f"Creating TEXT column on {table_name}")
-                # Dummy TEXT column for consistency (indexes operate on base columns)
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            elif text_search_extension == "pgroonga":
-                _ensure_pgroonga_extension(conn)
-                logger.info(f"Creating dummy TEXT search_vector on {table_name} for pgroonga")
-                # pgroonga indexes the base text columns directly, but we keep a
-                # dummy search_vector column for symmetry with pg_textsearch and
-                # so the column-type mismatch detection above keeps working.
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            elif text_search_extension == "pg_search":
-                logger.info(f"Creating TEXT column on {table_name}")
-                # Dummy TEXT column for schema symmetry; pg_search indexes operate on base columns.
-                conn.execute(
-                    text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector TEXT")
-                )
-            else:  # native
-                logger.info(f"Creating tsvector column on {table_name}")
-                if table_name == "mental_models":
-                    # No write path populates mental_models.search_vector for
-                    # native (pg_search_vector_expr passes native_inline=False),
-                    # so it must be GENERATED exactly like the learnings /
-                    # pinned_reflections migration creates it — a plain column
-                    # here would stay NULL and silently empty page search.
-                    # The 'english' config is hard-coded there and in
-                    # page_bm25_arm's native branch; keep all three in step.
-                    conn.execute(
-                        text(f"""
-                            ALTER TABLE {schema_name}.{table_name}
-                            ADD COLUMN IF NOT EXISTS search_vector tsvector
-                            GENERATED ALWAYS AS (
-                                to_tsvector('english', {mental_models_text_document()})
-                            ) STORED
-                        """)
-                    )
-                else:
-                    # memory_units writes populate this plain column with the
-                    # configured native language in ops_postgresql.
-                    conn.execute(
-                        text(f"ALTER TABLE {schema_name}.{table_name} ADD COLUMN IF NOT EXISTS search_vector tsvector")
-                    )
+            missing_indexes.append(table_name)
 
-            _create_text_search_index(conn, schema_name, table_name, text_search_extension, pg_search_tokenizer)
-
-        conn.commit()
-        logger.info(f"Successfully migrated text search to {text_search_extension}")
+        for table_name in missing_indexes:
+            conn.execute(
+                text(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_text_search
+                ON {schema_name}.{table_name} USING gin(search_vector)
+            """)
+            )
+        if mismatched or missing_indexes:
+            conn.commit()
 
 
 def _migrate_one_schema_pg(
@@ -1510,18 +1082,9 @@ def _migrate_one_schema_pg(
     embedding_dimension: int | None,
     vector_extension: str,
     text_search_extension: str,
-    pg_search_tokenizer: str | None,
     ensure_extensions: bool,
-    store_owned_memories: bool = False,
 ) -> str:
-    """Run migrations + post-migration extension setup for a SINGLE PG schema.
-
-    Module-level (not a closure) so it is picklable and can run inside a
-    ``ProcessPoolExecutor`` worker. The steps run strictly in order — this is
-    the per-tenant sequential unit; parallelism happens only *across* schemas.
-    Returns the schema name on success; raises on the first failing step so the
-    caller can attribute the failure back to this schema.
-    """
+    """Run migrations and reconcile indexes for the configured local schema."""
     run_migrations(database_url, schema=schema, migration_database_url=migration_database_url)
     if embedding_dimension is not None:
         ensure_embedding_dimension(
@@ -1529,143 +1092,53 @@ def _migrate_one_schema_pg(
             embedding_dimension,
             schema=schema,
             vector_extension=vector_extension,
-            store_owned_memories=store_owned_memories,
         )
     if ensure_extensions:
         ensure_vector_extension(
             database_url,
             vector_extension=vector_extension,
             schema=schema,
-            store_owned_memories=store_owned_memories,
         )
         ensure_text_search_extension(
             database_url,
             text_search_extension=text_search_extension,
             schema=schema,
-            pg_search_tokenizer=pg_search_tokenizer,
-            store_owned_memories=store_owned_memories,
         )
     return schema
 
 
-def _make_migration_executor(max_workers: int):
-    """Build the executor that runs per-schema migrations in parallel.
-
-    Each schema must run in its OWN process — Alembic's ``command.upgrade()``
-    uses non-thread-safe module globals (serialized in-process by
-    ``_alembic_lock``), so a thread pool would not actually run two upgrades at
-    once. ``spawn`` gives every worker a clean interpreter on all platforms,
-    avoiding the fork-of-a-multithreaded-process deadlock hazard (the API server
-    holds threads/pools when migrations run on startup).
-
-    Factored out so tests can substitute an in-process executor.
-    """
-    import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor
-
-    return ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context("spawn"))
-
-
-def run_migrations_for_schemas(
+def run_local_migrations(
     database_url: str,
-    schemas: list[str],
+    schema: str,
     *,
-    concurrency: int = 1,
     migration_database_url: str | None = None,
     embedding_dimension: int | None = None,
     vector_extension: str = "pgvector",
     text_search_extension: str = "native",
-    pg_search_tokenizer: str | None = None,
     ensure_extensions: bool = True,
-    store_owned_memories: bool = False,
 ) -> None:
-    """Run PostgreSQL migrations for many schemas, up to ``concurrency`` at once.
-
-    Within a schema the work is always sequential (migrate → embedding dim →
-    vector ext → text-search ext). Across schemas, when ``concurrency > 1`` each
-    schema is migrated in its OWN process: Alembic's ``command.upgrade()`` relies
-    on non-thread-safe module-level globals (serialized in-process by
-    ``_alembic_lock``), so threads would gain nothing — separate interpreters
-    each get a clean Alembic context. Per-schema advisory locks
-    (``_get_schema_lock_id``) keep concurrent processes from colliding on the
-    same schema across replicas.
-
-    ``database_url`` must already be resolved (e.g. an embedded ``pg0`` instance
-    started in the parent) — workers receive it verbatim and only connect.
-
-    Failures are collected per schema and re-raised together so one bad tenant
-    does not hide the status of the others.
-
-    ``store_owned_memories`` is set when a custom memories store owns the memory rows and
-    answers the mental-model vector search. The post-migration reconcile then stays off
-    ``memory_units`` (always empty) and keeps ``mental_models.embedding`` without a vector
-    index (never queried by vector). Maintaining either only fails boots for no reason,
-    e.g. on pgvector's 2000-dimension HNSW limit with a model the store handles fine.
-    """
-    # Isolated: keep psycopg2 (and every sync engine this reaches --
-    # ensure_embedding_dimension, the vector and text-search extension helpers) out of
-    # the caller's process. One child covers the whole sweep.
-    if _should_isolate_migrations():
-        _run_in_migration_child(
-            "run_migrations_for_schemas",
-            {
-                "database_url": database_url,
-                "schemas": schemas,
-                "concurrency": concurrency,
-                "migration_database_url": migration_database_url,
-                "embedding_dimension": embedding_dimension,
-                "vector_extension": vector_extension,
-                "text_search_extension": text_search_extension,
-                "pg_search_tokenizer": pg_search_tokenizer,
-                "ensure_extensions": ensure_extensions,
-                "store_owned_memories": store_owned_memories,
-            },
-        )
-        return
-
-    if not schemas:
-        return
-
-    # A kwargs BAG, assembled conditionally below. Inferred, its value type is the union of
-    # everything in it, so the `**` unpack is checked as if every key could be every type --
-    # one diagnostic per parameter of the callee, none of them real.
-    worker_kwargs: dict[str, Any] = dict(
+    """Migrate and reconcile the configured schema, optionally in a child process."""
+    options = dict(
+        database_url=database_url,
+        schema=schema,
         migration_database_url=migration_database_url,
         embedding_dimension=embedding_dimension,
         vector_extension=vector_extension,
         text_search_extension=text_search_extension,
-        pg_search_tokenizer=pg_search_tokenizer,
         ensure_extensions=ensure_extensions,
-        store_owned_memories=store_owned_memories,
     )
-
-    effective = max(1, min(concurrency, len(schemas)))
-    if effective == 1:
-        # Inline, in-process — no subprocess overhead for the common single
-        # tenant / sequential case (and keeps embedded pg0 dev simple).
-        for schema in schemas:
-            _migrate_one_schema_pg(database_url, schema, **worker_kwargs)
+    if _should_isolate_migrations():
+        _run_in_migration_child("run_local_migrations", options)
         return
-
-    logger.info("Migrating %d schema(s) with concurrency=%d", len(schemas), effective)
-    errors: dict[str, BaseException] = {}
-    with _make_migration_executor(effective) as executor:
-        futures = {
-            executor.submit(_migrate_one_schema_pg, database_url, schema, **worker_kwargs): schema for schema in schemas
-        }
-        for future in futures:
-            schema = futures[future]
-            try:
-                future.result()
-            except Exception as exc:  # noqa: BLE001 — aggregate per-schema, re-raise below
-                errors[schema] = exc
-                logger.error("Migration failed for schema '%s': %s", schema, exc)
-
-    if errors:
-        failed = ", ".join(sorted(errors))
-        raise RuntimeError(
-            f"Database migrations failed for {len(errors)} of {len(schemas)} schema(s): {failed}"
-        ) from next(iter(errors.values()))
+    _migrate_one_schema_pg(
+        database_url,
+        schema,
+        migration_database_url=migration_database_url,
+        embedding_dimension=embedding_dimension,
+        vector_extension=vector_extension,
+        text_search_extension=text_search_extension,
+        ensure_extensions=ensure_extensions,
+    )
 
 
 def _main() -> None:
@@ -1681,7 +1154,7 @@ def _main() -> None:
     os.environ[_CHILD_MARKER] = "1"
     targets = {
         "run_migrations": run_migrations,
-        "run_migrations_for_schemas": run_migrations_for_schemas,
+        "run_local_migrations": run_local_migrations,
     }
     target = payload["target"]
     if target not in targets:

@@ -99,7 +99,6 @@ class TestBindBankIdDecorator:
     async def test_engine_provider_paths_bind_and_reset_their_bank_arguments(self):
         engine = object.__new__(MemoryEngine)
         engine._reflect_llm_config = None
-        engine._operation_validator = None
         observed_bank_ids: list[str | None] = []
 
         with patch(

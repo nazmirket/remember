@@ -1,34 +1,7 @@
-"""
-Memory System for AI Agents.
+"""Remember API exports.
 
-Temporal + Semantic Memory Architecture using PostgreSQL with pgvector.
-
-**Importing this package is cheap.** The public names below resolve on first ACCESS, via the
-module ``__getattr__`` of PEP 562, rather than being pulled in at import time. That is a load-time
-property other things depend on, not a preference:
-
-``remember-api --workers N`` was killing and respawning its workers forever. uvicorn's
-multiprocess supervisor uses **spawn**, so every child rebuilds ``__main__`` by re-running
-``sys.argv[0]`` — pip's console-script wrapper — whose top line is
-``from remember_api.main import main``. That import reached this module, and this module used to
-pull in the engine, both model wrappers and the whole search stack. So each child re-imported the
-entire application BEFORE uvicorn's child bootstrap had even started, missed the supervisor's 5 s
-healthcheck, and was SIGKILLed — silently, since SIGKILL leaves no traceback — over and over.
-Measured in a dev pod: 12-16 child deaths per 70 s with one worker ever reaching startup.
-
-So: adding an eager top-level import here is not a neutral edit. It puts the cost back on every
-spawned worker, and the failure it causes does not look like an import problem — it looks like the
-pod being fine.
-
-One call stays eager on purpose, and is the only one that must. It configures how the
-process executes, and is worthless once the libraries it governs have loaded:
-
-``apply_default_thread_limits()`` caps the native ML thread pools by setting environment
-variables that OpenBLAS/OpenMP/MKL read only at load time, so it has to run before anything
-pulls in numpy/torch/onnxruntime.
-
-Laziness below makes that guarantee stronger, not weaker — those libraries now load later
-than they used to.
+Heavy engine modules load lazily. Native thread limits are installed before any
+ML libraries are imported.
 """
 
 from typing import TYPE_CHECKING

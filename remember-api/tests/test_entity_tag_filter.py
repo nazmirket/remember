@@ -292,22 +292,6 @@ async def test_http_takes_tag_groups_as_json(api_client, scoped_bank):
     assert blank.json()["total"] == 5
 
 
-@pytest.mark.asyncio
-async def test_store_seams_without_tag_kwargs_still_serve_unfiltered_reads():
-    """The defaults forward the tag kwargs only when a filter is set, so an out-of-tree store
-    whose seam predates them keeps working unfiltered — and fails loudly when asked to filter."""
-    from remember_api.engine.memories.base import MemoriesExtension
-
-    class LegacyStore:
-        async def get_entity_graph(self, *, bank_id: str, limit: int, min_count: int) -> dict:
-            return {"nodes": [], "edges": []}
-
-    page = {"conn": None, "fq_table": None, "bank_id": "b", "limit": 10, "min_count": 1}
-    assert await MemoriesExtension.entity_graph(LegacyStore(), **page) == {"nodes": [], "edges": []}  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        await MemoriesExtension.entity_graph(LegacyStore(), **page, tags=DAN)  # type: ignore[arg-type]
-
-
 def test_tags_and_tag_groups_combine_into_one_clause_with_ordered_binds():
     """Both filters at once (the engine allows it; only HTTP forbids it): AND-ed, with
     the plain tags bound first and each group leaf numbered after them."""

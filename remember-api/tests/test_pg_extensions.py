@@ -130,9 +130,6 @@ def test_ensure_extensions_in_public_repairs_every_managed_extension():
     ("backend", "expected"),
     [
         ("pgvector", ["vector"]),
-        ("pgvectorscale", ["vector", "vectorscale"]),
-        ("vchord", ["vchord"]),
-        ("scann", ["vector", "alloydb_scann"]),
     ],
 )
 def test_vector_backends_install_into_public_in_schema_mode(backend, expected):

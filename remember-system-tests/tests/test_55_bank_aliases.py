@@ -192,24 +192,6 @@ async def test_dropping_the_shown_alias_returns_the_bank_to_its_own_id(client, m
     assert row.display_alias is None
 
 
-async def test_a_clone_cannot_take_over_the_new_id(client, migrating_bank):
-    """A clone into the new id would make a real bank under it, and a real bank wins
-    over an alias: every caller already moved across would silently start reading and
-    writing the copy. The clone restores the bank row from the archive rather than
-    through bank creation, so the refusal has to hold on that path too."""
-    old, new = migrating_bank
-    other = f"systest-{uuid.uuid4().hex[:12]}"
-
-    try:
-        await client.acreate_bank(bank_id=other)
-        with pytest.raises(ApiException) as exc:
-            await client.aclone_bank(other, new)
-        assert exc.value.status == 409
-
-        assert (await client.banks.list_bank_aliases(new)).bank_id == old
-        assert len(await _fact_texts(client, new)) == 1
-    finally:
-        await client.banks.delete_bank(other)
 
 
 async def test_deleting_the_bank_frees_the_new_id_at_once(client, llm, settled, migrating_bank):

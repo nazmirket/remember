@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from remember_api.engine.memory_engine import BankLlmHealthInfo
     from remember_api.engine.response_models import Budget, RecallResult, ReflectResult
     from remember_api.engine.search.tags import TagGroup, TagsMatch
-    from remember_api.extensions import BankWriteOperation
     from remember_api.models import RequestContext
 
 
@@ -24,14 +23,6 @@ class BankConfigState:
 
     config: dict[str, Any]
     overrides: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class BankTemplateImportWrite:
-    """One bank-write decision reserved for a specific imported resource."""
-
-    operation: "BankWriteOperation"
-    target: str | None = None
 
 
 class MemoryEngineInterface(ABC):

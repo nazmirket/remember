@@ -43,11 +43,6 @@ from remember_api.engine.retain.fold import (
     plan_retain_fold,
 )
 from remember_api.engine.task_backend import SyncTaskBackend
-from remember_api.extensions.operation_validator import (
-    OperationValidatorExtension,
-    RetainResult,
-    ValidationResult,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -608,14 +603,12 @@ async def test_fetch_foldable_peers_returns_submission_order(backend, bank):
 
 
 def _poller(backend, worker_id: str):
-    from remember_api.extensions.builtin.tenant import DefaultTenantExtension
     from remember_api.worker.poller import WorkerPoller
 
     return WorkerPoller(
         backend=backend,
         worker_id=worker_id,
         executor=lambda _: None,
-        tenant_extension=DefaultTenantExtension(config={}),
     )
 
 
@@ -840,52 +833,6 @@ async def test_concurrent_appends_keep_every_turn(memory_stub_emb, request_conte
 
 
 @pytest.mark.asyncio
-async def test_an_append_whose_session_commit_loses_its_race_is_redone(memory_stub_emb, request_context):
-    """A store that owns its documents writes an append through a retain session, and the
-    session's commit is a compare-and-set on the content hash the append read. When another
-    append lands between the read and that commit, the commit loses — after the pipeline's own
-    retry has returned. The append must be redone on the newer document, in a fresh session,
-    keeping both turns; failing it would drop the turn."""
-    from remember_api.engine.memories import get_memories, set_memories
-    from tests.test_memories_extension import InMemoryMemories
-
-    bank_id = f"test_append_session_race_{_ts()}"
-    document_id = "conversation"
-
-    class RacedOnce(InMemoryMemories):
-        sessions = 0
-
-        async def begin_retain(self, *, bank_id, config):
-            session = await super().begin_retain(bank_id=bank_id, config=config)
-            self.sessions += 1
-            if self.sessions == 2:  # the second append's first attempt
-                commit = session.commit
-
-                async def raced_commit():
-                    doc = self.documents[document_id]
-                    doc["original_text"] += "\nTURN_RACER Erin joined the team."
-                    doc["content_hash"] = "moved-by-a-concurrent-append"
-                    return await commit()
-
-                session.commit = raced_commit
-            return session
-
-    store = RacedOnce({})
-    previous = get_memories()
-    set_memories(store)
-    try:
-        await _append(memory_stub_emb, request_context, bank_id, document_id, "TURN_ONE Alice works at Google.")
-        await _append(memory_stub_emb, request_context, bank_id, document_id, "TURN_TWO Bob works at Microsoft.")
-    finally:
-        set_memories(previous)
-
-    text = store.documents[document_id]["original_text"]
-    missing = [marker for marker in ("TURN_ONE", "TURN_RACER", "TURN_TWO") if marker not in text]
-    assert not missing, f"turns lost: {missing}; document is {text!r}"
-    assert store.sessions == 3, "the lost attempt is redone in a fresh session"
-
-
-@pytest.mark.asyncio
 async def test_sequential_appends_are_unaffected(memory_stub_emb, request_context):
     """The compare-and-swap must not cost the uncontended path anything."""
     bank_id = f"test_append_sequential_{_ts()}"
@@ -905,210 +852,27 @@ async def test_sequential_appends_are_unaffected(memory_stub_emb, request_contex
 # ---------------------------------------------------------------------------
 
 
-class _RecordingValidator(OperationValidatorExtension):
-    """Minimal stand-in for a metering extension — records what it is told.
-
-    A real subclass rather than a duck-typed stub: the engine calls the
-    pre-operation validators too, so a bare recorder would never be reached.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(config={})
-        self.results: list[RetainResult] = []
-
-    async def validate_retain(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_recall(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_reflect(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def on_retain_complete(self, result: RetainResult) -> None:
-        self.results.append(result)
-
-
-@pytest.mark.asyncio
-async def test_folded_execution_reports_one_hook_per_operation(memory_stub_emb, request_context):
-    """A fold must not make submissions invisible to metering, or double-count them.
-
-    Each folded operation gets its own hook with its own content slice, and the
-    LLM usage summed across the fold equals what the single execution spent —
-    the same total the callers would have seen retaining one at a time.
-    """
-    validator = _RecordingValidator()
-    memory_stub_emb._operation_validator = validator
-    try:
-        bank_id = f"test_fold_hooks_{_ts()}"
-        document_id = "conversation"
-        fold_members = [
-            FoldMemberRef(operation_id="op-1", items_count=1),
-            FoldMemberRef(operation_id="op-2", items_count=1),
-            FoldMemberRef(operation_id="op-3", items_count=1),
-        ]
-
-        _, usage = await memory_stub_emb.retain_batch_async(
-            bank_id=bank_id,
-            contents=[
-                {"content": "TURN_ONE Alice works at Google.", "document_id": document_id},
-                {"content": "TURN_TWO Bob works at Microsoft.", "document_id": document_id},
-                {"content": "TURN_THREE Carol works at Amazon.", "document_id": document_id},
-            ],
-            request_context=request_context,
-            return_usage=True,
-            fold_members=fold_members,
-        )
-    finally:
-        memory_stub_emb._operation_validator = None
-
-    assert len(validator.results) == 3, "one post-retain hook per folded operation"
-
-    # Totals are preserved: the fold reports exactly the execution's usage.
-    assert sum(r.llm_total_tokens for r in validator.results) == usage.total_tokens
-    assert sum(r.llm_input_tokens for r in validator.results) == usage.input_tokens
-    assert sum(r.llm_output_tokens for r in validator.results) == usage.output_tokens
-
-    # ...carried by the first member, with the rest at zero (see RetainResult.folded_with).
-    assert validator.results[0].llm_total_tokens == usage.total_tokens
-    assert all(r.llm_total_tokens == 0 for r in validator.results[1:])
-
-    # Every member knows the operations it ran with, itself excluded.
-    assert validator.results[0].folded_with == ["op-2", "op-3"]
-    assert validator.results[1].folded_with == ["op-1", "op-3"]
-    assert validator.results[2].folded_with == ["op-1", "op-2"]
-
-    # Each member sees only the content it submitted.
-    assert [r.contents[0]["content"][:8] for r in validator.results] == ["TURN_ONE", "TURN_TWO", "TURN_THR"]
-
-
 @pytest.mark.asyncio
 async def test_folded_json_array_appends_to_a_new_document_merge(memory_stub_emb, request_context):
     """Queued conversation appends to a document that does not exist yet are folded into one
     execution. Their arrays must merge into ONE array, as they do onto a stored body — the
     merge used to run only when a body was stored, so these were newline-joined into
     ``[...]\n[...]``, which is not JSON and loses turn-aware chunking (#2409)."""
-    validator = _RecordingValidator()
-    memory_stub_emb._operation_validator = validator
     turns = [
         [{"role": "user", "content": "TURN_ONE Alice works at Google."}],
         [{"role": "user", "content": "TURN_TWO Bob works at Microsoft."}],
     ]
-    try:
-        bank_id = f"test_fold_json_new_doc_{_ts()}"
-        document_id = "conversation"
-        await memory_stub_emb.retain_batch_async(
-            bank_id=bank_id,
-            contents=[
-                {"content": json.dumps(turn), "document_id": document_id, "update_mode": "append"} for turn in turns
-            ],
-            request_context=request_context,
-            fold_members=[
-                FoldMemberRef(operation_id="op-1", items_count=1),
-                FoldMemberRef(operation_id="op-2", items_count=1),
-            ],
-        )
-    finally:
-        memory_stub_emb._operation_validator = None
+    bank_id = f"test_fold_json_new_doc_{_ts()}"
+    document_id = "conversation"
+    await memory_stub_emb.retain_batch_async(
+        bank_id=bank_id,
+        contents=[{"content": json.dumps(turn), "document_id": document_id, "update_mode": "append"} for turn in turns],
+        request_context=request_context,
+        fold_members=[
+            FoldMemberRef(operation_id="op-1", items_count=1),
+            FoldMemberRef(operation_id="op-2", items_count=1),
+        ],
+    )
 
     doc = await memory_stub_emb.get_document(document_id, bank_id, request_context=request_context)
     assert json.loads(doc["original_text"]) == turns[0] + turns[1]
-    # The merge must not blur which operation submitted what.
-    assert [json.loads(r.contents[0]["content"]) for r in validator.results] == turns
-
-
-@pytest.mark.asyncio
-async def test_unfolded_retain_reports_one_hook_with_full_usage(memory_stub_emb, request_context):
-    """The ordinary path is untouched: one hook, all the usage, no folded_with."""
-    validator = _RecordingValidator()
-    memory_stub_emb._operation_validator = validator
-    try:
-        bank_id = f"test_unfolded_hooks_{_ts()}"
-        _, usage = await memory_stub_emb.retain_batch_async(
-            bank_id=bank_id,
-            contents=[{"content": "Alice works at Google.", "document_id": "doc"}],
-            request_context=request_context,
-            return_usage=True,
-        )
-    finally:
-        memory_stub_emb._operation_validator = None
-
-    assert len(validator.results) == 1
-    assert validator.results[0].llm_total_tokens == usage.total_tokens
-    assert validator.results[0].folded_with is None
-
-
-@pytest.mark.asyncio
-async def test_a_retried_retain_keeps_the_documents_a_buffering_session_never_committed(
-    memory_stub_emb, request_context, monkeypatch
-):
-    """Regression for #6099: a store whose retain session buffers until ``commit()``.
-
-    Document 1's facts reach the session, then document 2 fails, so the session aborts and
-    nothing is written. The retry must extract document 1 again. It used to find a
-    "facts committed" checkpoint for document 1 — written when its facts were handed to the
-    session, not when the store made them durable — skip it, and finish with the document empty.
-    """
-    from remember_api.engine.memories import get_memories, set_memories
-    from remember_api.engine.retain import orchestrator
-    from tests.test_memories_extension import InMemoryMemories
-
-    bank_id = f"test_session_retry_{_ts()}"
-    operation_id = uuid.uuid4()
-    contents = [
-        {"content": "Alice works at Google as a software engineer.", "document_id": "doc-1"},
-        {"content": "Bob works at Microsoft as a product manager.", "document_id": "doc-2"},
-    ]
-
-    real_retain_batch = orchestrator.retain_batch
-    doc1_done = asyncio.Event()
-    fail_doc2 = True
-
-    async def retain_batch(**kwargs):
-        if kwargs.get("document_id") == "doc-1":
-            try:
-                return await real_retain_batch(**kwargs)
-            finally:
-                doc1_done.set()
-        if kwargs.get("document_id") == "doc-2" and fail_doc2:
-            # Fail only once document 1 is fully through the pipeline (and checkpointed, if the
-            # orchestrator still writes one), as an LLM call that ran out of retries would.
-            await doc1_done.wait()
-            raise RuntimeError("extraction failed")
-        return await real_retain_batch(**kwargs)
-
-    monkeypatch.setattr(orchestrator, "retain_batch", retain_batch)
-
-    store = InMemoryMemories({})
-    previous = get_memories()
-    set_memories(store)
-    try:
-        pool = await memory_stub_emb._get_pool()
-        await pool.execute("INSERT INTO banks (bank_id, name) VALUES ($1, $1)", bank_id)
-        await pool.execute(
-            "INSERT INTO async_operations (operation_id, bank_id, operation_type, status) "
-            "VALUES ($1, $2, 'retain', 'processing')",
-            operation_id,
-            bank_id,
-        )
-        with pytest.raises(RuntimeError, match="extraction failed"):
-            await memory_stub_emb.retain_batch_async(
-                bank_id=bank_id,
-                contents=contents,
-                request_context=request_context,
-                operation_id=str(operation_id),
-            )
-        assert not store.rows, "an aborted buffering session wrote nothing"
-
-        fail_doc2 = False
-        await memory_stub_emb.retain_batch_async(
-            bank_id=bank_id,
-            contents=contents,
-            request_context=request_context,
-            operation_id=str(operation_id),
-        )
-    finally:
-        set_memories(previous)
-
-    documents_with_facts = {row.document_id for row in store.rows.values()}
-    assert documents_with_facts == {"doc-1", "doc-2"}

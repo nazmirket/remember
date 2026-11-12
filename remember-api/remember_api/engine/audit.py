@@ -41,12 +41,9 @@ DESTRUCTIVE_ACTIONS: frozenset[str] = frozenset(
         "delete_page_node",
         "delete_directive",
         "delete_bank_alias",
-        "delete_webhook",
         "clear_observations",
         "clear_memory_observations",
         "import_bank_template",
-        "import_documents",
-        "import_bank_transfer",
     }
 )
 

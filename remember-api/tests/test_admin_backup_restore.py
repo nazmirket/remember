@@ -19,7 +19,6 @@ import pytest_asyncio
 import remember_api.admin.cli as admin_cli
 from remember_api import migrations
 from remember_api.admin.cli import BACKUP_TABLES, _backup, _restore
-from remember_api.extensions import Tenant
 from remember_api.migrations import run_migrations
 
 # Run these tests sequentially since they do full DB backup/restore
@@ -743,15 +742,8 @@ async def test_restore_succeeds_when_target_has_additional_nullable_column(backu
 
 
 @pytest.mark.asyncio
-async def test_backup_restore_includes_extension_table(backup_test_schema):
-    """An extension-declared bank-scoped table rides along backup + restore.
-
-    Simulates a table an extension provisions in the tenant schema (core knows
-    nothing about it). Passing the augmented ``backup_tables`` list — as
-    ``_effective_backup_tables()`` builds from ``TenantExtension.extra_bank_tables``
-    — must back it up AND restore it, so restore's ``TRUNCATE ... CASCADE`` can't
-    silently drop it.
-    """
+async def test_backup_restore_includes_explicitly_selected_table(backup_test_schema):
+    """An explicitly selected additional table survives backup and restore."""
     db_url, schema_name, _fq, _embeddings = backup_test_schema
     extra = "ext_audit_receipts"
     effective = [*BACKUP_TABLES, extra]
@@ -806,8 +798,8 @@ async def test_backup_restore_includes_extension_table(backup_test_schema):
 
 
 @pytest.mark.asyncio
-async def test_run_migration_without_schema_discovers_and_deduplicates_schemas(monkeypatch):
-    """run-db-migration without --schema should include the base schema and deduplicate tenant schemas."""
+async def test_run_migration_without_schema_uses_base_schema(monkeypatch):
+    """run-db-migration without --schema uses the configured base schema."""
     # Patches migrations.run_migrations and asserts on the calls, so the work must
     # stay in-process; an isolated migration would never see the patch.
     # See migrations._should_isolate_migrations.
@@ -821,14 +813,6 @@ async def test_run_migration_without_schema_discovers_and_deduplicates_schemas(m
         "ensure_text_search_extension": [],
     }
 
-    class MockTenantExtension:
-        async def list_tenants(self):
-            return [
-                Tenant(schema="public"),
-                Tenant(schema="tenant_demo"),
-                Tenant(schema="tenant_demo"),
-            ]
-
     async def fake_resolve_database_url(db_url: str) -> str:
         return f"resolved::{db_url}"
 
@@ -839,7 +823,6 @@ async def test_run_migration_without_schema_discovers_and_deduplicates_schemas(m
         database_url: str,
         vector_extension: str = "pgvector",
         schema: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
         calls["ensure_vector_extension"].append((database_url, vector_extension, schema))
 
@@ -847,16 +830,11 @@ async def test_run_migration_without_schema_discovers_and_deduplicates_schemas(m
         database_url: str,
         text_search_extension: str = "native",
         schema: str | None = None,
-        pg_search_tokenizer: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
-        calls["ensure_text_search_extension"].append((database_url, text_search_extension, pg_search_tokenizer, schema))
+        calls["ensure_text_search_extension"].append((database_url, text_search_extension, schema))
 
     monkeypatch.setenv("REMEMBER_API_DATABASE_URL", "postgresql://test")
-    monkeypatch.setattr(admin_cli, "load_extension", lambda *args, **kwargs: MockTenantExtension())
     monkeypatch.setattr(admin_cli, "resolve_database_url", fake_resolve_database_url)
-    # Extension-table provisioning does a real connect; these tests mock the DB, so stub it.
-    monkeypatch.setattr(admin_cli, "_provision_extra_bank_tables", AsyncMock())
 
     from remember_api import migrations as migrations_module
 
@@ -864,20 +842,17 @@ async def test_run_migration_without_schema_discovers_and_deduplicates_schemas(m
     monkeypatch.setattr(migrations_module, "ensure_vector_extension", fake_ensure_vector_extension)
     monkeypatch.setattr(migrations_module, "ensure_text_search_extension", fake_ensure_text_search_extension)
 
-    schemas = await admin_cli._run_migration("postgresql://test")
+    schema = await admin_cli._run_migration("postgresql://test")
 
-    assert schemas == ["public", "tenant_demo"]
+    assert schema == "public"
     assert calls["run_migrations"] == [
         ("resolved::postgresql://test", "public"),
-        ("resolved::postgresql://test", "tenant_demo"),
     ]
     assert calls["ensure_vector_extension"] == [
         ("resolved::postgresql://test", "pgvector", "public"),
-        ("resolved::postgresql://test", "pgvector", "tenant_demo"),
     ]
     assert calls["ensure_text_search_extension"] == [
-        ("resolved::postgresql://test", "native", "", "public"),
-        ("resolved::postgresql://test", "native", "", "tenant_demo"),
+        ("resolved::postgresql://test", "native", "public"),
     ]
 
 
@@ -899,10 +874,6 @@ async def test_run_migration_without_schema_runs_optional_post_migration_hooks(m
         "ensure_text_search_extension": [],
     }
 
-    class MockTenantExtension:
-        async def list_tenants(self):
-            return [Tenant(schema="tenant_demo")]
-
     async def fake_resolve_database_url(db_url: str) -> str:
         return f"resolved::{db_url}"
 
@@ -914,7 +885,6 @@ async def test_run_migration_without_schema_runs_optional_post_migration_hooks(m
         dimension: int,
         schema: str | None = None,
         vector_extension: str = "pgvector",
-        store_owned_memories: bool = False,
     ) -> None:
         calls["ensure_embedding_dimension"].append((database_url, dimension, schema, vector_extension))
 
@@ -922,7 +892,6 @@ async def test_run_migration_without_schema_runs_optional_post_migration_hooks(m
         database_url: str,
         vector_extension: str = "pgvector",
         schema: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
         calls["ensure_vector_extension"].append((database_url, vector_extension, schema))
 
@@ -930,15 +899,10 @@ async def test_run_migration_without_schema_runs_optional_post_migration_hooks(m
         database_url: str,
         text_search_extension: str = "native",
         schema: str | None = None,
-        pg_search_tokenizer: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
-        calls["ensure_text_search_extension"].append((database_url, text_search_extension, pg_search_tokenizer, schema))
+        calls["ensure_text_search_extension"].append((database_url, text_search_extension, schema))
 
-    monkeypatch.setattr(admin_cli, "load_extension", lambda *args, **kwargs: MockTenantExtension())
     monkeypatch.setattr(admin_cli, "resolve_database_url", fake_resolve_database_url)
-    # Extension-table provisioning does a real connect; these tests mock the DB, so stub it.
-    monkeypatch.setattr(admin_cli, "_provision_extra_bank_tables", AsyncMock())
 
     from remember_api import migrations as migrations_module
 
@@ -947,28 +911,24 @@ async def test_run_migration_without_schema_runs_optional_post_migration_hooks(m
     monkeypatch.setattr(migrations_module, "ensure_vector_extension", fake_ensure_vector_extension)
     monkeypatch.setattr(migrations_module, "ensure_text_search_extension", fake_ensure_text_search_extension)
 
-    schemas = await admin_cli._run_migration(
+    schema = await admin_cli._run_migration(
         "postgresql://test",
         base_schema="public",
         embedding_dimension=384,
     )
 
-    assert schemas == ["public", "tenant_demo"]
+    assert schema == "public"
     assert calls["run_migrations"] == [
         ("resolved::postgresql://test", "public"),
-        ("resolved::postgresql://test", "tenant_demo"),
     ]
     assert calls["ensure_embedding_dimension"] == [
         ("resolved::postgresql://test", 384, "public", "pgvector"),
-        ("resolved::postgresql://test", 384, "tenant_demo", "pgvector"),
     ]
     assert calls["ensure_vector_extension"] == [
         ("resolved::postgresql://test", "pgvector", "public"),
-        ("resolved::postgresql://test", "pgvector", "tenant_demo"),
     ]
     assert calls["ensure_text_search_extension"] == [
-        ("resolved::postgresql://test", "native", "", "public"),
-        ("resolved::postgresql://test", "native", "", "tenant_demo"),
+        ("resolved::postgresql://test", "native", "public"),
     ]
 
 
@@ -989,10 +949,6 @@ async def test_run_migration_with_schema_only_runs_requested_schema(monkeypatch)
         "ensure_text_search_extension": [],
     }
 
-    class MockTenantExtension:
-        async def list_tenants(self):
-            return [Tenant(schema="tenant_demo"), Tenant(schema="tenant_other")]
-
     async def fake_resolve_database_url(db_url: str) -> str:
         return f"resolved::{db_url}"
 
@@ -1003,7 +959,6 @@ async def test_run_migration_with_schema_only_runs_requested_schema(monkeypatch)
         database_url: str,
         vector_extension: str = "pgvector",
         schema: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
         calls["ensure_vector_extension"].append((database_url, vector_extension, schema))
 
@@ -1011,15 +966,10 @@ async def test_run_migration_with_schema_only_runs_requested_schema(monkeypatch)
         database_url: str,
         text_search_extension: str = "native",
         schema: str | None = None,
-        pg_search_tokenizer: str | None = None,
-        store_owned_memories: bool = False,
     ) -> None:
-        calls["ensure_text_search_extension"].append((database_url, text_search_extension, pg_search_tokenizer, schema))
+        calls["ensure_text_search_extension"].append((database_url, text_search_extension, schema))
 
-    monkeypatch.setattr(admin_cli, "load_extension", lambda *args, **kwargs: MockTenantExtension())
     monkeypatch.setattr(admin_cli, "resolve_database_url", fake_resolve_database_url)
-    # Extension-table provisioning does a real connect; these tests mock the DB, so stub it.
-    monkeypatch.setattr(admin_cli, "_provision_extra_bank_tables", AsyncMock())
 
     from remember_api import migrations as migrations_module
 
@@ -1027,12 +977,12 @@ async def test_run_migration_with_schema_only_runs_requested_schema(monkeypatch)
     monkeypatch.setattr(migrations_module, "ensure_vector_extension", fake_ensure_vector_extension)
     monkeypatch.setattr(migrations_module, "ensure_text_search_extension", fake_ensure_text_search_extension)
 
-    schemas = await admin_cli._run_migration("postgresql://test", schema="tenant_demo")
+    schema = await admin_cli._run_migration("postgresql://test", schema="tenant_demo")
 
-    assert schemas == ["tenant_demo"]
+    assert schema == "tenant_demo"
     assert calls["run_migrations"] == [("resolved::postgresql://test", "tenant_demo")]
     assert calls["ensure_vector_extension"] == [("resolved::postgresql://test", "pgvector", "tenant_demo")]
-    assert calls["ensure_text_search_extension"] == [("resolved::postgresql://test", "native", "", "tenant_demo")]
+    assert calls["ensure_text_search_extension"] == [("resolved::postgresql://test", "native", "tenant_demo")]
 
 
 @pytest.mark.parametrize(
@@ -1041,7 +991,7 @@ async def test_run_migration_with_schema_only_runs_requested_schema(monkeypatch)
 )
 @pytest.mark.asyncio
 async def test_run_migration_threads_ensure_extensions_flag(monkeypatch, ensure_extensions, expected):
-    """The --skip-extension-reconcile flag (ensure_extensions=False) must reach run_migrations_for_schemas.
+    """The --skip-extension-reconcile flag (ensure_extensions=False) must reach the local migration runner.
 
     The post-migration vector/text-search reconcile only does work on a backend change, so operators
     can skip it on a no-change re-migration over many tenant schemas. Verify the flag is threaded through
@@ -1053,18 +1003,19 @@ async def test_run_migration_threads_ensure_extensions_flag(monkeypatch, ensure_
     async def fake_resolve_database_url(db_url: str) -> str:
         return f"resolved::{db_url}"
 
-    def fake_run_migrations_for_schemas(database_url, schemas, **kwargs):
+    def fake_run_local_migrations(database_url, schemas, **kwargs):
         captured["ensure_extensions"] = kwargs.get("ensure_extensions")
 
-    monkeypatch.setattr(admin_cli, "load_extension", lambda *args, **kwargs: None)
     monkeypatch.setattr(admin_cli, "resolve_database_url", fake_resolve_database_url)
-    # Extension-table provisioning does a real connect; these tests mock the DB, so stub it.
-    monkeypatch.setattr(admin_cli, "_provision_extra_bank_tables", AsyncMock())
 
     from remember_api import migrations as migrations_module
 
-    monkeypatch.setattr(migrations_module, "run_migrations_for_schemas", fake_run_migrations_for_schemas)
+    monkeypatch.setattr(migrations_module, "run_local_migrations", fake_run_local_migrations)
 
     await admin_cli._run_migration("postgresql://test", schema="tenant_demo", ensure_extensions=ensure_extensions)
 
     assert captured["ensure_extensions"] is expected
+
+
+def test_effective_backup_tables_contains_local_tables():
+    assert admin_cli._effective_backup_tables() == admin_cli.BACKUP_TABLES

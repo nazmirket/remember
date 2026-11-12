@@ -1134,76 +1134,6 @@ class TestMentalModelHistory:
 
         await memory.delete_bank(bank_id, request_context=request_context)
 
-    async def test_history_runs_the_bank_read_validator(self, memory: MemoryEngine, request_context, monkeypatch):
-        """History is gated by validate_bank_read, like every other bank read.
-
-        It used to authenticate the tenant and stop there, so a caller holding a
-        valid token for another tenant could read a bank's whole revision history
-        one path segment away from the 403 that `get_mental_model` returns (#3831).
-        The operation is its own `GET_MENTAL_MODEL_HISTORY`, not the mental-model
-        get: an extension has to be able to allow reading a model's current content
-        while refusing the superseded snapshots behind it.
-        """
-        from remember_api.extensions import BankReadOperation
-        from remember_api.extensions.operation_validator import (
-            OperationValidationError,
-            OperationValidatorExtension,
-            ValidationResult,
-        )
-
-        seen: list[BankReadOperation] = []
-
-        class _Validator(OperationValidatorExtension):
-            def __init__(self, config, allow: bool):
-                super().__init__(config)
-                self.allow = allow
-
-            async def validate_retain(self, ctx):
-                return ValidationResult.accept()
-
-            async def validate_recall(self, ctx):
-                return ValidationResult.accept()
-
-            async def validate_reflect(self, ctx):
-                return ValidationResult.accept()
-
-            async def validate_bank_read(self, ctx):
-                seen.append(ctx.operation)
-                return ValidationResult.accept() if self.allow else ValidationResult.reject("not your bank")
-
-        bank_id = f"test-mm-history-acl-{uuid.uuid4().hex[:8]}"
-        await memory.ensure_bank_profile(bank_id, request_context=request_context)
-        mm = await memory.create_mental_model(
-            bank_id=bank_id,
-            name="Test Model",
-            source_query="What is the test?",
-            content="Original content",
-            request_context=request_context,
-        )
-        await memory.update_mental_model(
-            bank_id=bank_id,
-            mental_model_id=mm["id"],
-            content="Updated content",
-            request_context=request_context,
-        )
-
-        monkeypatch.setattr(memory, "_operation_validator", _Validator(config={}, allow=False))
-        with pytest.raises(OperationValidationError):
-            await memory.get_mental_model_history(bank_id, mm["id"], request_context=request_context)
-        # A model the caller may not read must not leak through the miss path either:
-        # the gate runs before the row lookup, so an unknown id is refused, not 404'd.
-        with pytest.raises(OperationValidationError):
-            await memory.get_mental_model_history(bank_id, "nonexistent-id", request_context=request_context)
-        assert seen == [BankReadOperation.GET_MENTAL_MODEL_HISTORY] * 2
-
-        seen.clear()
-        monkeypatch.setattr(memory, "_operation_validator", _Validator(config={}, allow=True))
-        history = await memory.get_mental_model_history(bank_id, mm["id"], request_context=request_context)
-        assert len(history) == 1
-        assert seen == [BankReadOperation.GET_MENTAL_MODEL_HISTORY]
-
-        await memory.delete_bank(bank_id, request_context=request_context)
-
 
 # Every scope shape a model can have, against every kind of write. The rule
 # (#4857): a tag-scoped model goes stale only on a write *in* its tags — never
@@ -2868,7 +2798,6 @@ class TestMentalModelRefreshMaxTokens:
         }
 
         engine = MemoryEngine.__new__(MemoryEngine)
-        engine._operation_validator = None
         engine._authenticate_tenant = AsyncMock(return_value=None)  # type: ignore[method-assign]
         engine.get_mental_model = AsyncMock(return_value=mental_model)  # type: ignore[method-assign]
         engine.reflect_async = AsyncMock(  # type: ignore[method-assign]

@@ -43,25 +43,7 @@ def _chunk_key(key: str, index: int) -> str:
 
 
 class PostgreSQLFileStorage(FileStorage):
-    """
-    PostgreSQL BYTEA-based file storage.
-
-    Stores files directly in PostgreSQL using BYTEA columns.
-    This is the default storage backend - zero configuration required!
-
-    Pros:
-    - Works out of the box (no external dependencies)
-    - Transactional consistency with database
-    - Simple backups (included in pg_dump)
-    - Good performance for <10MB files
-
-    Cons:
-    - Database bloat for large/many files
-    - Not ideal for distributed deployments
-    - Higher cost than object storage at scale
-
-    For production/scale, consider S3FileStorage instead.
-    """
+    """Store local attachment bytes in PostgreSQL BYTEA columns."""
 
     def __init__(
         self,

@@ -19,7 +19,6 @@ and mirrors Django's ``DatabaseOperations`` architecture.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 from .base import DatabaseConnection
 from .result import ResultRow
@@ -687,110 +686,6 @@ class DataAccessOps(ABC):
         PG uses "trigram" (pg_trgm).
         Non-PG uses "oracle_fuzzy" (UTL_MATCH) or falls back to "full".
         """
-        ...
-
-    # -- Webhook operations ------------------------------------------------
-
-    @abstractmethod
-    async def create_webhook(
-        self,
-        conn: DatabaseConnection,
-        table: str,
-        webhook_id: Any,
-        bank_id: str,
-        url: str,
-        secret: str | None,
-        event_types: list[str],
-        enabled: bool,
-        http_config_json: str,
-    ) -> ResultRow | None:
-        """Insert a webhook row and return the created row."""
-        ...
-
-    @abstractmethod
-    async def list_webhooks_for_bank(
-        self,
-        conn: DatabaseConnection,
-        table: str,
-        bank_id: str,
-        limit: int,
-        offset: int,
-    ) -> list[ResultRow]:
-        """One page of a bank's webhooks, ordered by created_at then id.
-
-        The id breaks ties so a page boundary never falls inside a group of rows
-        that share a created_at.
-        """
-        ...
-
-    @abstractmethod
-    async def count_webhooks_for_bank(
-        self,
-        conn: DatabaseConnection,
-        table: str,
-        bank_id: str,
-    ) -> int:
-        """Total number of webhooks registered for a bank."""
-        ...
-
-    @abstractmethod
-    async def get_webhooks_for_dispatch(
-        self,
-        conn: DatabaseConnection,
-        webhook_table: str,
-        bank_id: str,
-    ) -> list[ResultRow]:
-        """Get enabled webhooks matching a bank (bank-specific + global NULL rows)."""
-        ...
-
-    @abstractmethod
-    async def update_webhook(
-        self,
-        conn: DatabaseConnection,
-        table: str,
-        webhook_id: Any,
-        bank_id: str,
-        set_clauses: list[str],
-        params: list[Any],
-    ) -> ResultRow | None:
-        """Update a webhook and return the updated row, or None if not found."""
-        ...
-
-    @abstractmethod
-    async def delete_webhook(
-        self,
-        conn: DatabaseConnection,
-        table: str,
-        webhook_id: Any,
-        bank_id: str,
-    ) -> bool:
-        """Delete a webhook. Returns True if a row was deleted."""
-        ...
-
-    @abstractmethod
-    async def list_webhook_deliveries(
-        self,
-        conn: DatabaseConnection,
-        ops_table: str,
-        webhook_id: str,
-        bank_id: str,
-        limit: int,
-        cursor: str | None,
-    ) -> list[ResultRow]:
-        """List webhook delivery operations for a specific webhook, newest first."""
-        ...
-
-    @abstractmethod
-    async def insert_webhook_delivery_task(
-        self,
-        conn: DatabaseConnection,
-        ops_table: str,
-        operation_id: Any,
-        bank_id: str,
-        payload_json: str,
-        timestamp: Any,
-    ) -> None:
-        """Insert a webhook delivery task into async_operations."""
         ...
 
     # -- Graph maintenance queue -----------------------------------------

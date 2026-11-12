@@ -247,7 +247,7 @@ class LocalSTCrossEncoder(CrossEncoderModel):
 
     Call initialize() during startup to load the model and avoid cold starts.
 
-    Default model is remember-ai/hs-rerank-1:
+    Default model is hindsight-ai/hs-rerank-1:
     - Multilingual (en, es, fr, de, pt, ja, ko, zh)
     - Small model (114M parameters, a 15M-parameter transformer per pass)
     - Trained for Remember memory re-ranking
@@ -275,7 +275,7 @@ class LocalSTCrossEncoder(CrossEncoderModel):
 
         Args:
             model_name: Name of the CrossEncoder model to use.
-                       Default: remember-ai/hs-rerank-1
+                       Default: hindsight-ai/hs-rerank-1
             max_concurrent: Maximum concurrent reranking calls (default: 2).
                            Higher values may cause CPU thrashing under load.
             force_cpu: Force CPU mode for local inference.

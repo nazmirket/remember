@@ -12,7 +12,6 @@ and asserting on a mocked connection cannot tell a working statement from one Po
 refuses to plan.
 """
 
-import types
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
@@ -33,7 +32,6 @@ from remember_api.engine.consolidation.consolidator import (
     _TemporalBounds,
     run_consolidation_job,
 )
-from remember_api.engine.memories import MemoriesExtension
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.response_models import MemoryFact
 
@@ -330,41 +328,3 @@ def test_temporal_bounds_of_reads_a_source_aggregation():
     assert _TemporalBounds.of(aggregation) == _TemporalBounds(
         event_date=EARLY, occurred_start=EARLY, occurred_end=LATE, mentioned_at=LATE
     )
-
-
-@pytest.mark.asyncio
-async def test_store_owned_fold_merges_bounds_like_the_sql_path():
-    """A memories store that owns its rows re-upserts the whole observation, so the fold has to
-    apply the same widening in Python."""
-    stored = types.SimpleNamespace(
-        source_memory_ids=["existing"],
-        tags=["t1"],
-        created_at=EARLY,
-        event_date=LATE,
-        occurred_start=LATE,
-        occurred_end=EARLY,
-        mentioned_at=EARLY,
-    )
-    store = types.SimpleNamespace(get_memories=AsyncMock(return_value=[stored]), upsert_observation=AsyncMock())
-
-    with patch.object(consolidator.embedding_utils, "generate_embeddings_batch", AsyncMock(return_value=[[0.1, 0.2]])):
-        # The store-owned fold is the base-class default; call it on the stub store.
-        await MemoriesExtension.fold_sources_into_observation(
-            store,
-            conn=object(),
-            fq_table=None,
-            bank_id="bank-1",
-            observation_id=str(uuid.uuid4()),
-            expected_text="twin",
-            merged_text="merged",
-            source_memory_ids=[uuid.uuid4()],
-            bounds=_TemporalBounds(event_date=EARLY, occurred_end=LATE, mentioned_at=LATE),
-            embeddings=object(),
-        )
-
-    record = store.upsert_observation.await_args.kwargs["record"]
-    assert record.event_date == EARLY
-    assert record.occurred_start == LATE
-    assert record.occurred_end == LATE
-    assert record.mentioned_at == LATE
-    assert record.created_at == EARLY, "fields the fold does not own are preserved"

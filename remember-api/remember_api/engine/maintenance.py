@@ -1,62 +1,7 @@
-"""Background maintenance loop.
+"""Run recurring retention, consolidation, Page refresh and attachment maintenance.
 
-A single periodic loop that drives all of Remember's recurring housekeeping
-from one place, so we don't spawn a separate ``asyncio`` task per concern:
-
-- **Retention sweeps** (configurable, default hourly): delete ``audit_log`` and
-  ``llm_requests`` rows older than their configured retention, across *all*
-  tenant schemas.
-- **Consolidation reconcile** (configurable, default 5 min): re-schedule
-  consolidation for banks that have eligible-but-unscheduled facts and no
-  in-flight consolidation. This recovers facts that were stranded when a
-  consolidation operation failed terminally and left them with
-  ``consolidated_at IS NULL AND consolidation_failed_at IS NULL`` and nothing to
-  re-trigger them.
-- **Scheduled mental model refresh** (configurable check cadence, default 5 min):
-  refresh mental models whose ``trigger.refresh_cron`` schedule is due, but only
-  when the model is stale (new memories in its scope since its last refresh), so
-  a scheduled tick never burns an LLM call to regenerate identical content. The
-  per-model schedule lives in the cron expression; this loop only decides when to
-  *check*. The same scan runs ``trigger.full_refresh_cron``, the independent
-  schedule on which a (typically delta) model gets a full-mode refresh (#4340).
-- **Attachment sweep** (configurable, default daily): delete the images and files
-  of retains that failed after the API stored them — attachments their document
-  still does not reference a day later (never created, or its update failed).
-  Discovery is one call to ``banks_with_attachments_in_window``.
-  Documents are read from the memories store, so this covers banks whose
-  documents live outside SQL too.
-
-The loop wakes on a short fixed tick and runs each job when its own
-``last_run + interval`` is due (run-at-start, then on interval), so adding jobs
-with different cadences doesn't burst CPU. Cross-tenant discovery goes through
-server-side PL/pgSQL routines (``schemas_with_expired_rows`` and
-``banks_needing_consolidation``, in the configured schema — see ``fq_routine``) —
-one round-trip each — instead of a per-schema query storm, which matters at
-thousands of tenants.
-
-The loop runs in *every* API/worker process with no leader election, so a job that
-enqueues work must make that enqueue idempotent or the fleet queues one wave per
-process. Operation cleanup deletes a bounded batch per schema; the consolidation
-reconcile and the scheduled mental model refresh both dedupe against in-flight
-operations inside the inserting transaction (see ``_submit_async_operation``);
-retention deletes in bounded chunks claimed with SKIP LOCKED, so concurrent
-sweepers split the work instead of colliding (see ``_purge_table_in_batches``).
-
-The *work* is therefore safe to run everywhere. The *discovery* in front of it is
-not free: one round-trip on the wire is still one query per tenant schema inside
-the routine, every process pays it, and its cost scales with tenant count while
-the work it finds does not. Two things keep that proportionate, and both are
-load-bearing rather than incidental:
-
-- **Cadence is config, not a constant.** Every job's interval is a server-level
-  setting. The jobs that delete rows whose retention is measured in *days*
-  (retention, operation cleanup) have no reason to probe every schema every
-  minute.
-- **The first tick is jittered** (``maintenance_start_jitter_seconds``). Every job
-  is due on the first tick, so a fleet started together — a deploy, a rolling
-  restart — would fire every cross-tenant probe in every process at the same
-  instant. SKIP LOCKED keeps that correct but not cheap: the probes are reads, and
-  N of them land at once. Steady state self-staggers; startup does not.
+Each job operates on the configured local PostgreSQL schema. Jobs run on their own
+cadences; startup jitter and bounded deletes limit contention across processes.
 """
 
 from __future__ import annotations
@@ -75,10 +20,9 @@ from ..models import RequestContext
 from ..schema_context import _current_schema
 from .db_utils import acquire_with_retry
 from .retain.attachment_store import ATTACHMENT_SWEEP_GRACE
-from .schema import fq_routine, fq_table, fq_table_explicit
+from .schema import fq_table, fq_table_explicit
 
 if TYPE_CHECKING:
-    from .memories.base import MemoriesExtension
     from .memory_engine import MemoryEngine
 
 logger = logging.getLogger(__name__)
@@ -242,7 +186,7 @@ class MaintenanceLoop:
 
         Every job is due the first time ``_is_due`` sees it, so N processes started
         together would run all of them at the same instant — the one moment where
-        redundant cross-tenant discovery and overlapping DELETEs actually collide.
+        maintenance queries and overlapping DELETEs would otherwise collide.
         Spreading the *first* tick is enough: from then on each process keeps its
         own phase.
         """
@@ -303,8 +247,7 @@ class MaintenanceLoop:
     # ── retention ──────────────────────────────────────────────────────────
 
     async def _run_retention(self, cfg: ConfigLike) -> None:
-        # Retention days are static server-level config, so one global cutoff
-        # applies to every tenant schema (the routine sweeps them all).
+        # Retention days are static server-level configuration.
         # Not gated on audit_log_enabled: it is per-bank overridable, so a bank
         # may be writing audit rows while the deployment default is off. Gating
         # the purge on the global flag would let those rows accumulate forever.
@@ -314,39 +257,18 @@ class MaintenanceLoop:
             await self._purge_expired("llm_requests", "started_at", cfg.llm_trace_retention_days)
 
     async def _purge_expired(self, table: str, ts_col: str, days: int) -> int:
-        """Delete rows older than ``days`` from ``table`` across every tenant schema.
-
-        Only for the retention tables (``audit_log``, ``llm_requests``): chunking
-        deletes by primary key assumes the ``id`` column both of them carry.
-        Returns the number of rows deleted by *this* process.
-        """
-        backend = self._engine._backend
-        try:
-            async with acquire_with_retry(backend, max_retries=1) as conn:
-                rows = await conn.fetch(
-                    f"SELECT * FROM {fq_routine('schemas_with_expired_rows')}($1, $2, $3)", table, ts_col, days
-                )
-        except Exception as e:
-            logger.warning(f"Retention sweep discovery failed for {table}: {e}")
-            return 0
-
-        # One cutoff for the whole sweep: a per-chunk NOW() would let the window
-        # creep forward mid-run, which makes "deleted < batch means done" wrong.
+        """Delete expired rows in bounded batches from the local schema."""
+        schema = get_config().database_schema or "public"
+        qschema = '"' + schema.replace('"', '""') + '"'
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        total = 0
-        for row in rows:
-            schema = row[0]
-            # schema names come from pg_class; quote defensively all the same.
-            qschema = '"' + schema.replace('"', '""') + '"'
-            try:
-                deleted = await self._purge_table_in_batches(f"{qschema}.{table}", ts_col, cutoff)
-            except Exception as e:
-                logger.warning(f"Retention sweep failed for {schema}.{table}: {e}")
-                continue
-            if deleted:
-                total += deleted
-                logger.info(f"Retention sweep {schema}.{table}: DELETE {deleted}")
-        return total
+        try:
+            deleted = await self._purge_table_in_batches(f"{qschema}.{table}", ts_col, cutoff)
+        except Exception as e:
+            logger.warning(f"Retention sweep failed for {schema}.{table}: {e}")
+            return 0
+        if deleted:
+            logger.info(f"Retention sweep {schema}.{table}: DELETE {deleted}")
+        return deleted
 
     async def _purge_table_in_batches(self, table: str, ts_col: str, cutoff: datetime) -> int:
         """Delete expired rows from one qualified table in bounded chunks.
@@ -397,87 +319,29 @@ class MaintenanceLoop:
     # ── terminal operation cleanup ─────────────────────────────────────────
 
     async def _run_operation_cleanup(self, cfg: ConfigLike) -> None:
-        """Prune one bounded batch of expired terminal operations per tenant schema.
-
-        Previously this rode the worker's task-claiming loop, so it only fired
-        when that loop happened to iterate and was interleaved with claiming. It
-        is a periodic housekeeping sweep like the retention jobs above, so it
-        belongs on the same schedule.
-
-        Discovery is one cross-tenant round-trip (``schemas_with_expired_operations``)
-        rather than a connection + prune transaction per tenant; pending and
-        processing rows are never prunable, so a schema holding only in-flight
-        work is correctly reported as having nothing to do.
-        """
-        engine = self._engine
-        backend = engine._backend
-        try:
-            async with acquire_with_retry(backend, max_retries=1) as conn:
-                rows = await conn.fetch(
-                    f"SELECT * FROM {fq_routine('schemas_with_expired_operations')}($1)",
-                    cfg.operation_retention_days,
-                )
-        except Exception as e:
-            logger.warning(f"Operation cleanup discovery failed: {e}")
-            return
-        if not rows:
-            return
-
-        # Prune only schemas the deployment actually serves. The routine reports
-        # every schema owning an async_operations table, including ones tenant
-        # discovery doesn't claim.
-        try:
-            tenants = await engine._tenant_extension.list_tenants()
-        except Exception as e:
-            logger.warning(f"Operation cleanup tenant discovery failed: {e}")
-            return
-        known = {t.schema for t in tenants} | {get_config().database_schema}
-
+        """Prune one bounded batch of expired local terminal operations."""
+        schema = get_config().database_schema or "public"
+        table = fq_table_explicit("async_operations", schema)
         cutoff = datetime.now(timezone.utc) - timedelta(days=cfg.operation_retention_days)
-        pruned = 0
-        for row in rows:
-            schema = row[0]
-            if schema not in known:
-                continue
-            # Oracle resolves unqualified names from a context-bound session
-            # schema; on PostgreSQL this is harmless and fq_table stays explicit.
-            token = _current_schema.set(schema)
-            try:
-                table = fq_table_explicit("async_operations", schema)
-                async with acquire_with_retry(backend, max_retries=1) as conn:
-                    # Delete export archives owned by rows about to be pruned first,
-                    # so the file-storage blobs don't outlive their operation row.
-                    # Same batch bound as the prune below: the two walk the same
-                    # ordered window so a backlog doesn't re-purge already-deleted
-                    # archives on every cycle.
-                    await engine.purge_expired_export_archives(
+        try:
+            backend = self._engine._backend
+            async with acquire_with_retry(backend, max_retries=1) as conn:
+                async with conn.transaction():
+                    deleted = await backend.ops.prune_terminal_operations(
                         conn, table, cutoff, batch_size=cfg.operation_cleanup_batch_size
                     )
-                    async with conn.transaction():
-                        deleted = await backend.ops.prune_terminal_operations(
-                            conn, table, cutoff, batch_size=cfg.operation_cleanup_batch_size
-                        )
-                if deleted:
-                    pruned += deleted
-                    logger.info(f"Operation cleanup pruned {deleted} expired terminal operations from {schema}")
-            except Exception as e:
-                logger.warning(f"Operation cleanup failed for schema {schema}: {e}")
-            finally:
-                _current_schema.reset(token)
-        if pruned:
-            logger.info(f"Operation cleanup: pruned {pruned} operation(s) total")
+            if deleted:
+                logger.info(f"Operation cleanup pruned {deleted} expired terminal operations from {schema}")
+        except Exception as e:
+            logger.warning(f"Operation cleanup failed for schema {schema}: {e}")
 
     # ── attachment sweep ─────────────────────────────────────────────────────
 
     async def _run_attachment_sweep(self) -> None:
         """Delete the attachments of retains that failed before writing their document.
 
-        Discovery is one cross-tenant round trip (``banks_with_attachments_in_window``)
-        returning the banks that stored an attachment in the window — a handful on a
-        large install — and the engine reads each of those banks' documents from its
-        memories store and drops the attachments the text does not show. Safe in
-        every process at once: the delete is idempotent, and a second sweeper finds
-        nothing left.
+        Scan banks with attachments in the local schema and remove unreferenced files.
+        The delete is idempotent if two maintenance processes overlap.
         """
         engine = self._engine
         now = datetime.now(timezone.utc)
@@ -485,8 +349,12 @@ class MaintenanceLoop:
         created_after = created_before - _ATTACHMENT_SWEEP_LOOKBACK
         try:
             async with acquire_with_retry(engine._backend, max_retries=1) as conn:
+                schema = get_config().database_schema or "public"
+                table = fq_table_explicit("attachments", schema)
                 rows = await conn.fetch(
-                    f"SELECT schema_name, bank_id FROM {fq_routine('banks_with_attachments_in_window')}($1, $2)",
+                    f"SELECT DISTINCT $1::text AS schema_name, bank_id FROM {table} "
+                    "WHERE created_at >= $2 AND created_at < $3",
+                    schema,
                     created_after,
                     created_before,
                 )
@@ -495,27 +363,14 @@ class MaintenanceLoop:
             return
         if not rows:
             return
-        # Only schemas the deployment serves, like operation cleanup; the routine
-        # reports every schema owning an attachments table.
-        try:
-            tenants = await engine._tenant_extension.list_tenants()
-        except Exception as e:
-            logger.warning(f"Attachment sweep tenant discovery failed: {e}")
-            return
-        tenant_by_schema = {t.schema: t for t in tenants}
-        default_schema = get_config().database_schema
-
         removed = 0
         for row in rows:
             if self._stop.is_set():
                 break
             schema, bank_id = row["schema_name"], row["bank_id"]
-            tenant = tenant_by_schema.get(schema)
-            if tenant is None and schema != default_schema:
-                continue
             token = _current_schema.set(schema)
             try:
-                context = RequestContext(internal=True, tenant_id=tenant.tenant_id if tenant else None)
+                context = RequestContext(internal=True)
                 removed += await engine.reclaim_unreferenced_attachments(
                     bank_id, created_after, created_before, context
                 )
@@ -533,56 +388,30 @@ class MaintenanceLoop:
         engine = self._engine
         try:
             async with acquire_with_retry(engine._backend, max_retries=1) as conn:
-                rows = await conn.fetch(
-                    f"SELECT schema_name, bank_id FROM {fq_routine('banks_needing_consolidation')}()"
-                )
+                from .memories import sql_memories
+
+                schema = get_config().database_schema or "public"
+                rows = await sql_memories().banks_needing_consolidation(conn=conn, schema=schema)
         except Exception as e:
             logger.warning(f"Consolidation reconcile discovery failed: {e}")
             return
 
-        from .memories import get_memories
-
-        store = get_memories()
-        if not rows and not store.store_owned:
+        if not rows:
             return
-
-        # Only enqueue into schemas the worker actually polls (tenant discovery),
-        # otherwise the op would never be claimed and would block future reconciles
-        # for that bank. The tenant_id (when the extension provides one) lets
-        # config resolution honor tenant-level overrides.
-        try:
-            tenants = await engine._tenant_extension.list_tenants()
-        except Exception as e:
-            logger.warning(f"Consolidation reconcile tenant discovery failed: {e}")
-            return
-        tenant_by_schema = {t.schema: t for t in tenants}
-        default_schema = get_config().database_schema
 
         targets = [_ReconcileTarget(schema_name=r["schema_name"], bank_id=r["bank_id"]) for r in rows]
-        if store.store_owned:
-            # The routine reads `memory_units`, which holds none of a store-owned bank's
-            # memories, so it never names one: a fact stranded there (or requeued by
-            # `recover_consolidation`) waited forever. Ask the store, per schema, the same
-            # question the backlog gauge asks it. One store call per bank, like that gauge.
-            targets += await self._store_banks_needing_consolidation(store, {default_schema, *tenant_by_schema})
         if not targets:
             return
 
         submitted = 0
-        skipped_unknown = 0
         for target in targets:
             if self._stop.is_set():
                 break
             schema = target.schema_name
             bank_id = target.bank_id
-            tenant = tenant_by_schema.get(schema)
-            if tenant is None and schema != default_schema:
-                skipped_unknown += 1
-                continue
-            tenant_id = tenant.tenant_id if tenant else None
             token = _current_schema.set(schema)
             try:
-                context = RequestContext(internal=True, tenant_id=tenant_id)
+                context = RequestContext(internal=True)
                 resolved = await engine._config_resolver.resolve_full_config(bank_id, context)
                 # Mirror the retain-time auto-consolidation gate (memory_engine): both
                 # observations and auto-consolidation must be enabled for this bank.
@@ -595,54 +424,16 @@ class MaintenanceLoop:
             finally:
                 _current_schema.reset(token)
 
-        if submitted or skipped_unknown:
-            logger.info(
-                f"Consolidation reconcile: scheduled {submitted} bank(s)"
-                + (f", skipped {skipped_unknown} in unrecognized schema(s)" if skipped_unknown else "")
-            )
-
-    async def _store_banks_needing_consolidation(
-        self, store: MemoriesExtension, schemas: set[str]
-    ) -> list[_ReconcileTarget]:
-        """The store-owned banks with a consolidation backlog.
-
-        The schema is set for each, as a request would set it: a store derives where a bank's
-        memories live from it.
-        """
-        engine = self._engine
-        found: list[_ReconcileTarget] = []
-        for schema in sorted(schemas):
-            token = _current_schema.set(schema)
-            try:
-                async with acquire_with_retry(engine._backend, max_retries=1) as conn:
-
-                    async def _bank_ids(schema: str = schema) -> list[str]:
-                        rows = await conn.fetch(f"SELECT bank_id FROM {fq_table_explicit('banks', schema)}")
-                        return [row["bank_id"] for row in rows]
-
-                    counts = await store.count_consolidation_backlog(
-                        conn=conn, schema=schema, per_bank=True, bank_ids=_bank_ids
-                    )
-            except Exception as e:
-                logger.warning(f"Consolidation reconcile store discovery failed for schema {schema}: {e}")
-                continue
-            finally:
-                _current_schema.reset(token)
-            found.extend(
-                _ReconcileTarget(schema_name=schema, bank_id=bank_id)
-                for bank_id, count in counts.items()
-                if bank_id is not None and count > 0 and store.store_owned_for(bank_id)
-            )
-        return found
+        if submitted:
+            logger.info(f"Consolidation reconcile: scheduled {submitted} bank(s)")
 
     # ── scheduled mental model refresh ───────────────────────────────────────
 
     async def _run_scheduled_mm_refresh(self) -> None:
         """Refresh mental models whose ``trigger.refresh_cron`` or ``full_refresh_cron`` is due.
 
-        Discovery (the set of cron-scheduled models, minus any with an in-flight
-        refresh) is one cross-tenant round-trip via
-        ``mental_models_with_cron()``. Cron *due-ness* is evaluated here in
+        Discovery reads cron-scheduled models without an in-flight refresh from
+        the local schema. Cron *due-ness* is evaluated here in
         Python — a scheduled fire has elapsed when the most recent cron boundary at
         or before now is later than ``last_refreshed_at`` — because cron arithmetic
         isn't expressible in plain SQL. Each due model is refreshed only when it is
@@ -660,11 +451,26 @@ class MaintenanceLoop:
         engine = self._engine
         try:
             async with acquire_with_retry(engine._backend, max_retries=1) as conn:
-                # SELECT *, and the full-refresh columns read with .get() below: a
-                # deployment that owns this routine (alembic/_owned.py) may still return
-                # the shape before d4f7a2c9e1b5, and its refresh_cron schedules must keep
-                # working — it just gets no full_refresh_cron until it adds the columns.
-                rows = await conn.fetch(f"SELECT * FROM {fq_routine('mental_models_with_cron')}()")
+                schema = get_config().database_schema or "public"
+                models = fq_table_explicit("mental_models", schema)
+                operations = fq_table_explicit("async_operations", schema)
+                rows = await conn.fetch(
+                    f"""
+                    SELECT $1::text AS schema_name, mm.bank_id::text, mm.id::text AS mental_model_id,
+                           mm.trigger->>'refresh_cron' AS refresh_cron, mm.last_refreshed_at,
+                           mm.trigger->>'full_refresh_cron' AS full_refresh_cron, mm.last_full_refreshed_at
+                    FROM {models} mm
+                    WHERE (COALESCE(mm.trigger->>'refresh_cron', '') <> ''
+                        OR COALESCE(mm.trigger->>'full_refresh_cron', '') <> '')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {operations} o
+                          WHERE o.bank_id = mm.bank_id AND o.operation_type = 'refresh_mental_model'
+                            AND o.status IN ('pending', 'processing')
+                            AND o.task_payload->>'mental_model_id' = mm.id::text
+                      )
+                    """,
+                    schema,
+                )
         except Exception as e:
             logger.warning(f"Scheduled mental model refresh discovery failed: {e}")
             return
@@ -699,19 +505,7 @@ class MaintenanceLoop:
         if not due:
             return
 
-        # Only enqueue into schemas the worker actually polls (tenant discovery),
-        # otherwise the op would never be claimed. The tenant_id (when provided)
-        # lets config resolution honor tenant-level overrides.
-        try:
-            tenants = await engine._tenant_extension.list_tenants()
-        except Exception as e:
-            logger.warning(f"Scheduled mental model refresh tenant discovery failed: {e}")
-            return
-        tenant_by_schema = {t.schema: t for t in tenants}
-        default_schema = get_config().database_schema
-
         submitted = 0
-        skipped_unknown = 0
         skipped_fresh = 0
         skipped_in_flight = 0
         skipped_paused = 0
@@ -722,14 +516,9 @@ class MaintenanceLoop:
             schema = row["schema_name"]
             bank_id = row["bank_id"]
             mm_id = row["mental_model_id"]
-            tenant = tenant_by_schema.get(schema)
-            if tenant is None and schema != default_schema:
-                skipped_unknown += 1
-                continue
-            tenant_id = tenant.tenant_id if tenant else None
             token = _current_schema.set(schema)
             try:
-                context = RequestContext(internal=True, tenant_id=tenant_id)
+                context = RequestContext(internal=True)
                 # Skip if nothing in the model's scope changed since its last
                 # refresh — a scheduled refresh must not regenerate identical
                 # content. compute_mental_model_is_stale needs the model's tags +
@@ -776,11 +565,10 @@ class MaintenanceLoop:
             finally:
                 _current_schema.reset(token)
 
-        if submitted or skipped_unknown or skipped_fresh or skipped_in_flight or skipped_paused:
+        if submitted or skipped_fresh or skipped_in_flight or skipped_paused:
             logger.info(
                 f"Scheduled mental model refresh: scheduled {submitted} model(s)"
                 + (f", {skipped_fresh} up-to-date" if skipped_fresh else "")
                 + (f", {skipped_in_flight} already in flight" if skipped_in_flight else "")
                 + (f", {skipped_paused} paused after a failed refresh" if skipped_paused else "")
-                + (f", skipped {skipped_unknown} in unrecognized schema(s)" if skipped_unknown else "")
             )

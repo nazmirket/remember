@@ -185,10 +185,10 @@ class TestMetricsCollector:
         attributes = collector.operation_duration.record.call_args[0][1]
         assert attributes["success"] == "false"
 
-    def test_record_operation_validator_rejection_recorded_as_rejected(self, collector):
+    def test_record_validation_rejection_recorded_as_rejected(self, collector):
         """An operation a validator refused did not fail: it is counted with
         success="rejected", outside the failure rate, like a cancellation."""
-        from remember_api.extensions.operation_validator import OperationValidationError
+        from remember_api.errors import OperationValidationError
 
         with pytest.raises(OperationValidationError):
             with collector.record_operation("retain", bank_id="test_bank", source="api"):
@@ -201,7 +201,7 @@ class TestMetricsCollector:
         """A rejection re-raised as an HTTPException ``from`` it is still a rejection."""
         from fastapi import HTTPException
 
-        from remember_api.extensions.operation_validator import OperationValidationError
+        from remember_api.errors import OperationValidationError
 
         with pytest.raises(HTTPException):
             with collector.record_operation("recall", bank_id="test_bank", source="api"):

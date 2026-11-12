@@ -20,7 +20,6 @@ from remember_api import config as config_module
 from remember_api.api import create_app
 from remember_api.engine.reflect.tools_schema import get_reflect_tools
 from remember_api.engine.response_models import Budget
-from remember_api.engine.transfer.schema import TransferChunk, TransferDocument, TransferFact, TransferManifest
 
 
 @pytest_asyncio.fixture
@@ -321,44 +320,5 @@ async def test_per_bank_override_holds_on_delta_reretain(memory, request_context
                 request_context=request_context,
             )
             await assert_no_text(step)
-    finally:
-        await memory.delete_bank(bank_id, request_context=request_context)
-
-
-@pytest.mark.asyncio
-@pytest.mark.memory_backend_incompatible
-async def test_per_bank_override_holds_on_document_import(memory, request_context):
-    """Importing an archive into a bank with store_document_text=false drops the archive's raw
-    document and chunk text, the same as retaining it would (issue #6249)."""
-    bank_id = f"test_sdt_import_{datetime.now(timezone.utc).timestamp()}"
-    document_id = "doc-import-001"
-    document = TransferDocument(
-        id=document_id,
-        original_text="Alice works at Acme Corp.",
-        chunks=[TransferChunk(chunk_index=0, chunk_text="Alice works at Acme Corp.")],
-        facts=[TransferFact(text="Alice works at Acme Corp.", fact_type="world", chunk_index=0)],
-    )
-    manifest = TransferManifest(source_bank_id="source", document_count=1, fact_count=1, observation_count=0)
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("manifest.json", manifest.model_dump_json())
-        zf.writestr("documents/000000.json", document.model_dump_json())
-
-    try:
-        await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
-        await memory._config_resolver.update_bank_config(bank_id, {"store_document_text": False})
-
-        submission = await memory.import_documents_async(bank_id, archive.getvalue(), request_context, "skip")
-        status = await memory.get_operation_status(bank_id, submission["operation_id"], request_context=request_context)
-        assert status["status"] == "completed", status
-
-        doc = await memory.get_document(document_id, bank_id, request_context=request_context)
-        assert doc is not None
-        assert doc["original_text"] is None, "import ignored the bank's store_document_text=false"
-        chunks = await memory.list_document_chunks(
-            bank_id=bank_id, document_id=document_id, request_context=request_context
-        )
-        assert chunks["total"] == 1
-        assert chunks["items"][0]["chunk_text"] == "", "import stored chunk text"
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)

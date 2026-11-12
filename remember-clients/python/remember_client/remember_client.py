@@ -47,10 +47,8 @@ DEFAULT_USER_AGENT = f"remember-client-python/{_CLIENT_VERSION}"
 ContentBlock = dict[str, Any]
 from remember_client_api.api import (
     audit_api,
-    bank_transfer_api,
     banks_api,
     directives_api,
-    document_transfer_api,
     documents_api,
     entities_api,
     knowledge_base_api,  # deprecated alias, remove in 2.x
@@ -59,7 +57,6 @@ from remember_client_api.api import (
     monitoring_api,
     operations_api,
     pages_api,
-    webhooks_api,
 )
 from remember_client_api.models import (
     memory_item,
@@ -224,7 +221,7 @@ class Remember:
     REPLs but will raise errors if an event loop is already running.
 
     For operations not covered here (documents, entities, operations/async jobs,
-    webhooks, file uploads, monitoring), use the low-level API clients exposed
+    file uploads, monitoring), use the low-level API clients exposed
     as properties on this class. These are auto-generated from the OpenAPI spec
     and cover the full API surface. **All low-level methods are async-only.**
 
@@ -247,7 +244,7 @@ class Remember:
 
     Example — low-level API for advanced operations::
 
-        # Access documents, entities, operations, webhooks, etc.
+        # Access documents, entities, operations, etc.
         # All low-level methods are async-only — use 'await' or asyncio.run().
 
         # List documents in a bank
@@ -270,7 +267,6 @@ class Remember:
         - ``client.mental_models``: Mental model management (MentalModelsApi)
         - ``client.directives``: Directive management (DirectivesApi)
         - ``client.operations``: Async operation tracking (OperationsApi)
-        - ``client.webhooks``: Webhook management (WebhooksApi)
         - ``client.monitoring``: Health/version checks (MonitoringApi)
     """
 
@@ -326,11 +322,8 @@ class Remember:
         self._documents_api = documents_api.DocumentsApi(self._api_client)
         self._entities_api = entities_api.EntitiesApi(self._api_client)
         self._operations_api = operations_api.OperationsApi(self._api_client)
-        self._webhooks_api = webhooks_api.WebhooksApi(self._api_client)
         self._monitoring_api = monitoring_api.MonitoringApi(self._api_client)
         self._audit_api = audit_api.AuditApi(self._api_client)
-        self._document_transfer_api = document_transfer_api.DocumentTransferApi(self._api_client)
-        self._bank_transfer_api = bank_transfer_api.BankTransferApi(self._api_client)
 
     # -- Retain suspension ------------------------------------------------------
 
@@ -417,10 +410,6 @@ class Remember:
         """Low-level Operations API — get status, list, cancel, retry async operations."""
         return self._operations_api
 
-    @property
-    def webhooks(self) -> webhooks_api.WebhooksApi:
-        """Low-level Webhooks API — create, list, update, delete webhooks and deliveries."""
-        return self._webhooks_api
 
     @property
     def monitoring(self) -> monitoring_api.MonitoringApi:
@@ -2357,368 +2346,6 @@ class Remember:
         """Deprecated: use :meth:`aexport_pages`."""
         _warn_renamed("aexport_knowledge_base", "aexport_pages")
         return await self.aexport_pages(*args, **kwargs)
-
-    # Document transfer (export / import between banks — no LLM re-extraction)
-
-    @property
-    def document_transfer(self) -> document_transfer_api.DocumentTransferApi:
-        """Low-level Document Transfer API — submit an async export, download an archive, import."""
-        return self._document_transfer_api
-
-    def export_documents(
-        self,
-        bank_id: str,
-        document_ids: list[str] | None = None,
-        include_observations: bool = False,
-        include_knowledge_base: bool = False,
-        *,
-        poll_interval: float = 2.0,
-        timeout: float = 300.0,
-    ) -> bytes:
-        """
-        Export a bank's documents as a transfer ZIP archive (blocking convenience).
-
-        Export runs as a background operation server-side (a whole-bank export can be
-        large). This helper submits it, polls the operation to completion, downloads
-        the archive, and returns its bytes — so callers get a single synchronous call.
-        For the raw async flow use ``client.document_transfer`` and ``client.operations``.
-
-        Args:
-            bank_id: Source bank.
-            document_ids: Specific document ids to export; omit for the whole bank.
-            include_observations: Also export consolidated observations (whole-bank only).
-            include_knowledge_base: Also export Mental Models and Pages (whole-bank only).
-            poll_interval: Seconds between operation-status polls.
-            timeout: Maximum seconds to wait for the export to finish.
-
-        Returns:
-            The transfer ZIP archive as bytes (import it via ``client.document_transfer.import_documents``).
-
-        Raises:
-            TimeoutError: if the export does not finish within ``timeout``.
-            RuntimeError: if the export operation fails or completes without an archive.
-        """
-        return _run_async(
-            self.aexport_documents(
-                bank_id,
-                document_ids,
-                include_observations,
-                include_knowledge_base,
-                poll_interval=poll_interval,
-                timeout=timeout,
-            )
-        )
-
-    async def aexport_documents(
-        self,
-        bank_id: str,
-        document_ids: list[str] | None = None,
-        include_observations: bool = False,
-        include_knowledge_base: bool = False,
-        *,
-        poll_interval: float = 2.0,
-        timeout: float = 300.0,
-    ) -> bytes:
-        """Async variant of :meth:`export_documents` — submit, poll, download, return bytes."""
-        submission = await self._document_transfer_api.export_documents(
-            bank_id,
-            document_id=document_ids,
-            include_observations=include_observations,
-            include_knowledge_base=include_knowledge_base,
-            _request_timeout=self._timeout,
-        )
-        return await self._download_operation_archive(bank_id, submission.operation_id, poll_interval, timeout)
-
-    @property
-    def bank_transfer(self) -> bank_transfer_api.BankTransferApi:
-        """Low-level Bank Transfer API — submit an async bank export or import."""
-        return self._bank_transfer_api
-
-    def export_bank(
-        self,
-        bank_id: str,
-        *,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-        poll_interval: float = 2.0,
-        timeout: float = 300.0,
-    ) -> bytes:
-        """
-        Export a whole bank as a transfer ZIP archive (blocking convenience).
-
-        See :meth:`aexport_bank` for the full argument documentation.
-        """
-        return _run_async(
-            self.aexport_bank(
-                bank_id,
-                include_data=include_data,
-                include_bank_config=include_bank_config,
-                include_history=include_history,
-                poll_interval=poll_interval,
-                timeout=timeout,
-            )
-        )
-
-    async def aexport_bank(
-        self,
-        bank_id: str,
-        *,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-        poll_interval: float = 2.0,
-        timeout: float = 300.0,
-    ) -> bytes:
-        """
-        Export a whole bank as a transfer ZIP archive — submit, poll, download, return bytes.
-
-        Three flags decide what the archive carries. ``include_data`` covers the
-        memories and everything backing them (documents, facts, observations,
-        attachments and their bytes, the curation archive, the operations log and
-        the maintenance queues); ``include_bank_config`` the bank's own config,
-        mental models and their history, pages, directives and webhooks;
-        ``include_history`` the audit and LLM-request logs.
-
-        Embeddings never travel — the importing instance regenerates them with its
-        own model, which is what makes an archive portable between instances
-        configured differently.
-
-        Args:
-            bank_id: Source bank.
-            include_data: Carry the memories and everything backing them.
-            include_bank_config: Carry bank config, mental models, directives, webhooks.
-            include_history: Carry audit_log and llm_requests.
-            poll_interval: Seconds between operation-status polls.
-            timeout: Maximum seconds to wait for the export to finish.
-
-        Returns:
-            The transfer ZIP archive as bytes (restore it with :meth:`aimport_bank`).
-
-        Raises:
-            TimeoutError: if the export does not finish within ``timeout``.
-            RuntimeError: if the export operation fails or completes without an archive.
-        """
-        submission = await self._bank_transfer_api.export_bank_transfer(
-            bank_id,
-            include_data=include_data,
-            include_bank_config=include_bank_config,
-            include_history=include_history,
-            _request_timeout=self._timeout,
-        )
-        return await self._download_operation_archive(bank_id, submission.operation_id, poll_interval, timeout)
-
-    def import_bank(
-        self,
-        bank_id: str,
-        archive: bytes,
-        *,
-        target_bank_id: str | None = None,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-    ) -> str:
-        """
-        Restore a bank archive into a fresh bank (blocking convenience).
-
-        See :meth:`aimport_bank` for the full argument documentation.
-        """
-        return _run_async(
-            self.aimport_bank(
-                bank_id,
-                archive,
-                target_bank_id=target_bank_id,
-                include_data=include_data,
-                include_bank_config=include_bank_config,
-                include_history=include_history,
-            )
-        )
-
-    async def aimport_bank(
-        self,
-        bank_id: str,
-        archive: bytes,
-        *,
-        target_bank_id: str | None = None,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-    ) -> str:
-        """
-        Restore a bank archive into a fresh bank, and return the operation id.
-
-        The restore runs in the background (facts are re-embedded and entities
-        re-resolved); poll ``client.operations.get_operation_status(bank_id, ...)``
-        for its progress and per-component counts.
-
-        ``target_bank_id`` must NOT already exist — this restores a whole bank
-        rather than merging into one. ``bank_id`` is simply the bank the operation
-        is recorded against, because the target does not exist yet. To fold an
-        archive's documents into an existing bank instead, use
-        ``client.document_transfer.import_documents``.
-
-        Args:
-            bank_id: Bank the operation is recorded against (must exist).
-            archive: A transfer ZIP produced by :meth:`aexport_bank`.
-            target_bank_id: Bank to create; defaults to the archive's source bank.
-            include_data: Restore the memories and everything backing them.
-            include_bank_config: Restore bank config, mental models, directives, webhooks.
-            include_history: Restore audit_log and llm_requests.
-
-        Returns:
-            The operation id of the background restore.
-        """
-        submission = await self._bank_transfer_api.import_bank_transfer(
-            bank_id,
-            archive,
-            target_bank_id=target_bank_id,
-            include_data=include_data,
-            include_bank_config=include_bank_config,
-            include_history=include_history,
-            _request_timeout=self._timeout,
-        )
-        return submission.operation_id
-
-    def clone_bank(
-        self,
-        bank_id: str,
-        target_bank_id: str,
-        *,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-    ) -> str:
-        """
-        Copy a bank into a new one (blocking convenience).
-
-        See :meth:`aclone_bank` for the full argument documentation.
-        """
-        return _run_async(
-            self.aclone_bank(
-                bank_id,
-                target_bank_id,
-                include_data=include_data,
-                include_bank_config=include_bank_config,
-                include_history=include_history,
-            )
-        )
-
-    async def aclone_bank(
-        self,
-        bank_id: str,
-        target_bank_id: str,
-        *,
-        include_data: bool = True,
-        include_bank_config: bool = True,
-        include_history: bool = False,
-    ) -> str:
-        """
-        Copy a bank into a new one, and return the clone operation's id.
-
-        The clone starts with the source's memories as they are at clone time and
-        evolves independently from then on. It runs server-side as the export and
-        import back to back, so no archive travels over the wire and no LLM is
-        called; poll ``client.operations.get_operation_status(bank_id, ...)`` for
-        progress and the per-component counts.
-
-        ``target_bank_id`` must NOT already exist. Note that webhooks travel with
-        ``include_bank_config``: a clone made with the defaults will call the
-        source's webhook endpoints.
-
-        Args:
-            bank_id: Bank to copy. The operation is recorded against it.
-            target_bank_id: Bank to create; must not already exist.
-            include_data: Copy the memories and everything backing them.
-            include_bank_config: Copy bank config, mental models, directives, webhooks.
-            include_history: Copy audit_log and llm_requests.
-
-        Returns:
-            The operation id of the background clone.
-        """
-        submission = await self._bank_transfer_api.clone_bank(
-            bank_id,
-            target_bank_id,
-            include_data=include_data,
-            include_bank_config=include_bank_config,
-            include_history=include_history,
-            _request_timeout=self._timeout,
-        )
-        return submission.operation_id
-
-    async def _download_operation_archive(
-        self,
-        bank_id: str,
-        operation_id: str,
-        poll_interval: float,
-        timeout: float,
-    ) -> bytes:
-        """Poll an export operation to completion and download the archive it produced.
-
-        Shared by the document and whole-bank exports: both submit an operation
-        whose ``result_metadata`` names the finished archive.
-        """
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        timeout_message = f"Export operation {operation_id} did not complete within {timeout}s"
-        while True:
-            # The deadline bounds the in-flight status request and the sleep
-            # too, so a slow poll or a long poll_interval can't overrun it.
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise TimeoutError(timeout_message)
-            try:
-                status = await asyncio.wait_for(
-                    self._operations_api.get_operation_status(bank_id, operation_id, _request_timeout=self._timeout),
-                    remaining,
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(timeout_message) from None
-            if status.status == "completed":
-                break
-            if status.status in ("failed", "cancelled"):
-                raise RuntimeError(f"Export operation {operation_id} {status.status}: {status.error_message}")
-            # Sleeping out a budget that can't fit another poll just burns the
-            # remainder, and on a coarse clock (Windows wakes up to ~16ms early)
-            # it can leave enough slack for a second poll the caller didn't ask for.
-            if deadline - loop.time() <= poll_interval:
-                raise TimeoutError(timeout_message)
-            await asyncio.sleep(poll_interval)
-
-        meta = status.result_metadata or {}
-        download_url = meta.get("download_url")
-        if not download_url:
-            raise RuntimeError(f"Export operation {operation_id} completed without a download_url")
-        if download_url.lower().startswith(("https://", "http://")):
-            # Object stores return signed URLs. Preserve their query string and
-            # keep Remember's configured auth headers off the storage request.
-            # trust_env matches the generated client, so HTTP(S)_PROXY also
-            # reaches the storage host.
-            async with aiohttp.ClientSession(trust_env=True) as session:
-                async with session.get(
-                    URL(download_url, encoded=True), timeout=aiohttp.ClientTimeout(total=self._timeout)
-                ) as response:
-                    response.raise_for_status()
-                    return await response.read()
-        # Fetch the server-provided download_url directly (it carries the raw,
-        # slash-bearing storage key). Going through the generated download_file
-        # would percent-encode the slashes to %2F, which fronting proxies often
-        # reject. For the API-relative URL, param_serialize applies the client's
-        # auth headers; call_api returns raw bytes (the typed return is
-        # `object`, which can't model an application/zip body).
-        request = self._api_client.param_serialize(
-            method="GET",
-            resource_path=download_url,
-            header_params={"Accept": "application/zip"},
-            auth_settings=[],
-        )
-        response = await self._api_client.call_api(*request, _request_timeout=self._timeout)
-        archive = await response.read()
-        # Called only for its status check: it raises ApiException on a non-2XX download, which
-        # would otherwise hand the error body back as the archive.
-        self._api_client.response_deserialize(response, response_types_map={"2XX": "bytearray"})
-        return bytes(archive)
-
-    # Directives methods
 
     def create_directive(
         self,

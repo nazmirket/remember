@@ -1,7 +1,7 @@
 """
 Tests for hierarchical configuration system.
 
-Tests config resolution hierarchy (global → tenant → bank),
+Tests config resolution hierarchy (global → bank),
 key normalization, API endpoints, validation, and caching.
 """
 
@@ -12,29 +12,6 @@ import pytest
 
 from remember_api.config import RememberConfig, normalize_config_dict, normalize_config_key
 from remember_api.config_resolver import BankConfigPersistenceConflictError, ConfigResolver
-from remember_api.extensions.tenant import TenantExtension
-from remember_api.models import RequestContext
-
-
-class MockTenantExtension(TenantExtension):
-    """Mock tenant extension for testing tenant-level config."""
-
-    def __init__(self, tenant_config: dict):
-        self.tenant_config = tenant_config
-
-    async def authenticate(self, context):
-        from remember_api.extensions.tenant import TenantContext
-
-        return TenantContext(schema_name="public")
-
-    async def list_tenants(self):
-        from remember_api.extensions.tenant import Tenant
-
-        return [Tenant(schema="public")]
-
-    async def get_tenant_config(self, context):
-        """Return mock tenant config."""
-        return self.tenant_config
 
 
 class _FakeBankOps:
@@ -182,50 +159,21 @@ async def test_hierarchical_fields_categorization():
 
 @pytest.mark.asyncio
 async def test_config_hierarchy_resolution(memory, request_context):
-    """Test that config resolution follows global → tenant → bank hierarchy."""
+    """Bank overrides win over global defaults, without exposing credentials."""
     bank_id = "test-hierarchy-bank"
-
     try:
-        # Ensure bank exists in database
         await memory.ensure_bank_profile(bank_id, request_context=request_context)
-
-        # Set up mock tenant extension with tenant-level config (use configurable fields only)
-        tenant_config = {"retain_chunk_size": 5000, "retain_extraction_mode": "tenant-mode"}
-        mock_tenant = MockTenantExtension(tenant_config)
-
-        # Create config resolver with mock tenant extension
-        resolver = ConfigResolver(backend=memory._backend, tenant_extension=mock_tenant)
-
-        # Test 1: Global config only (no overrides)
-        context = RequestContext(api_key=None, api_key_id=None, tenant_id=None, internal=False)
-        config = await resolver.get_bank_config(bank_id, context)
-
-        # Should have configurable fields from global config (NOT credentials or llm_provider/model)
-        assert "retain_chunk_size" in config  # Configurable field
-        assert "llm_api_key" not in config  # Credential - never exposed
-        assert "llm_provider" not in config  # Not configurable (needs presets)
-
-        # Test 2: Add tenant-level overrides
-        config = await resolver.get_bank_config(bank_id, context)
-
-        # Should apply tenant overrides (only configurable fields)
-        assert config["retain_chunk_size"] == 5000  # Tenant override
-        assert config["retain_extraction_mode"] == "tenant-mode"  # Tenant override
-
-        # Test 3: Add bank-level overrides (should take precedence)
+        resolver = ConfigResolver(backend=memory._backend)
+        config = await resolver.get_bank_config(bank_id, request_context)
+        assert "retain_chunk_size" in config
+        assert "llm_api_key" not in config
+        assert "llm_provider" not in config
         await resolver.update_bank_config(
-            bank_id,
-            {"retain_chunk_size": 2000, "retain_extraction_mode": "bank-mode"},  # Override tenant settings
-            context,
+            bank_id, {"retain_chunk_size": 2000, "retain_extraction_mode": "verbose"}, request_context
         )
-
-        # Config should reflect changes immediately (no caching)
-        config = await resolver.get_bank_config(bank_id, context)
-
-        # Bank overrides should take precedence over tenant
-        assert config["retain_chunk_size"] == 2000  # Bank override wins
-        assert config["retain_extraction_mode"] == "bank-mode"  # Bank override wins
-
+        config = await resolver.get_bank_config(bank_id, request_context)
+        assert config["retain_chunk_size"] == 2000
+        assert config["retain_extraction_mode"] == "verbose"
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)
 
@@ -812,93 +760,17 @@ async def test_config_get_bank_config_no_static_or_credential_fields_leak(memory
 
 
 @pytest.mark.asyncio
-async def test_config_permissions_system(memory, request_context):
-    """
-    Test that tenant extension can control which fields banks are allowed to modify.
-
-    Tests get_allowed_config_fields() permission system.
-    """
-    bank_id = "test-permissions-bank"
-
-    class PermissionTenantExtension(TenantExtension):
-        """Mock tenant extension with configurable permissions."""
-
-        def __init__(self, allowed_fields: set[str] | None):
-            self.allowed_fields = allowed_fields
-
-        async def authenticate(self, context):
-            from remember_api.extensions.tenant import TenantContext
-
-            return TenantContext(schema_name="public")
-
-        async def list_tenants(self):
-            from remember_api.extensions.tenant import Tenant
-
-            return [Tenant(schema="public")]
-
-        async def get_allowed_config_fields(self, context, bank_id):
-            """Return configured allowed fields."""
-            return self.allowed_fields
-
+async def test_bank_config_rejects_credentials_and_static_fields(memory, request_context):
+    """Bank overrides cannot write server credentials or infrastructure settings."""
+    bank_id = "test-config-boundary-bank"
     try:
-        # Ensure bank exists in database
         await memory.ensure_bank_profile(bank_id, request_context=request_context)
-
-        # Test 1: None = allow all configurable fields
-        extension = PermissionTenantExtension(allowed_fields=None)
-        resolver = ConfigResolver(backend=memory._backend, tenant_extension=extension)
-
-        await resolver.update_bank_config(
-            bank_id, {"retain_chunk_size": 4000, "retain_extraction_mode": "verbose"}, request_context
-        )
+        resolver = ConfigResolver(backend=memory._backend)
+        for update in ({"llm_api_key": "local-test-secret"}, {"database_url": "postgresql://localhost/other"}):
+            with pytest.raises(ValueError):
+                await resolver.update_bank_config(bank_id, update, request_context)
         config = await resolver.get_bank_config(bank_id, request_context)
-        assert config["retain_chunk_size"] == 4000
-        assert config["retain_extraction_mode"] == "verbose"
-
-        # Reset for next test
-        await resolver.reset_bank_config(bank_id)
-
-        # Test 2: Specific set = only those fields allowed
-        extension = PermissionTenantExtension(allowed_fields={"retain_chunk_size"})
-        resolver = ConfigResolver(backend=memory._backend, tenant_extension=extension)
-
-        # Should allow retain_chunk_size
-        await resolver.update_bank_config(bank_id, {"retain_chunk_size": 5000}, request_context)
-        config = await resolver.get_bank_config(bank_id, request_context)
-        assert config["retain_chunk_size"] == 5000
-
-        # Should reject retain_extraction_mode (not in allowed list)
-        with pytest.raises(ValueError, match="Not allowed to modify fields"):
-            await resolver.update_bank_config(bank_id, {"retain_extraction_mode": "verbose"}, request_context)
-
-        # Should reject mix of allowed and disallowed
-        with pytest.raises(ValueError, match="Not allowed to modify fields"):
-            await resolver.update_bank_config(
-                bank_id, {"retain_chunk_size": 6000, "retain_extraction_mode": "verbose"}, request_context
-            )
-
-        # Reset for next test
-        await resolver.reset_bank_config(bank_id)
-
-        # Test 3: Empty set = no modifications allowed (read-only)
-        extension = PermissionTenantExtension(allowed_fields=set())
-        resolver = ConfigResolver(backend=memory._backend, tenant_extension=extension)
-
-        with pytest.raises(ValueError, match="Not allowed to modify fields"):
-            await resolver.update_bank_config(bank_id, {"retain_chunk_size": 7000}, request_context)
-
-        # Test 4: get_bank_config should filter response based on permissions
-        extension = PermissionTenantExtension(allowed_fields={"retain_chunk_size", "enable_observations"})
-        resolver = ConfigResolver(backend=memory._backend, tenant_extension=extension)
-
-        config = await resolver.get_bank_config(bank_id, request_context)
-
-        # Should only return allowed fields
-        assert "retain_chunk_size" in config
-        assert "enable_observations" in config
-        # Other configurable fields should be filtered out
-        assert "retain_extraction_mode" not in config
-        assert "retain_custom_instructions" not in config
-
+        assert "llm_api_key" not in config
+        assert "database_url" not in config
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)

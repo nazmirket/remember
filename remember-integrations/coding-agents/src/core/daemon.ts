@@ -143,6 +143,8 @@ export function daemonEnv(
       out[key] = value;
     }
   }
+  // Use the same optional local token for the daemon and its clients.
+  if (cfg.apiToken) out.REMEMBER_API_TOKEN = cfg.apiToken;
   // The local memory service must not inherit an externally exposed bind address.
   out.REMEMBER_API_HOST = "127.0.0.1";
   // Database selection is owned by remember-embed and always uses local pg0.
@@ -174,7 +176,7 @@ export function isRememberCheckout(path: string | undefined): boolean {
  *
  * One spawn per cold start is the goal, and `ensureDaemon` is what holds a burst of callers to it.
  * The starter also re-checks health, so a spawn that slips through anyway leaves the daemon the
- * winner started alone — but racing starters are not free: they queue on the profile's file lock.
+ * winner started alone — but racing starters are not free: they queue on the daemon's file lock.
  */
 export function startDaemonDetached(
   cfg: Config,

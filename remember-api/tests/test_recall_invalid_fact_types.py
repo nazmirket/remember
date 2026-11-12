@@ -2,7 +2,7 @@
 
 import pytest
 
-from remember_api.extensions.operation_validator import OperationValidationError
+from remember_api.errors import OperationValidationError
 
 
 @pytest.mark.asyncio

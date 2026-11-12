@@ -18,7 +18,7 @@ import pytest
 
 from remember_api import RequestContext
 from remember_api.engine.db_utils import acquire_with_retry
-from remember_api.engine.memories import FactRecord, get_memories
+from remember_api.engine.memories import get_memories
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.schema import fq_table
 
@@ -73,76 +73,32 @@ async def _insert_memory(
 async def _insert_observation(
     memory: MemoryEngine, conn, bank_id: str, text: str, source_memory_ids: list[uuid.UUID]
 ) -> uuid.UUID:
-    """Seed one observation wherever the configured store keeps observations.
-
-    Gated: the SQL store's upsert_observation is a no-op (the consolidator writes that row
-    inline), so SQL is seeded with the insert it would have written.
-    """
-    store = get_memories()
+    """Seed an observation as the consolidator would write it."""
     obs_id = uuid.uuid4()
-    if not store.store_owned:
-        await conn.execute(
-            """
-            INSERT INTO memory_units (
-                id, bank_id, text, fact_type, event_date, source_memory_ids, proof_count, created_at, updated_at
-            ) VALUES ($1, $2, $3, 'observation', NOW(), $4, $5, NOW(), NOW())
-            """,
-            obs_id,
-            bank_id,
-            text,
-            source_memory_ids,
-            len(source_memory_ids),
-        )
-    else:
-        now = datetime.now(timezone.utc)
-        await store.upsert_observation(
-            conn=conn,
-            bank_id=bank_id,
-            record=FactRecord(
-                unit_id=str(obs_id),
-                text=text,
-                embedding=(await memory.embeddings.encode([text]))[0],
-                fact_type="observation",
-                proof_count=len(source_memory_ids),
-                source_memory_ids=[str(s) for s in source_memory_ids],
-                event_date=now,
-                created_at=now,
-            ),
-        )
+    await conn.execute(
+        """
+        INSERT INTO memory_units (
+            id, bank_id, text, fact_type, event_date, source_memory_ids, proof_count, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'observation', NOW(), $4, $5, NOW(), NOW())
+        """,
+        obs_id,
+        bank_id,
+        text,
+        source_memory_ids,
+        len(source_memory_ids),
+    )
     return obs_id
 
 
 async def _get_observation_ids(conn, bank_id: str) -> list[str]:
     """Ids of the bank's observations, read from whichever store holds them."""
-    store = get_memories()
-    if not store.store_owned:
-        rows = await conn.fetch(
-            "SELECT id FROM memory_units WHERE bank_id = $1 AND fact_type = 'observation'",
-            bank_id,
-        )
-        return [str(r["id"]) for r in rows]
-    page = await store.scan_memories(
-        conn=conn, fq_table=fq_table, bank_id=bank_id, fact_types=["observation"], limit=1_000_000
-    )
-    return [m.unit_id for m in page.memories]
+    rows = await conn.fetch("SELECT id FROM memory_units WHERE bank_id = $1 AND fact_type = 'observation'", bank_id)
+    return [str(r["id"]) for r in rows]
 
 
 async def _get_consolidated_at(conn, memory_id: uuid.UUID, bank_id: str | None = None):
-    """A memory's consolidated marker. ``bank_id`` is required for a bank-partitioned store.
-
-    Read directly because the marker is scheduler state the public read API does not expose."""
-    store = get_memories()
-    if not store.store_owned:
-        return await conn.fetchval(
-            "SELECT consolidated_at FROM memory_units WHERE id = $1",
-            memory_id,
-        )
-    found = (
-        await store.get_memories(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[str(memory_id)])
-        if bank_id
-        else []
-    )
-    return found[0].consolidated_at if found else None
+    """Read the scheduler's consolidation marker."""
+    return await conn.fetchval("SELECT consolidated_at FROM memory_units WHERE id = $1", memory_id)
 
 
 async def _get_memory(conn, bank_id: str, memory_id):
@@ -842,24 +798,15 @@ async def _insert_document_with_memories(
     """
     from remember_api.engine.memories import get_memories
 
-    store = get_memories()
-    if store.store_owned_for(bank_id):
-        await store.put_document(
-            bank_id=bank_id,
-            document_id=doc_id,
-            content_hash="hash123",
-            original_text="some doc",
-            chunk_texts=[],
-        )
-    else:
-        await conn.execute(
-            """
-            INSERT INTO documents (id, bank_id, original_text, content_hash, created_at, updated_at)
-            VALUES ($1, $2, 'some doc', 'hash123', NOW(), NOW())
-            """,
-            doc_id,
-            bank_id,
-        )
+    get_memories()
+    await conn.execute(
+        """
+        INSERT INTO documents (id, bank_id, original_text, content_hash, created_at, updated_at)
+        VALUES ($1, $2, 'some doc', 'hash123', NOW(), NOW())
+        """,
+        doc_id,
+        bank_id,
+    )
     mem_ids = []
     for text, fact_type in memories:
         mem_ids.append(await _insert_memory(memory, conn, bank_id, text, fact_type, document_id=doc_id))
@@ -1269,9 +1216,7 @@ class TestUpdateDocumentTagsObservationCleanup:
         self, memory: MemoryEngine, request_context: RequestContext
     ):
         """A real retag stamps the units' ``updated_at``; a no-op retag leaves it alone."""
-        store = get_memories()
-        if store.store_owned:
-            pytest.skip("updated_at is a SQL memory_units column")
+        get_memories()
 
         bank_id = f"test-tag-update-stamp-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)
@@ -1549,9 +1494,6 @@ class TestRetagDuringConsolidation:
         response write an observation under the old tags, nor stamp the fact consolidated.
         The batch is discarded and the job's next fetch redoes the fact under its new tags."""
         from remember_api.engine.consolidation import consolidator as C
-
-        if get_memories().store_owned:
-            pytest.skip("updated_at re-check is SQL-store only")
 
         bank_id = f"test-retag-race-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)

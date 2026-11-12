@@ -43,37 +43,6 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------ uploaded file
 
 
-async def record_document_file(
-    *,
-    backend,
-    fq_table: Callable[[str], str],
-    bank_id: str,
-    document_id: str,
-    storage_key: str,
-    original_name: str,
-    content_type: str,
-) -> bool:
-    """Put the uploaded-file reference on the `documents` row. ``False`` if there is no row."""
-    async with acquire_with_retry(backend) as conn:
-        updated = await conn.fetchval(
-            f"""
-            UPDATE {fq_table("documents")}
-            SET file_storage_key = $3,
-                file_original_name = $4,
-                file_content_type = $5,
-                updated_at = NOW()
-            WHERE id = $1 AND bank_id = $2
-            RETURNING id
-            """,
-            document_id,
-            bank_id,
-            storage_key,
-            original_name,
-            content_type,
-        )
-    return updated is not None
-
-
 # ------------------------------------------------------------------ attachments
 
 

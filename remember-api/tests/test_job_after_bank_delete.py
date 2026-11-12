@@ -76,41 +76,28 @@ async def test_consolidation_stops_when_its_bank_is_deleted_mid_run(
         )
 
     store = get_memories()
-    original_begin = store.begin_write_batch
-    # On Postgres the foreign keys already stop these writes; a store that owns its storage has
-    # none, and recreates the bank on the write batch's commit. So that commit must not happen.
-    committed: list[str] = []
+    original_lock = store.lock_consolidation_write_set
 
-    async def delete_then_begin(*, bank_id: str):
-        # The LLM has answered; the delete lands right before the job writes what it decided. Run
-        # in a fresh context, as an API request is: inside the job's, the recreate is refused.
+    async def delete_then_lock(**kwargs):
+        # Delete after the LLM decision but before the write transaction takes locks.
         async def user_requests():
             await memory.delete_bank(bank_id, request_context=request_context)
             if recreate:
                 await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
 
         await asyncio.get_running_loop().create_task(user_requests(), context=contextvars.Context())
-        batch = await original_begin(bank_id=bank_id)
-        original_commit = batch.commit
-
-        async def commit():
-            committed.append(bank_id)
-            await original_commit()
-
-        batch.commit = commit
-        return batch
+        return await original_lock(**kwargs)
 
     original_llm = memory._consolidation_llm_config
     memory._consolidation_llm_config = _create_llm()
     try:
         with (
-            patch.object(store, "begin_write_batch", side_effect=delete_then_begin),
+            patch.object(store, "lock_consolidation_write_set", side_effect=delete_then_lock),
             patch.object(memory, "submit_async_consolidation"),
         ):
             # Dropped, not failed and not retried: no exception reaches the worker.
             await memory.execute_task({"type": "consolidation", "bank_id": bank_id})
 
-        assert committed == []
         assert await _bank_exists(memory, bank_id, request_context) is recreate
         if recreate:
             # Nothing from before the delete landed in the new bank: no fact, no observation.

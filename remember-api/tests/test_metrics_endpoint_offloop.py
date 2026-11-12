@@ -14,7 +14,6 @@ a loaded CI box. (A timing-based version was tried first: it measured ~19 ticks 
 """
 
 import threading
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -46,41 +45,10 @@ async def test_api_metrics_renders_off_the_loop(monkeypatch):
 
     seen: list[int] = []
     # metrics_endpoint imports generate_latest from prometheus_client at call time, so patching the
-    # module attribute is what the endpoint resolves. Single-worker mode (app.state.worker_metrics
-    # unset) takes the generate_latest branch.
+    # module attribute is what the endpoint resolves.
     monkeypatch.setattr("prometheus_client.generate_latest", _record_thread(seen))
 
     response = await _get_metrics(app)
-
-    assert response.status_code == 200
-    assert seen and seen[0] != threading.get_ident()
-
-
-@pytest.mark.asyncio
-async def test_api_multiworker_render_runs_off_the_loop():
-    # Multi-worker mode takes the WorkerMetrics.render branch, which additionally does blocking
-    # file I/O (per-worker snapshot files) -- the path that most needs to stay off the loop.
-    app = create_app(MagicMock(), initialize_memory=False)
-
-    seen: list[int] = []
-    app.state.worker_metrics = SimpleNamespace(render=_record_thread(seen))
-
-    response = await _get_metrics(app)
-
-    assert response.status_code == 200
-    assert seen and seen[0] != threading.get_ident()
-
-
-@pytest.mark.asyncio
-async def test_worker_metrics_renders_off_the_loop(monkeypatch):
-    from remember_api.worker.main import create_worker_app
-
-    seen: list[int] = []
-    # create_worker_app imports generate_latest from prometheus_client when it runs, so patch the
-    # module attribute before building the app.
-    monkeypatch.setattr("prometheus_client.generate_latest", _record_thread(seen))
-
-    response = await _get_metrics(create_worker_app(MagicMock(), MagicMock()))
 
     assert response.status_code == 200
     assert seen and seen[0] != threading.get_ident()

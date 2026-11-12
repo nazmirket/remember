@@ -27,16 +27,13 @@ class FeaturesInfo(BaseModel):
     Feature flags indicating which capabilities are enabled.
     """ # noqa: E501
     observations: StrictBool = Field(description="Whether observations (auto-consolidation) are enabled")
-    mcp: StrictBool = Field(description="Whether MCP (Model Context Protocol) server is enabled")
     worker: StrictBool = Field(description="Whether the background worker is enabled")
     bank_config_api: StrictBool = Field(description="Whether per-bank configuration API is enabled")
     bank_llm_health: StrictBool = Field(description="Whether the per-bank LLM connectivity probe is enabled")
-    document_export_api: StrictBool = Field(description="Whether the document export endpoint is enabled")
-    document_import_api: StrictBool = Field(description="Whether the document import endpoint is enabled")
     audit_log: StrictBool = Field(description="Whether audit logging is enabled by default (overridable per bank)")
     llm_trace: StrictBool = Field(description="Whether per-bank LLM request tracing is enabled")
     store_document_text: StrictBool = Field(description="Whether raw source text is persisted. When false, document/chunk source text is not stored.")
-    __properties: ClassVar[List[str]] = ["observations", "mcp", "worker", "bank_config_api", "bank_llm_health", "document_export_api", "document_import_api", "audit_log", "llm_trace", "store_document_text"]
+    __properties: ClassVar[List[str]] = ["observations", "worker", "bank_config_api", "bank_llm_health", "audit_log", "llm_trace", "store_document_text"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -90,12 +87,9 @@ class FeaturesInfo(BaseModel):
 
         _obj = cls.model_validate({
             "observations": obj.get("observations"),
-            "mcp": obj.get("mcp"),
             "worker": obj.get("worker"),
             "bank_config_api": obj.get("bank_config_api"),
             "bank_llm_health": obj.get("bank_llm_health"),
-            "document_export_api": obj.get("document_export_api"),
-            "document_import_api": obj.get("document_import_api"),
             "audit_log": obj.get("audit_log"),
             "llm_trace": obj.get("llm_trace"),
             "store_document_text": obj.get("store_document_text")

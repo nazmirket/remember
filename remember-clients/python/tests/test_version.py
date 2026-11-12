@@ -19,12 +19,9 @@ def _make_client() -> Remember:
 def _version_response() -> VersionResponse:
     features = FeaturesInfo(
         observations=True,
-        mcp=True,
         worker=True,
         bank_config_api=True,
         bank_llm_health=True,
-        document_export_api=True,
-        document_import_api=True,
         audit_log=True,
         llm_trace=True,
         store_document_text=True,

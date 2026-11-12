@@ -42,21 +42,6 @@ def test_no_decision_model_by_default(monkeypatch):
     assert config.decision_model_config("consolidation") is None
 
 
-def test_hindsight_inference_is_an_explicit_third_party_provider(monkeypatch):
-    config = _config(
-        monkeypatch,
-        {
-            "REMEMBER_API_DECISION_MODEL_PROVIDER": "hindsight",
-            "REMEMBER_API_DECISION_MODEL_API_KEY": "test-key",
-        },
-    )
-    decision = config.decision_model_config("reflect")
-    assert decision is not None
-    assert decision.provider == "hindsight"
-    assert decision.base_url == "https://inference.hindsight.vectorize.io"
-    assert config.decision_model_config("recall") is None
-
-
 def test_global_setup_reaches_every_operation(monkeypatch):
     config = _config(monkeypatch, _GLOBAL)
     for operation in ("recall", "reflect", "consolidation"):
@@ -143,17 +128,6 @@ def test_an_operation_on_another_provider_borrows_nothing_from_the_global_one(mo
 def test_another_provider_without_its_own_key_fails_at_startup(monkeypatch):
     with pytest.raises(ValueError, match="REMEMBER_API_REFLECT_DECISION_MODEL_API_KEY"):
         _config(monkeypatch, {**_GLOBAL, "REMEMBER_API_REFLECT_DECISION_MODEL_PROVIDER": "openai"}).validate()
-
-
-def test_cloudflare_needs_its_account_url(monkeypatch):
-    env = {"REMEMBER_API_DECISION_MODEL_PROVIDER": "cloudflare", "REMEMBER_API_DECISION_MODEL_API_KEY": "cf"}
-    with pytest.raises(ValueError, match="REMEMBER_API_DECISION_MODEL_BASE_URL"):
-        _config(monkeypatch, env).validate()
-    account_url = "https://api.cloudflare.com/client/v4/accounts/acct/ai/run"
-    config = _config(monkeypatch, {**env, "REMEMBER_API_DECISION_MODEL_BASE_URL": account_url})
-    recall = config.decision_model_config("recall")
-    assert recall is not None
-    assert (recall.model, recall.base_url) == ("clef", account_url)
 
 
 def test_missing_key_fails_at_startup(monkeypatch):
@@ -246,20 +220,6 @@ async def test_typesafe_speaks_system_one():
     assert upstream.paths == ["/v1/systemone"]
     assert upstream.auth == ["Bearer k"]
     assert upstream.bodies == [{"model": "jev-preview", "state": {"fact": "x"}, "questions": _SYSTEM_ONE_QUESTIONS}]
-
-
-async def test_cloudflare_posts_system_one_to_the_workers_ai_model_and_unwraps_the_envelope():
-    # Workers AI's REST API wraps every answer in Cloudflare's v4 envelope.
-    upstream = _Upstream(reply={"result": _SYSTEM_ONE_ANSWERS, "success": True, "errors": [], "messages": []})
-    async with stub_server(upstream.handle) as base_url:
-        account_url = f"{base_url}/client/v4/accounts/acct/ai/run"
-        answer = await _client("cloudflare", account_url, "clef").ask(
-            "Checkout is down.", _QUESTIONS, scope="decision_test"
-        )
-
-    assert answer == _EXPECTED
-    assert upstream.paths == ["/client/v4/accounts/acct/ai/run/@cf/cloudflare/clef"]
-    assert upstream.bodies == [{"model": "clef", "state": "Checkout is down.", "questions": _SYSTEM_ONE_QUESTIONS}]
 
 
 async def test_openai_translates_to_the_decisions_api_and_back():
@@ -458,35 +418,6 @@ async def test_a_pool_over_the_question_cap_is_split():
     async with stub_server(upstream.handle) as base_url:
         await _splitting_client(base_url).ask_all("q", _nouls(MAX_QUESTIONS + 5, "x"), scope="decision_test")
     assert sorted(len(body["questions"]) for body in upstream.bodies) == [5, MAX_QUESTIONS]
-
-
-async def test_hindsight_sends_a_recall_pool_in_one_request():
-    """Hindsight Inference fits each request to its model's window, so the client does not
-    split by tokens: a 250-candidate pool that typesafe's ceiling splits goes out whole."""
-    questions = _nouls(250, "memory about the storage layer " * 20)
-    remember, typesafe = _Answering(), _Answering()
-    async with stub_server(remember.handle) as base_url:
-        answers = await _splitting_client(base_url, max_request_tokens=None, provider="hindsight").ask_all(
-            "q", questions, scope="decision_test"
-        )
-    async with stub_server(typesafe.handle) as base_url:
-        await _splitting_client(base_url).ask_all("q", questions, scope="decision_test")
-    assert len(remember.bodies) == 1
-    assert list(answers) == list(questions)
-    assert len(typesafe.bodies) > 1
-
-
-async def test_hindsight_splits_a_pool_only_to_stay_under_the_body_size_limit():
-    upstream = _Answering()
-    questions = _nouls(300, "é" * 1_500)  # sent as \u00e9: 6 bytes each, ~2.7 MB in all
-    # Hindsight Inference's gateway refuses a body over 2,000,000 bytes.
-    async with stub_server(upstream.handle, max_body_bytes=2_000_000) as base_url:
-        await _splitting_client(base_url, max_request_tokens=None, provider="hindsight").ask_all(
-            "q", questions, scope="decision_test"
-        )
-    assert len(upstream.bodies) > 1
-    assert all(len(json.dumps(body)) <= MAX_REQUEST_BYTES for body in upstream.bodies)
-    assert sorted(key for body in upstream.bodies for key in body["questions"]) == sorted(questions)
 
 
 async def test_a_rate_limited_request_is_retried():

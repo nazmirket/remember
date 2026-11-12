@@ -17,7 +17,7 @@ That is the whole reason this is tractable:
   lost-update bug this is meant to fix.
 * Operation identity survives. Each submission keeps its own ``operation_id``,
   status, and post-retain hook, so nothing downstream of the queue — polling,
-  webhooks, cancellation, metering — has to learn about folding.
+  cancellation and metering — has to learn about folding.
 
 Because of that, folding is a pure optimization: delete it and the system is
 still correct, only slower. A bug here can cost latency or LLM spend; it cannot

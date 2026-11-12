@@ -18,12 +18,10 @@ import pytest
 
 from remember_api.config import RememberConfig
 from remember_api.extensions.builtin.memory_defense_regex import MemoryDefenseRegexExtension
-from remember_api.extensions.loader import ExtensionLoadError, load_extension
 from remember_api.extensions.memory_defense import (
     _ASCII_TOKEN_START,
     _REDACTION_PATTERNS,
     DefenseAction,
-    MemoryDefenseExtension,
     _fingerprint_value,
     apply_redaction,
     parse_policy,
@@ -537,33 +535,6 @@ async def test_screen_allows_benign_payloads(payload: str, regex_defense, redact
 # ---------------------------------------------------------------------------
 
 
-def test_regex_is_default_when_no_env(monkeypatch) -> None:
-    monkeypatch.delenv("REMEMBER_API_MEMORY_DEFENSE_EXTENSION", raising=False)
-    ext = load_extension("MEMORY_DEFENSE", MemoryDefenseExtension) or MemoryDefenseRegexExtension({})
-    assert isinstance(ext, MemoryDefenseRegexExtension)
-
-
-def test_custom_extension_loaded_from_env(monkeypatch) -> None:
-    monkeypatch.setenv(
-        "REMEMBER_API_MEMORY_DEFENSE_EXTENSION",
-        "remember_api.extensions.builtin.memory_defense_regex:MemoryDefenseRegexExtension",
-    )
-    ext = load_extension("MEMORY_DEFENSE", MemoryDefenseExtension)
-    assert isinstance(ext, MemoryDefenseRegexExtension)
-
-
-def test_malformed_extension_path_raises(monkeypatch) -> None:
-    monkeypatch.setenv("REMEMBER_API_MEMORY_DEFENSE_EXTENSION", "no_colon_here")
-    with pytest.raises(ExtensionLoadError):
-        load_extension("MEMORY_DEFENSE", MemoryDefenseExtension)
-
-
-def test_non_subclass_extension_raises(monkeypatch) -> None:
-    monkeypatch.setenv("REMEMBER_API_MEMORY_DEFENSE_EXTENSION", "builtins:dict")
-    with pytest.raises(ExtensionLoadError):
-        load_extension("MEMORY_DEFENSE", MemoryDefenseExtension)
-
-
 # ---------------------------------------------------------------------------
 # Extension-context wiring (unit)
 # ---------------------------------------------------------------------------
@@ -606,14 +577,10 @@ def _make_minimal_engine():
     return engine
 
 
-def test_engine_memory_defense_shares_ext_ctx() -> None:
-    """The defense extension's context is the engine's _ext_ctx, and webhook_manager
-    starts None (it is wired in initialize())."""
+def test_engine_uses_builtin_memory_defense() -> None:
     engine = _make_minimal_engine()
-    assert engine._memory_defense._context is engine._ext_ctx
-    assert engine._ext_ctx.webhook_manager is None
-    # One context shared by every request: per-request tenant state on it is last-writer-wins (#4372).
-    assert not hasattr(engine._ext_ctx, "current_schema")
+    assert engine._memory_defense is not None
+    assert not hasattr(engine, "_ext_ctx")
 
 
 # ---------------------------------------------------------------------------
@@ -741,16 +708,12 @@ async def test_retain_blocks_secret_item(api_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mixed_retain_preserves_input_positions_in_results_and_hook(
-    pg0_db_url, query_analyzer, request_context
-) -> None:
+async def test_mixed_retain_preserves_input_positions_in_results(pg0_db_url, query_analyzer, request_context) -> None:
     from remember_api.engine.memory_engine import MemoryEngine
     from remember_api.engine.task_backend import SyncTaskBackend
-    from tests.test_extensions import TrackingValidator
     from tests.test_llm_reasoning_effort_env import DummyCrossEncoder
     from tests.test_retain_same_document_concurrency import _StubEmbeddings
 
-    validator = TrackingValidator({})
     memory = MemoryEngine(
         db_url=pg0_db_url,
         memory_llm_provider="mock",
@@ -761,7 +724,6 @@ async def test_mixed_retain_preserves_input_positions_in_results_and_hook(
         query_analyzer=query_analyzer,
         run_migrations=False,
         task_backend=SyncTaskBackend(),
-        operation_validator=validator,
     )
     await memory.initialize()
     memory._config_resolver._global_config.enable_auto_consolidation = False
@@ -788,109 +750,8 @@ async def test_mixed_retain_preserves_input_positions_in_results_and_hook(
         assert memory_ids[1]
         assert memory_ids[2] == []
         assert memory_ids[3]
-        assert len(validator.post_retain_calls) == 1
-        hook_result = validator.post_retain_calls[0]
-        assert hook_result.contents == contents
-        assert hook_result.unit_ids == memory_ids
     finally:
         await memory.close()
-
-
-async def _memory_defense_webhook_events(memory, bank: str) -> list[dict]:
-    """Return the fully-parsed WebhookEvent bodies of the memory_defense.triggered
-    deliveries queued for ``bank``. The webhook_delivery task_payload nests the
-    serialized event under ``payload`` (a JSON string)."""
-    async with memory._pool.acquire() as conn:
-        # Order most-recent-first so callers using ``events[0]`` always see
-        # the latest queued delivery — otherwise pollution from earlier test
-        # runs against the same bank surfaces stale payloads.
-        rows = await conn.fetch(
-            "SELECT task_payload FROM async_operations "
-            "WHERE operation_type = 'webhook_delivery' AND bank_id = $1 "
-            "ORDER BY created_at DESC",
-            bank,
-        )
-    events: list[dict] = []
-    for row in rows:
-        task = row["task_payload"]
-        if isinstance(task, str):
-            task = json.loads(task)
-        if task.get("event_type") != "memory_defense.triggered":
-            continue
-        events.append(json.loads(task["payload"]))
-    return events
-
-
-@pytest.mark.asyncio
-async def test_retain_fires_webhook_on_redact(api_client, memory) -> None:
-    """A redact decision queues a memory_defense.triggered delivery whose payload
-    reports the action, detector, and matched pattern labels."""
-    bank = "md-retain-wh"
-    await api_client.put(f"/v1/default/banks/{bank}", json={})
-    wr = await api_client.post(
-        f"/v1/default/banks/{bank}/webhooks",
-        json={"url": "https://example.com/hook", "event_types": ["memory_defense.triggered"]},
-    )
-    assert wr.status_code in {200, 201}, wr.text
-    await _set_policy(api_client, bank, _REDACT_POLICY)
-
-    secret = "ghp_" + "A" * 36
-    rr = await api_client.post(
-        f"/v1/default/banks/{bank}/memories",
-        json={"items": [{"content": f"rotate {secret}"}]},
-    )
-    assert rr.status_code == 200, rr.text
-
-    events = await _memory_defense_webhook_events(memory, bank)
-    assert len(events) >= 1, events
-    ev = events[0]
-    assert ev["event"] == "memory_defense.triggered"
-    assert ev["status"] == "redact"
-    data = ev["data"]
-    assert data["action"] == "redact"
-    assert data["detector"] == "sensitive_data"
-    assert "github_token" in data["matched_types"]
-    assert data["message"]
-    # The webhook payload carries a per-match fingerprinted preview — the raw
-    # secret never crosses the wire, but a SIEM can still correlate against
-    # its credential inventory using the leading provider prefix + trailing
-    # discriminator (e.g. `ghp_...AAAA`). Populated by OSS as of #2157.
-    hits = data.get("hits") or []
-    assert any(h.get("detector") == "github_token" and h.get("preview") == "ghp_...AAAA" for h in hits), hits
-    for h in hits:
-        assert secret not in (h.get("preview") or ""), "raw secret leaked into preview"
-
-
-@pytest.mark.asyncio
-async def test_retain_fires_webhook_on_block(api_client, memory) -> None:
-    """A block decision also fires the webhook (before the 422 is raised), with
-    action=block in the payload."""
-    bank = "md-retain-wh-block"
-    await api_client.put(f"/v1/default/banks/{bank}", json={})
-    wr = await api_client.post(
-        f"/v1/default/banks/{bank}/webhooks",
-        json={"url": "https://example.com/hook", "event_types": ["memory_defense.triggered"]},
-    )
-    assert wr.status_code in {200, 201}, wr.text
-    await _set_policy(
-        api_client,
-        bank,
-        {"memory_defense": {"enabled": True, "rules": [{"on": "sensitive_data", "action": "block"}]}},
-    )
-
-    secret = "AKIA" + "A" * 16
-    rr = await api_client.post(
-        f"/v1/default/banks/{bank}/memories",
-        json={"items": [{"content": f"key {secret}"}]},
-    )
-    assert rr.status_code == 422, rr.text  # all items blocked
-
-    events = await _memory_defense_webhook_events(memory, bank)
-    assert any(ev["data"]["action"] == "block" for ev in events), events
-    blocked = next(ev for ev in events if ev["data"]["action"] == "block")
-    assert blocked["status"] == "block"
-    assert blocked["data"]["detector"] == "sensitive_data"
-    assert "aws_access_key" in blocked["data"]["matched_types"]
 
 
 @pytest.mark.asyncio
@@ -1171,3 +1032,9 @@ def test_redact_document_body_rejects_global_config():
 
     with pytest.raises(ConfigFieldAccessError, match="memory_defense"):
         redact_document_body("deploy key: ghp_" + "Q" * 36, StaticConfigProxy(_get_raw_config()))
+
+
+def test_engine_uses_builtin_defense_even_with_external_selector(monkeypatch):
+    monkeypatch.setenv("REMEMBER_API_MEMORY_DEFENSE_EXTENSION", "nonexistent:ExternalDefense")
+    engine = _make_minimal_engine()
+    assert isinstance(engine._memory_defense, MemoryDefenseRegexExtension)

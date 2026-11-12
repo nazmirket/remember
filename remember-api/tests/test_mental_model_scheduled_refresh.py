@@ -17,11 +17,9 @@ import pytest
 
 from remember_api.engine.llm_interface import ProviderContentPolicyError, ProviderRateLimitResetError
 from remember_api.engine.maintenance import MaintenanceLoop
-from remember_api.engine.memories import get_memories
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.reflect import ReflectToolExecutionError
 from remember_api.engine.response_models import MentalModelTrigger
-from tests.store_seed import store_write_facts
 
 # The scheduled-refresh pass scans every bank in the shared test database, and
 # several tests here let it really submit (or queue behind a stalled worker) a
@@ -98,9 +96,6 @@ async def _new_fact(memory: MemoryEngine, bank_id: str) -> None:
     Written directly rather than retained: a retain also runs consolidation, which refreshes
     or re-dates the very model these tests are timing.
     """
-    if get_memories().store_owned_for(bank_id):
-        await store_write_facts(memory, bank_id, [str(uuid.uuid4())], ["a fresh fact"], fact_type="experience")
-        return
     async with memory._pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO memory_units (id, bank_id, text, fact_type, tags, created_at, updated_at) "

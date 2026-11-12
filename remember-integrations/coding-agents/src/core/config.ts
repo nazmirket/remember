@@ -45,7 +45,6 @@ const CONFIG_PATH =
 /** Daemon-mode defaults. The port matches the old per-agent Claude Code plugin so a machine that
  *  already ran that daemon keeps using the same one. */
 export const DEFAULT_DAEMON_PORT = 9077;
-export const DEFAULT_DAEMON_PROFILE = "coding-agent";
 
 /** Incremental git-sync settings (see core/sync.ts). */
 /** The config file's shape — every field optional; omitted fields take the documented default. */
@@ -284,7 +283,6 @@ export interface Config {
   apiUrl: string;
   apiToken?: string;
   apiPort: number;
-  daemonProfile: string;
   embedPackagePath?: string;
   bankId?: string; // resolved per-directory via deriveBankIdOrSkip — see core/bank.ts
   dynamicBankId?: boolean;
@@ -570,7 +568,6 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     apiUrl: `http://127.0.0.1:${apiPort}`,
     apiToken: raw.apiToken || undefined,
     apiPort,
-    daemonProfile: DEFAULT_DAEMON_PROFILE,
     embedPackagePath: raw.embedPackagePath || undefined,
     bankId: raw.bankId,
     dynamicBankId: raw.dynamicBankId,

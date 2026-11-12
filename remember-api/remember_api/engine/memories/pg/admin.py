@@ -18,6 +18,52 @@ from .writes import delete_stale_observations
 # --------------------------------------------------------------- consolidation gauges
 
 
+async def banks_needing_consolidation(*, conn: Any, schema: str) -> list:
+    """Find local banks with eligible facts and no queued consolidation."""
+    from ...schema import fq_store_table_explicit
+
+    banks = fq_store_table_explicit("banks", schema)
+    operations = fq_store_table_explicit("async_operations", schema)
+    memories = fq_store_table_explicit("memory_units", schema)
+    return await conn.fetch(
+        f"""
+        SELECT $1::text AS schema_name, b.bank_id
+        FROM {banks} b
+        WHERE COALESCE(b.config -> 'enable_auto_consolidation', 'true'::jsonb) <> 'false'::jsonb
+          AND NOT EXISTS (
+              SELECT 1 FROM {operations} o
+              WHERE o.bank_id = b.bank_id AND o.operation_type = 'consolidation'
+                AND o.status IN ('pending', 'processing')
+          )
+          AND EXISTS (
+              SELECT 1 FROM {memories} m
+              WHERE m.bank_id = b.bank_id AND m.consolidated_at IS NULL
+                AND m.fact_type IN ('experience', 'world')
+          )
+          AND (
+              EXISTS (
+                  SELECT 1 FROM (
+                      SELECT m.consolidation_failed_at FROM {memories} m
+                      WHERE m.bank_id = b.bank_id AND m.consolidated_at IS NULL
+                        AND m.fact_type IN ('experience', 'world')
+                      ORDER BY m.created_at DESC LIMIT 100
+                  ) newest WHERE newest.consolidation_failed_at IS NULL
+              )
+              OR (
+                  SELECT count(*) FROM {memories} m
+                  WHERE m.bank_id = b.bank_id AND m.consolidated_at IS NULL
+                    AND m.fact_type IN ('experience', 'world')
+              ) > (
+                  SELECT count(*) FROM {memories} f
+                  WHERE f.bank_id = b.bank_id AND f.consolidation_failed_at IS NOT NULL
+                    AND f.fact_type IN ('experience', 'world')
+              )
+          )
+        """,
+        schema,
+    )
+
+
 async def count_consolidation_backlog(*, conn: Any, schema: str, per_bank: bool) -> dict[str | None, int]:
     """Unconsolidated, not-failed experience/world memories of every bank in ``schema``.
 

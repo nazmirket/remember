@@ -46,7 +46,6 @@ def search(monkeypatch):
     conn = _CapturingConn()
 
     engine = MemoryEngine.__new__(MemoryEngine)
-    engine._operation_validator = None
     engine.embeddings = object()
     resolved: dict[str, object] = {}
 
@@ -98,8 +97,6 @@ def search(monkeypatch):
                 # stub has to carry it or the call fails before reaching what is under test.
                 database_schema="public",
                 text_search_extension=ext,
-                text_search_extension_pg_search_function_schema="paradedb",
-                text_search_extension_pg_search_tokenizer="",
                 bm25_max_query_terms=20,
                 bm25_selective_terms=bm25_selective_terms,
             ),
@@ -161,9 +158,9 @@ async def test_enabled_without_embedding_still_falls_back_to_bm25(search):
 
 
 @pytest.mark.asyncio
-async def test_non_native_extension_passes_raw_query(search):
-    await search.run(enable_text_search=True, embedding=[0.1, 0.2], ext="pgroonga")
-    assert search.conn.params[0] == ("[0.1, 0.2]", "bank-1", "some query")
+async def test_non_native_extension_is_rejected(search):
+    with pytest.raises(ValueError, match="Unsupported text search extension"):
+        await search.run(enable_text_search=True, embedding=[0.1, 0.2], ext="pgroonga")
 
 
 @pytest.mark.asyncio
@@ -180,16 +177,6 @@ async def test_native_empty_tokens_without_embedding_returns_empty(search):
     result = await search.run(enable_text_search=True, embedding=None, query="???")
     assert result == []
     assert search.conn.queries == []
-
-
-@pytest.mark.asyncio
-async def test_empty_tokens_drops_the_arm_on_every_backend(search):
-    """Recall drops BM25 whenever the query has no word characters, whatever the
-    backend; page search must not keep feeding a punctuation-only string to a
-    non-native parser."""
-    await search.run(enable_text_search=True, embedding=[0.1, 0.2], query="???", ext="pgroonga")
-    assert "ts_rank_cd" not in search.conn.queries[0]
-    assert search.conn.params[0] == ("[0.1, 0.2]", "bank-1")
 
 
 @pytest.mark.asyncio

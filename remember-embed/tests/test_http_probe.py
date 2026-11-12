@@ -11,7 +11,6 @@ import pytest
 
 from remember_embed._http_probe import ProbeResponse, aprobe_get, probe_get
 from remember_embed.daemon_embed_manager import DaemonEmbedManager
-from remember_embed.profile_manager import ProfileManager
 
 from .http_stub import closed_port, reply, serve
 
@@ -110,22 +109,3 @@ class TestPortHealthOk:
 
     def test_nothing_listening(self):
         assert DaemonEmbedManager._port_health_ok(closed_port()) is False
-
-
-class TestProfileDaemonCheck:
-    """ProfileManager._check_daemon_running: any 200 from /health."""
-
-    def test_200(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        with serve(reply(200, {"status": "starting"})) as stub:
-            assert ProfileManager()._check_daemon_running(stub.port) is True
-            assert stub.paths == ["/health"]
-
-    def test_non_200(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        with serve(reply(503)) as stub:
-            assert ProfileManager()._check_daemon_running(stub.port) is False
-
-    def test_down(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert ProfileManager()._check_daemon_running(closed_port()) is False

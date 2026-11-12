@@ -186,12 +186,10 @@ class TestStartDaemonSerialization:
             patch.object(DaemonEmbedManager, "is_running", return_value=True),
             patch.object(DaemonEmbedManager, "_clear_port") as mock_clear,
             patch.object(DaemonEmbedManager, "_start_daemon_locked") as mock_locked,
-            patch.object(DaemonEmbedManager, "_register_profile") as mock_register,
         ):
-            assert manager._start_daemon({}, "codex") is True
+            assert manager._start_daemon({}) is True
             mock_clear.assert_not_called()
             mock_locked.assert_not_called()
-            mock_register.assert_called_once()
 
     def test_start_daemon_locked_skips_spawn_when_port_already_healthy(self, tmp_path, monkeypatch):
         """Inside _start_daemon_locked: healthy daemon appearing between checks skips spawn.
@@ -201,14 +199,14 @@ class TestStartDaemonSerialization:
         second is_running() check returns True and we must NOT proceed to
         subprocess.Popen.
         """
-        from remember_embed.profile_manager import ProfilePaths
+        from remember_embed.local_state import DaemonPaths
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         manager = DaemonEmbedManager()
 
         log_path = tmp_path / "daemon.log"
-        paths = ProfilePaths(
+        paths = DaemonPaths(
             config=tmp_path / "embed",
             lock=tmp_path / "daemon.lock",
             log=log_path,
@@ -218,22 +216,21 @@ class TestStartDaemonSerialization:
         with (
             patch.object(DaemonEmbedManager, "_clear_port", return_value=True),
             patch.object(DaemonEmbedManager, "is_running", return_value=True),
-            patch.object(DaemonEmbedManager, "_register_profile"),
             patch.object(DaemonEmbedManager, "_rotate_daemon_log") as mock_rotate,
             patch("subprocess.Popen") as mock_popen,
         ):
-            assert manager._start_daemon_locked({}, "codex", paths) is True
+            assert manager._start_daemon_locked({}, paths) is True
             mock_popen.assert_not_called()
             mock_rotate.assert_not_called()
 
     def test_rotation_runs_after_port_clear_and_before_spawn(self, tmp_path, monkeypatch):
-        from remember_embed.profile_manager import ProfilePaths
+        from remember_embed.local_state import DaemonPaths
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         monkeypatch.setattr("time.sleep", lambda _: None)
         manager = DaemonEmbedManager()
-        paths = ProfilePaths(
+        paths = DaemonPaths(
             config=tmp_path / "embed", lock=tmp_path / "daemon.lock", log=tmp_path / "daemon.log", port=9600
         )
         calls = []
@@ -245,14 +242,13 @@ class TestStartDaemonSerialization:
                 DaemonEmbedManager, "_rotate_daemon_log", side_effect=lambda *_args, **_kwargs: calls.append("rotate")
             ),
             patch.object(DaemonEmbedManager, "_find_api_command", return_value=["remember-api"]),
-            patch.object(DaemonEmbedManager, "_register_profile"),
             patch(
                 "subprocess.Popen",
                 side_effect=lambda *_args, **_kwargs: calls.append("spawn") or MagicMock(**{"poll.return_value": None}),
             ),
             patch("remember_embed.daemon_embed_manager.Live"),
         ):
-            assert manager._start_daemon_locked({}, "codex", paths) is True
+            assert manager._start_daemon_locked({}, paths) is True
 
         assert calls == ["clear", "rotate", "spawn"]
 
@@ -314,9 +310,9 @@ class TestStop:
     """
 
     def _paths(self, tmp_path, port=9700):
-        from remember_embed.profile_manager import ProfilePaths
+        from remember_embed.local_state import DaemonPaths
 
-        return ProfilePaths(
+        return DaemonPaths(
             config=tmp_path / "embed",
             lock=tmp_path / "daemon.lock",
             log=tmp_path / "daemon.log",
@@ -331,11 +327,7 @@ class TestStop:
         """
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", side_effect=[True, False]),
             patch.object(
                 DaemonEmbedManager,
@@ -351,7 +343,7 @@ class TestStop:
             patch.object(DaemonEmbedManager, "_process_command_line", return_value=_DAEMON_CMDLINE),
             patch.object(DaemonEmbedManager, "_kill_process", return_value=True) as mock_kill,
         ):
-            assert manager.stop("default") is True
+            assert manager.stop() is True
             mock_kill.assert_called_once_with(4242)
 
     def test_unresponsive_listener_is_reclaimed_like_clear_port(self, tmp_path):
@@ -365,18 +357,14 @@ class TestStop:
         """
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", side_effect=[True, False]),
             patch.object(DaemonEmbedManager, "_port_health_ok", return_value=False),
             patch.object(DaemonEmbedManager, "_listening_pids", return_value=[9999]),
             patch.object(DaemonEmbedManager, "_process_command_line", return_value=_DAEMON_CMDLINE),
             patch.object(DaemonEmbedManager, "_kill_process", return_value=True) as mock_kill,
         ):
-            assert manager.stop("default") is True
+            assert manager.stop() is True
             mock_kill.assert_called_once_with(9999)
 
         with (
@@ -393,65 +381,49 @@ class TestStop:
         """_kill_process() returning False must not be converted into success."""
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", return_value=True),
             patch.object(DaemonEmbedManager, "_listening_pids", return_value=[4242]),
             patch.object(DaemonEmbedManager, "_process_command_line", return_value=_DAEMON_CMDLINE),
             patch.object(DaemonEmbedManager, "_kill_process", return_value=False),
         ):
-            assert manager.stop("default") is False
+            assert manager.stop() is False
 
     def test_bound_port_without_pid_returns_false(self, tmp_path):
         """A bound port whose PID can't be found is a failure, not a success."""
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", return_value=True),
             patch.object(DaemonEmbedManager, "_listening_pids", return_value=[]),
             patch.object(DaemonEmbedManager, "_kill_process") as mock_kill,
         ):
-            assert manager.stop("default") is False
+            assert manager.stop() is False
             mock_kill.assert_not_called()
 
     def test_unbound_port_reports_already_stopped(self, tmp_path):
         """Nothing bound to the port means there is nothing to stop."""
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", return_value=False),
             patch.object(DaemonEmbedManager, "_listening_pids") as mock_find,
         ):
-            assert manager.stop("default") is True
+            assert manager.stop() is True
             mock_find.assert_not_called()
 
     def test_lingering_listener_after_kill_returns_false(self, tmp_path):
         """If the listener never disappears after the kill, stop() must not claim success."""
         manager = DaemonEmbedManager()
         with (
-            patch.object(
-                manager._profile_manager,
-                "resolve_profile_paths",
-                return_value=self._paths(tmp_path),
-            ),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=self._paths(tmp_path)),
             patch.object(DaemonEmbedManager, "_is_port_in_use", return_value=True),
             patch.object(DaemonEmbedManager, "_listening_pids", return_value=[4242]),
             patch.object(DaemonEmbedManager, "_process_command_line", return_value=_DAEMON_CMDLINE),
             patch.object(DaemonEmbedManager, "_kill_process", return_value=True),
             patch("remember_embed.daemon_embed_manager.time.sleep"),
         ):
-            assert manager.stop("default") is False
+            assert manager.stop() is False
 
 
 class TestListeningPidDiscovery:
@@ -548,23 +520,23 @@ class TestProcessOwnership:
 
     def test_stop_leaves_foreign_process_alive(self, tmp_path):
         """stop() reclaims the port the same way, so it needs the same guard."""
-        from remember_embed.profile_manager import ProfilePaths
+        from remember_embed.local_state import DaemonPaths
 
         manager = DaemonEmbedManager()
-        paths = ProfilePaths(
+        paths = DaemonPaths(
             config=tmp_path / "embed",
             lock=tmp_path / "daemon.lock",
             log=tmp_path / "daemon.log",
             port=9700,
         )
         with (
-            patch.object(manager._profile_manager, "resolve_profile_paths", return_value=paths),
+            patch("remember_embed.daemon_embed_manager.daemon_paths", return_value=paths),
             patch.object(DaemonEmbedManager, "_is_port_in_use", return_value=True),
             patch.object(DaemonEmbedManager, "_listening_pids", return_value=[4242]),
             patch.object(DaemonEmbedManager, "_process_command_line", return_value="/usr/sbin/sshd -D"),
             patch.object(DaemonEmbedManager, "_kill_process") as mock_kill,
         ):
-            assert manager.stop("default") is False
+            assert manager.stop() is False
             mock_kill.assert_not_called()
 
     def test_dev_mode_and_windows_daemon_command_lines_are_recognized(self):
@@ -584,21 +556,21 @@ class TestStartDaemonLockTimeout:
     """A start that cannot get the profile lock reports failure, not an OSError."""
 
     def test_lock_timeout_returns_false(self, tmp_path, monkeypatch):
-        from remember_embed.profile_manager import ProfileLockTimeout
+        from remember_embed.local_state import DaemonLockTimeout
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         manager = DaemonEmbedManager()
 
         def boom(file_obj, timeout=None):
-            raise ProfileLockTimeout("held by PID 999")
+            raise DaemonLockTimeout("held by PID 999")
 
         with (
             patch("remember_embed.daemon_embed_manager.lock_file", boom),
             patch.object(DaemonEmbedManager, "_start_daemon_locked") as mock_locked,
             patch.object(DaemonEmbedManager, "is_running", return_value=False),
         ):
-            assert manager._start_daemon({}, "codex") is False
+            assert manager._start_daemon({}) is False
             mock_locked.assert_not_called()
 
 

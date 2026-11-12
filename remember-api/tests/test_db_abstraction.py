@@ -244,207 +244,9 @@ class TestPostgreSQLDialect:
         assert "to_tsquery('french', $4)" in arm
         assert "to_tsquery('english'" not in arm
 
-    def test_build_bm25_arm_vchord(self, d):
-        arm = d.build_bm25_arm(
-            table="t",
-            cols="id",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="vchord",
-        )
-        assert "to_bm25query" in arm
-        assert "tokenize" in arm
-
-    def test_build_bm25_arm_vchord_gates_zero_score_by_default(self, d):
-        """VectorChord ranks every doc, so a score gate must filter non-matches.
-
-        The negated `<&>` score is BM25 (>= 0); the default 0 floor keeps only
-        rows with a genuine query-term match, mirroring native tsvector's `@@`.
-        """
-        arm = d.build_bm25_arm(
-            table="t",
-            cols="id",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="vchord",
-        )
-        assert (
-            "-(search_vector <&> (SELECT to_bm25query('idx_memory_units_text_search', tokenize($4, 'llmlingua2')))) > 0"
-            in arm
-        )
-
-    def test_build_bm25_arm_vchord_honors_custom_min_score(self, d):
-        arm = d.build_bm25_arm(
-            table="t",
-            cols="id",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="vchord",
-            bm25_min_score=2.5,
-        )
-        # Inclusive (`>=`), matching the documented `min_scores` contract and the
-        # semantic arm's `>= min_similarity`. This was `>` until #3882: the same
-        # parameter served as both vchord's structural match gate and the caller's
-        # floor, and the gate's `>` leaked into the public contract.
-        assert ">= 2.5" in arm
-
-    def test_build_bm25_arm_pg_textsearch_scores_each_row(self, d):
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_textsearch",
-        )
-        expected_distance = "text <@> to_bm25query($4, 'idx_memory_units_text_search')"
-        assert f"-({expected_distance}) AS bm25_score" in arm
-        assert f"ORDER BY {expected_distance} ASC" in arm
-        assert "$4 <@>" not in arm
-
-    def test_build_bm25_arm_pgroonga(self, d):
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pgroonga",
-        )
-        # pgroonga uses the &@~ operator + pgroonga_score for ranking with inline
-        # pgroonga_tokenize aggregation.
-        assert "&@~ (SELECT string_agg(pgroonga_query_escape(elem->>'value'), ' OR ')" in arm
-        assert "pgroonga_tokenize($4, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')" in arm
-        assert "pgroonga_score(tableoid, ctid)" in arm
-        assert "to_tsquery" not in arm
-
-    def test_build_bm25_arm_pgroonga_ignores_bm25_language(self, d):
-        """pgroonga's tokenizer is fixed at index creation; bm25_language must not leak in."""
-        arm = d.build_bm25_arm(
-            table="t",
-            cols="id",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pgroonga",
-            bm25_language="french",
-        )
-        assert "french" not in arm
-
-    def test_build_bm25_arm_pg_search(self, d):
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_search",
-        )
-        assert "paradedb.score(id)" in arm
-        # @@@ on the key_field requires a field-qualified query, so we
-        # fan the bind param out across all indexed text fields.
-        assert "id @@@ paradedb.boolean(should =>" in arm
-        assert "paradedb.match('text', $4)" in arm
-        assert "paradedb.match('text_signals', $4)" in arm
-        # `context` multiplies the postings scanned for little signal (#4313).
-        assert "'context'" not in arm
-        assert "paradedb.score(id) DESC" in arm
-        assert "'bm25' AS source" in arm
-        assert "LIMIT $3" in arm
-
-    def test_build_bm25_arm_pg_search_tokenizer_prunes_to_terms(self, d):
-        """With a configured tokenizer the query becomes capped exact term queries (#4313)."""
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_search",
-            pg_search_tokenizer="jieba",
-            max_query_terms=16,
-        )
-        assert "unnest($4::text::pdb.jieba::text[])" in arm
-        assert "paradedb.term(f, t)" in arm
-        assert "LIMIT 16" in arm
-        assert "paradedb.match(" not in arm
-
-        uncapped = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_search",
-            pg_search_tokenizer="lindera(chinese)",
-        )
-        assert "pdb.lindera(chinese)::text[]" in uncapped
-        assert "min(o) LIMIT" not in uncapped
-
-    def test_build_bm25_arm_pg_search_ngram_keeps_raw_match(self, d):
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_search",
-            pg_search_tokenizer="ngram(2,3)",
-            max_query_terms=16,
-        )
-        assert "paradedb.match('text', $4)" in arm
-        assert "term(" not in arm
-
-    def test_build_bm25_arm_pg_search_custom_schema(self, d):
-        arm = d.build_bm25_arm(
-            table="schema.memory_units",
-            cols="id, text",
-            fact_type="world",
-            bank_id_param="$2",
-            limit_param="$3",
-            text_param="$4",
-            text_search_extension="pg_search",
-            pg_search_function_schema="pgsearch",
-        )
-        assert "pgsearch.score(id)" in arm
-        assert "id @@@ pgsearch.boolean(should =>" in arm
-        assert "pgsearch.match('text', $4)" in arm
-        assert "pgsearch.match('text_signals', $4)" in arm
-        assert "pgsearch.score(id) DESC" in arm
-        assert "'bm25' AS source" in arm
-        assert "LIMIT $3" in arm
-
     def test_prepare_bm25_text_native(self, d):
         result = d.prepare_bm25_text(["hello", "world"], "hello world")
         assert result == "hello | world"
-
-    def test_prepare_bm25_text_vchord(self, d):
-        result = d.prepare_bm25_text(["hello", "world"], "hello world", text_search_extension="vchord")
-        assert result == "hello world"
-
-    def test_prepare_bm25_text_pgroonga(self, d):
-        result = d.prepare_bm25_text(["hello", "world"], "hello world", text_search_extension="pgroonga")
-        assert result == "hello world"
-
-        result = d.prepare_bm25_text(["网关计划任务"], "网关计划任务", text_search_extension="pgroonga")
-        assert result == "网关计划任务"
-
-    def test_prepare_bm25_text_pg_search(self, d):
-        result = d.prepare_bm25_text(["hello", "world"], "hello world", text_search_extension="pg_search")
-        assert result == "hello world"
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +591,6 @@ class TestPostgreSQLSearchVector:
         "ext,needle",
         [
             ("native", "to_tsvector('english'::regconfig,"),
-            ("vchord", "::bm25_catalog.bm25vector"),
         ],
     )
     def test_expr_builds_vector_for_vector_backends(self, ext, needle):
@@ -799,13 +600,6 @@ class TestPostgreSQLSearchVector:
         assert expr is not None and needle in expr
         # Always built from the same three carried columns.
         assert "COALESCE(text, '')" in expr and "COALESCE(text_signals, '')" in expr
-
-    @pytest.mark.parametrize("ext", ["pgroonga", "pg_textsearch", "pg_search"])
-    def test_expr_none_for_base_column_backends(self, ext):
-        from remember_api.engine.db.ops_postgresql import pg_search_vector_expr
-
-        # These index the base text columns directly; search_vector stays empty.
-        assert pg_search_vector_expr(self._cfg(ext)) is None
 
     def test_expr_accepts_custom_column_refs(self):
         from remember_api.engine.db.ops_postgresql import pg_search_vector_expr
@@ -841,14 +635,9 @@ class TestPostgreSQLSearchVector:
         return conn.fetch.call_args.args[0]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ext", ["native", "vchord"])
+    @pytest.mark.parametrize("ext", ["native"])
     async def test_insert_includes_search_vector_column(self, ext):
         assert "search_vector" in await self._insert_query(ext)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("ext", ["pgroonga", "pg_textsearch", "pg_search"])
-    async def test_insert_omits_search_vector_column(self, ext):
-        assert "search_vector" not in await self._insert_query(ext)
 
 
 # ---------------------------------------------------------------------------

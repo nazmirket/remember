@@ -1,14 +1,12 @@
 """
-Configuration resolution with hierarchical overrides.
+Configuration resolution for the local daemon and each bank.
 
 Resolves config values through the hierarchy:
-  Global (env vars) → Tenant config (via extension) → Bank config (database)
+  Global (env vars) → Bank config (database)
 
-Config values are resolved on every request to ensure consistency across
-multiple API servers.
+Bank configuration is stored locally in PostgreSQL.
 """
 
-import asyncio
 import copy
 import json
 import logging
@@ -30,7 +28,6 @@ from remember_api.config import (
 )
 from remember_api.engine.response_models import MentalModelTrigger, ReflectDefaultOptions
 from remember_api.engine.schema import fq_table
-from remember_api.extensions.tenant import TenantExtension
 from remember_api.models import RequestContext
 
 if TYPE_CHECKING:
@@ -76,11 +73,9 @@ class ValidatedBankConfigUpdate:
     """Normalized bank overrides plus what is needed to re-validate them at write time.
 
     ``updates`` is ready to merge into ``banks.config``. ``parent_config`` is the
-    resolved global + tenant base the projected configuration is rebuilt from
+    resolved global base the projected configuration is rebuilt from
     while the bank row is locked; it is None when the update touches no
-    cross-field constrained field and therefore needs no re-check. Resolving it
-    during validation (rather than during persistence) keeps the tenant config
-    hook on the once-per-request path and off the locked path.
+    cross-field constrained field and therefore needs no re-check.
     """
 
     updates: dict[str, Any]
@@ -167,47 +162,21 @@ def _validate_projected_bank_config(
 
 
 class ConfigResolver:
-    """Resolves hierarchical configuration with tenant/bank overrides."""
+    """Resolve global settings and bank-specific overrides."""
 
-    def __init__(self, backend: "DatabaseBackend", tenant_extension: TenantExtension | None = None):
+    def __init__(self, backend: "DatabaseBackend"):
         """
         Initialize config resolver.
 
         Args:
             backend: Database backend for connection acquisition
-            tenant_extension: Optional tenant extension for tenant-level config and permissions
         """
         self._backend = backend
-        self.tenant_extension = tenant_extension
         self._global_config = _get_raw_config()
         self._configurable_fields = RememberConfig.get_configurable_fields()
         self._credential_fields = RememberConfig.get_credential_fields()
         # The API-visible subset, resolved once: every config read filters to it.
         self._public_fields = frozenset(self._configurable_fields - self._credential_fields)
-
-    async def _resolve_tenant_overrides(self, scope: str, context: RequestContext | None = None) -> dict[str, Any]:
-        """Tenant-level overrides to apply on top of the global config.
-
-        Returns only the fields the tenant actually overrides — the global config is
-        the base *object*, not a dict we rebuild per request. ``scope`` names the
-        caller (a bank id, or a description of a bulk resolve) for log messages only;
-        tenant config is per-request, not per-bank.
-        """
-        if not (self.tenant_extension and context):
-            return {}
-        try:
-            tenant_overrides = await self.tenant_extension.get_tenant_config(context)
-        except Exception as e:
-            logger.warning(f"Failed to load tenant config for {scope}: {e}")
-            return {}
-        if not tenant_overrides:
-            return {}
-        # Normalize keys and filter to configurable fields only
-        normalized_tenant = normalize_config_dict(tenant_overrides)
-        configurable_tenant = {k: v for k, v in normalized_tenant.items() if k in self._configurable_fields}
-        if configurable_tenant:
-            logger.debug(f"Applied tenant config overrides for {scope}: {list(configurable_tenant.keys())}")
-        return configurable_tenant
 
     def _with_overrides(self, overrides: dict[str, Any]) -> RememberConfig:
         """Global config with ``overrides`` applied, as a fresh object.
@@ -239,23 +208,18 @@ class ConfigResolver:
 
         Resolution order:
         1. Global config (from environment variables)
-        2. Tenant config overrides (from TenantExtension.get_tenant_config())
-        3. Bank config overrides (from banks.config JSONB)
+        2. Bank config overrides (from banks.config JSONB)
 
         Args:
             bank_id: Bank identifier
-            context: Request context for tenant config resolution
+            context: Request context for the bank request
 
         Returns:
             Complete RememberConfig with hierarchical overrides applied
         """
-        overrides = await self._resolve_tenant_overrides(f"bank {bank_id}", context)
-
-        # Load bank config overrides
-        bank_overrides = await self._load_bank_config(bank_id, cached=cached)
-        if bank_overrides:
-            overrides.update(bank_overrides)
-            logger.debug(f"Applied bank config overrides for bank {bank_id}: {list(bank_overrides.keys())}")
+        overrides = await self._load_bank_config(bank_id, cached=cached)
+        if overrides:
+            logger.debug(f"Applied bank config overrides for bank {bank_id}: {list(overrides.keys())}")
 
         resolved_config = self._with_overrides(overrides)
         validate_retain_chunking_config(
@@ -271,12 +235,11 @@ class ConfigResolver:
         self, bank_id: str, context: RequestContext | None = None, *, cached: bool = True
     ) -> dict[str, Any]:
         """
-        Get fully resolved config for a bank (filtered by permissions).
+        Get the public, resolved configuration for a bank.
 
         Resolution order:
         1. Global config (from environment variables)
-        2. Tenant config overrides (from TenantExtension.get_tenant_config())
-        3. Bank config overrides (from banks.config JSONB)
+        2. Bank config overrides (from banks.config JSONB)
 
         ``cached`` defaults to True because this is ALSO on the hot path: ``recall_async`` and
         ``retain_batch_async`` call it per request, and forcing a read there costs a pool acquire
@@ -291,11 +254,10 @@ class ConfigResolver:
         SECURITY:
         - Only returns configurable fields (excludes static/infrastructure fields)
         - Filters out ALL credential fields (API keys, base URLs, etc.)
-        - Further filtered by tenant/bank permissions if extension provides them
 
         Args:
             bank_id: Bank identifier
-            context: Request context for tenant config resolution and permissions
+            context: Request context for the bank request
 
         Returns:
             Dict of allowed configurable fields only (never includes credentials or static fields)
@@ -303,9 +265,8 @@ class ConfigResolver:
         # Resolve full config with all hierarchical overrides
         resolved_config = await self.resolve_full_config(bank_id, context, cached=cached)
 
-        # SECURITY: drop static/infrastructure + credential fields, then permission-filter.
-        filtered = self._public_fields_of(resolved_config)
-        return await self._apply_permission_filter(filtered, bank_id, context)
+        # SECURITY: drop static/infrastructure and credential fields.
+        return self._public_fields_of(resolved_config)
 
     def _public_fields_of(self, config: RememberConfig) -> dict[str, Any]:
         """Project a resolved config down to its configurable, non-credential fields.
@@ -326,48 +287,24 @@ class ConfigResolver:
         """
         return {k: v for k, v in config_dict.items() if k in self._public_fields}
 
-    async def _apply_permission_filter(
-        self, filtered: dict[str, Any], bank_id: str, context: RequestContext | None
-    ) -> dict[str, Any]:
-        """Further restrict already-stripped config to the tenant/bank permission allow-list.
-
-        On extension error, leaves ``filtered`` unchanged (parity with the historical
-        single-bank path: a permissions lookup failure must not leak or drop fields).
-        """
-        if not (self.tenant_extension and context):
-            return filtered
-        try:
-            allowed_fields = await self.tenant_extension.get_allowed_config_fields(context, bank_id)
-            if allowed_fields is not None:  # None means "allow all"
-                filtered = {k: v for k, v in filtered.items() if k in allowed_fields}
-                logger.debug(
-                    f"Applied permission filter for bank {bank_id}: allowed={len(allowed_fields)} fields, "
-                    f"returned={len(filtered)} fields"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to load permissions for bank {bank_id}: {e}")
-        return filtered
-
     async def get_bank_configs(
         self, bank_ids: list[str], context: RequestContext | None = None
     ) -> dict[str, dict[str, Any]]:
         """Batch variant of :meth:`get_bank_config` for many banks.
 
         Equivalent to calling ``get_bank_config`` per bank, but resolves the
-        global + tenant base once and loads every bank's ``banks.config`` JSONB
+        global base once and loads every bank's ``banks.config`` JSONB
         in a single query, instead of one config round-trip per bank. Used by
         ``list_banks`` to overlay disposition + mission without an N+1.
 
         Returns a mapping of bank_id -> filtered configurable-field dict. A bank
-        with no config row still appears, mapped to the global+tenant base.
+        with no config row still appears, mapped to the global base.
         """
         if not bank_ids:
             return {}
 
-        # Global + tenant base, resolved once (tenant override is per-request, not per-bank).
+        # Global base, resolved once.
         base_dict = self._public_fields_of(self._global_config)
-        tenant_base = await self._resolve_tenant_overrides("bulk resolve", context)
-        base_dict.update(self._strip_static_and_credential_fields(tenant_base))
 
         # All bank overrides in one query, then merge + strip per bank.
         bank_overrides = await self._load_bank_configs(bank_ids)
@@ -379,13 +316,7 @@ class ConfigResolver:
             for bank_id in bank_ids
         }
 
-        # Permission filter is per-bank; resolve concurrently when an extension is present.
-        if not (self.tenant_extension and context):
-            return stripped
-        permission_filtered = await asyncio.gather(
-            *(self._apply_permission_filter(stripped[bank_id], bank_id, context) for bank_id in bank_ids)
-        )
-        return dict(zip(bank_ids, permission_filtered, strict=True))
+        return stripped
 
     async def _load_bank_config(self, bank_id: str, *, cached: bool = True) -> dict[str, Any]:
         """
@@ -408,9 +339,7 @@ class ConfigResolver:
         # and release cost more statements than the query itself. Caching it is what lets a retain
         # into a store-owned bank, which writes nothing to Postgres, avoid the pool entirely.
         #
-        # The RAW column is cached, not the resolved overrides: `_active_bank_overrides` filters
-        # by what is configurable and permitted, and that answer can differ between callers of the
-        # same bank. Caching the resolved form would serve one caller's permissions to another.
+        # Cache the stored column and resolve it against the current global settings on each read.
         from .engine import bank_info_cache
 
         async def _read_config_row() -> dict:
@@ -491,13 +420,11 @@ class ConfigResolver:
         context: RequestContext | None = None,
         *,
         projected_bank_overrides: dict[str, Any] | None = None,
-        check_permissions: bool = True,
     ) -> ValidatedBankConfigUpdate:
         """
         Normalize and validate bank configuration overrides.
 
-        Permission hooks run here, once per request. Cross-field constraints are
-        checked here too, so an invalid update is rejected before the bank is
+        Cross-field constraints are checked here, so an invalid update is rejected before the bank is
         created — but they are checked again inside ``_persist_bank_config``,
         which is where the result is actually guaranteed.
 
@@ -507,11 +434,9 @@ class ConfigResolver:
                     Keys can be in env var format (REMEMBER_API_LLM_PROVIDER)
                     or Python field format (llm_provider).
                     Only configurable fields are allowed.
-            context: Request context for permission checking
+            context: Request context for the bank request
             projected_bank_overrides: Bank overrides to use as the validation
                 base instead of loading the current bank row.
-            check_permissions: Whether client field permissions apply to these
-                updates. Server-owned projected values set this to false.
 
         Returns:
             Normalized updates ready to persist, with the base needed to
@@ -548,26 +473,6 @@ class ConfigResolver:
                     f"Unknown configuration fields: {sorted(invalid_fields)}. "
                     f"Valid configurable fields: {sorted(list(self._configurable_fields)[:10])}..."
                 )
-
-        # PERMISSIONS: Check tenant/bank permissions
-        if check_permissions and self.tenant_extension and context:
-            try:
-                allowed_fields = await self.tenant_extension.get_allowed_config_fields(context, bank_id)
-                if allowed_fields is not None:  # None means "allow all"
-                    disallowed = set(normalized_updates.keys()) - allowed_fields
-                    if disallowed:
-                        raise ValueError(
-                            f"Not allowed to modify fields: {sorted(disallowed)}. "
-                            f"Your permissions allow: {sorted(list(allowed_fields)[:10])}..."
-                            if allowed_fields
-                            else f"Not allowed to modify fields: {sorted(disallowed)}. "
-                            "Your permissions do not allow any config modifications."
-                        )
-            except ValueError:
-                raise  # Re-raise permission errors
-            except Exception as e:
-                logger.warning(f"Failed to check permissions for bank {bank_id}: {e}")
-                # Continue without permission check (fail open for backward compatibility)
 
         # Validate every value against its declared field type before the
         # field-specific checks below, so a wrong-shaped value is reported as such
@@ -648,7 +553,7 @@ class ConfigResolver:
         # is what makes the result independent of request interleaving.
         parent_config: RememberConfig | None = None
         if not _CROSS_FIELD_CONSTRAINED_FIELDS.isdisjoint(normalized_updates):
-            parent_config = self._with_overrides(await self._resolve_tenant_overrides(f"bank {bank_id}", context))
+            parent_config = self._with_overrides({})
             current_overrides = (
                 await self._load_bank_config(bank_id)
                 if projected_bank_overrides is None
@@ -683,12 +588,8 @@ class ConfigResolver:
         Neither can slip a cross-field constraint past the other by validating
         against overrides that a third write has since replaced.
 
-        The lock is pessimistic on purpose. An optimistic revision would have to
-        re-run validation on retry, and validation calls tenant permission hooks
-        that may reserve quota or make time-sensitive decisions; those hooks run
-        exactly once, before this transaction opens. A caller that loses the race
-        gets the same ValueError the losing update would have raised had the two
-        writes been ordered, rather than a conflict status to retry.
+        A caller that loses the race receives the same validation error it would
+        have received if the writes had been ordered sequentially.
         """
         async with self._backend.transaction() as conn:
             # The lock is what serializes writers; it also settles whether the
@@ -911,7 +812,7 @@ def _coerce_stored_bank_overrides(bank_id: str, overrides: dict[str, Any], where
 
     String fields are JSON-encoded, which preserves the author's intent — the
     structure still reaches the prompt, as text. Anything else is dropped so the
-    bank falls back to the tenant/global value rather than wedging.
+    bank falls back to the global value rather than wedging.
 
     ``where`` labels the location in warnings; it is set when recursing into a
     retain strategy, whose overrides reach the same fields via ``apply_strategy``.

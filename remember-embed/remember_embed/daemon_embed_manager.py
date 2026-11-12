@@ -18,7 +18,15 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ._http_probe import ProbeResponse, probe_get
-from .profile_manager import ProfileLockTimeout, ProfileManager, lock_file, unlock_file
+from .local_state import (
+    DaemonLockTimeout,
+    daemon_paths,
+    lock_file,
+    parse_env_file,
+    record_daemon_port,
+    saved_daemon_port,
+    unlock_file,
+)
 
 logger = logging.getLogger(__name__)
 console = Console(stderr=True)
@@ -89,7 +97,7 @@ HEALTH_PROBE_TIMEOUT = _safe_positive_float(
     10.0,
 )
 # Everywhere else the question is only "is it up?", asked on hot paths (every
-# _ensure_started, profile delete, CLI status) and often on ports where nothing
+# _ensure_started, CLI status) and often on ports where nothing
 # is listening at all. A false negative there is cheap — the caller re-runs
 # ensure_running, which consults the long probe above before touching anything —
 # so these stay short. They were briefly raised to HEALTH_PROBE_TIMEOUT, which
@@ -239,17 +247,13 @@ def _terminate_startup_process(process: subprocess.Popen) -> None:
 
 
 class DaemonEmbedManager:
-    """Production embed manager using daemon-based architecture with profile isolation."""
-
-    def __init__(self):
-        """Initialize the daemon embed manager."""
-        self._profile_manager = ProfileManager()
+    """Manage the local daemon and its PostgreSQL instance."""
 
     @staticmethod
     def _rotate_daemon_log(log_path: Path, max_bytes: int, backup_count: int) -> None:
         """Rotate a full daemon log before a new daemon opens it.
 
-        Startup is serialized by the profile lock, and this runs only after
+        Startup is serialized by the daemon lock, and this runs only after
         any stale daemon has been stopped. That keeps child processes from
         writing to a renamed inode during rotation. Rotation only occurs at
         startup; an already-running daemon is left untouched.
@@ -269,45 +273,17 @@ class DaemonEmbedManager:
                 source.replace(log_path.with_name(f"{log_path.name}.{index + 1}"))
         log_path.replace(log_path.with_name(f"{log_path.name}.1"))
 
-    def _sanitize_profile_name(self, profile: str | None) -> str:
-        """Sanitize profile name for use in database names and file paths."""
-        if profile is None:
-            return "default"
-        return re.sub(r"[^a-zA-Z0-9_-]", "-", profile)
+    def get_database_url(self) -> str:
+        """Return the local pg0 database used by the coding agents."""
+        return "pg0://remember-embed-coding-agent"
 
-    def get_database_url(self, profile: str) -> str:
-        """Return the local pg0 database owned by this profile."""
-        return f"pg0://remember-embed-{self._sanitize_profile_name(profile)}"
+    def get_url(self) -> str:
+        """Return the local daemon URL."""
+        return f"http://127.0.0.1:{daemon_paths().port}"
 
-    def resolve_database_url(self, profile: str, config: Mapping[str, str] | None = None) -> str:
-        """Resolve the daemon database locally, independent of inherited settings."""
-        return self.get_database_url(profile)
-
-    def get_url(self, profile: str) -> str:
-        """
-        Get the URL for the daemon serving this profile.
-
-        Args:
-            profile: Profile name
-
-        Returns:
-            URL string (e.g., "http://127.0.0.1:54321")
-
-        Raises:
-            RuntimeError: If daemon is not running
-        """
-        paths = self._profile_manager.resolve_profile_paths(profile)
-        return f"http://127.0.0.1:{paths.port}"
-
-    def is_running(self, profile: str) -> bool:
-        """Check if daemon is running and responsive.
-
-        Uses the short liveness budget, not HEALTH_PROBE_TIMEOUT: this runs on
-        hot paths and a false negative only costs a re-run of ensure_running,
-        which consults the long probe before deciding anything destructive.
-        """
-        daemon_url = self.get_url(profile)
-        response = _probe(f"{daemon_url}/health", LIVENESS_PROBE_TIMEOUT)
+    def is_running(self) -> bool:
+        """Check whether the local daemon is responding."""
+        response = _probe(f"{self.get_url()}/health", LIVENESS_PROBE_TIMEOUT)
         return response is not None and response.status_code == 200
 
     def _dev_api_command(self) -> list[str] | None:
@@ -677,11 +653,11 @@ class DaemonEmbedManager:
         logger.warning(f"Process (PID {pid}) did not stop in time")
         return False
 
-    def _start_daemon(self, config: dict, profile: str, extra_args: list[str] | None = None) -> bool:
+    def _start_daemon(self, config: dict) -> bool:
         """Start the daemon in background.
 
         Serializes concurrent start attempts via an exclusive flock on the
-        profile's lock file, so two processes calling `start()` at the same
+        daemon's lock file, so two processes calling `start()` at the same
         time cannot race into `_clear_port` and kill each other's daemons.
         Inside the lock we re-check `is_running()`; the second caller sees
         the first caller's daemon and short-circuits.
@@ -690,38 +666,42 @@ class DaemonEmbedManager:
         that cannot get in reports a startup failure instead of raising an
         opaque OS error (issue #3100).
         """
-        paths = self._profile_manager.resolve_profile_paths(profile)
+        paths = daemon_paths()
         paths.lock.parent.mkdir(parents=True, exist_ok=True)
 
-        # Hold the per-profile start lock for the full startup sequence.
+        # Hold the daemon start lock for the full startup sequence.
         # lock_file() retries until the lock is acquired or the wait budget
         # expires, on both Unix (flock) and Windows (msvcrt), so concurrent
         # callers serialize here.
         with open(paths.lock, "w") as lock_fd:
             try:
                 lock_file(lock_fd)
-            except ProfileLockTimeout as exc:
-                logger.error(f"Cannot start daemon for profile '{profile}': {exc}")
+            except DaemonLockTimeout as exc:
+                logger.error(f"Cannot start local daemon: {exc}")
                 return False
             try:
-                if self.is_running(profile):
-                    logger.debug(f"Daemon for profile '{profile}' came up while waiting for start lock")
-                    if profile:
-                        self._register_profile(profile, paths.port, config)
+                previous_port = saved_daemon_port()
+                if previous_port is not None and previous_port != paths.port and self._is_port_in_use(previous_port):
+                    if self._owned_pid_on_port(previous_port, DAEMON_PROCESS_MARKERS, "remember daemon") is not None:
+                        logger.error("A Remember daemon is already running on port %s", previous_port)
+                        return False
+                if self.is_running():
+                    logger.debug("Daemon came up while waiting for the start lock")
+                    record_daemon_port(paths.port)
                     return True
-                return self._start_daemon_locked(config, profile, paths, extra_args=extra_args)
+                started = self._start_daemon_locked(config, paths)
+                if started:
+                    record_daemon_port(paths.port)
+                return started
             finally:
                 unlock_file(lock_fd)
 
     def _start_daemon_locked(
         self,
         config: dict,
-        profile: str,
         paths,
-        extra_args: list[str] | None = None,
     ) -> bool:
         """Perform the actual daemon startup. Caller must hold paths.lock."""
-        profile_label = f"profile '{profile}'" if profile else "default profile"
         daemon_log = paths.log
         port = paths.port
 
@@ -734,21 +714,18 @@ class DaemonEmbedManager:
         # already owns the port (started out-of-band, e.g. by another user or a
         # previous version upgrade). Re-check is_running so we don't spawn a
         # second daemon that would fail to bind.
-        if self.is_running(profile):
-            logger.debug(f"Daemon for profile '{profile}' already healthy; skipping spawn")
-            if profile:
-                self._register_profile(profile, port, config)
+        if self.is_running():
+            logger.debug("Local daemon already healthy; skipping spawn")
             return True
 
-        # Load profile's .env file and merge with provided config
-        # This fixes issue #305 where profile env vars were ignored
-        profile_config = self._profile_manager.load_profile_config(profile)
-        # Merge: profile config first, then override with explicitly provided config
-        merged_config = {**profile_config, **config}
+        # Load saved daemon settings and merge with provided configuration
+        saved_config = parse_env_file(paths.config)
+        # Explicitly provided configuration takes priority
+        merged_config = {**saved_config, **config}
         config = merged_config
 
         # Build the daemon environment: every REMEMBER_* key in the merged
-        # profile/explicit config, forwarded verbatim under its own name.
+        # saved/explicit config, forwarded verbatim under its own name.
         #
         # There is deliberately no whitelist of known settings. There used to be
         # one — LLM/log/idle_timeout, keyed by lowercase aliases — and a setting
@@ -766,7 +743,10 @@ class DaemonEmbedManager:
             if key.startswith("REMEMBER_") and value is not None:
                 env[key] = str(value)
 
-        env["REMEMBER_API_DATABASE_URL"] = self.resolve_database_url(profile, config)
+        env["PYTHON_DOTENV_DISABLED"] = "1"
+        env["REMEMBER_API_DATABASE_URL"] = self.get_database_url()
+        env.pop("REMEMBER_API_READ_DATABASE_URL", None)
+        env.pop("REMEMBER_API_MIGRATION_DATABASE_URL", None)
         env["REMEMBER_API_HOST"] = "127.0.0.1"
         env["REMEMBER_API_WORKERS"] = "1"
         env["REMEMBER_API_WORKER_ENABLED"] = "true"
@@ -816,8 +796,6 @@ class DaemonEmbedManager:
             "--port",
             str(port),
         ]
-        if extra_args:
-            cmd.extend(extra_args)
         if _runs_a_foreign_interpreter(cmd):
             env = _strip_parent_interpreter_env(env)
 
@@ -836,9 +814,9 @@ class DaemonEmbedManager:
             start_time = time.time()
             last_check_time = start_time
             last_log_position = 0
-            log_lines = [f"Starting daemon for {profile_label}...", ""]
+            log_lines = ["Starting local memory daemon...", ""]
 
-            title = f"[bold cyan]Starting Daemon[/bold cyan] [dim]({profile} @ :{port})[/dim]"
+            title = f"[bold cyan]Starting Daemon[/bold cyan] [dim](:{port})[/dim]"
 
             with Live(console=console, auto_refresh=False) as live:
                 content = Text("\n".join(log_lines), style="dim")
@@ -856,7 +834,7 @@ class DaemonEmbedManager:
                         log_lines.append(f"✗ Daemon exited during initialization (exit code {exit_code})")
                         log_lines.append(f"See full log: {daemon_log}")
                         content = Text("\n".join(log_lines), style="dim")
-                        fail_title = f"[bold red]✗ Daemon Failed[/bold red] [dim]({profile} @ :{port})[/dim]"
+                        fail_title = f"[bold red]✗ Daemon Failed[/bold red] [dim](:{port})[/dim]"
                         panel = Panel(content, title=fail_title, border_style="red", padding=(1, 2))
                         live.update(panel)
                         live.refresh()
@@ -878,7 +856,7 @@ class DaemonEmbedManager:
                         except Exception:
                             pass
 
-                    if self.is_running(profile):
+                    if self.is_running():
                         log_lines.append("")
                         log_lines.append("✓ Daemon responding, verifying stability...")
                         content = Text("\n".join(log_lines), style="dim")
@@ -887,7 +865,7 @@ class DaemonEmbedManager:
                         live.refresh()
 
                         time.sleep(2)
-                        if self.is_running(profile):
+                        if self.is_running():
                             log_lines.append("✓ Daemon started successfully!")
                             log_lines.append("")
                             log_lines.append(f"Logs: {daemon_log}")
@@ -898,16 +876,11 @@ class DaemonEmbedManager:
                                 log_lines.append(f"Database: {pg0_path}")
 
                             content = Text("\n".join(log_lines), style="dim")
-                            success_title = (
-                                f"[bold green]✓ Daemon Started[/bold green] [dim]({profile} @ :{port})[/dim]"
-                            )
+                            success_title = f"[bold green]✓ Daemon Started[/bold green] [dim](:{port})[/dim]"
                             panel = Panel(content, title=success_title, border_style="green", padding=(1, 2))
                             live.update(panel)
                             live.refresh()
                             console.print()
-                            # Register profile in metadata so CLI can discover it
-                            if profile:
-                                self._register_profile(profile, port, config)
                             return True
                         else:
                             log_lines.append("")
@@ -944,7 +917,7 @@ class DaemonEmbedManager:
             log_lines.append("")
             log_lines.append(f"See full log: {daemon_log}")
             content = Text("\n".join(log_lines), style="dim")
-            timeout_title = f"[bold red]✗ Daemon Failed (Timeout)[/bold red] [dim]({profile} @ :{port})[/dim]"
+            timeout_title = f"[bold red]✗ Daemon Failed (Timeout)[/bold red] [dim](:{port})[/dim]"
             panel = Panel(content, title=timeout_title, border_style="red", padding=(1, 2))
             console.print(panel)
             console.print()
@@ -980,77 +953,30 @@ class DaemonEmbedManager:
             console.print()
             return False
 
-    def _register_profile(self, profile: str, port: int, config: dict) -> None:
-        """Register a named profile in metadata so it's discoverable by the CLI.
-
-        Saves non-secret REMEMBER_API_* settings. Credentials remain in the
-        process environment unless explicitly configured in the profile.
-        Silently ignores errors to avoid blocking daemon startup.
-        """
-        try:
-            api_config = {
-                k: v
-                for k, v in config.items()
-                if k.startswith("REMEMBER_API_") and not re.search(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", k, re.I)
-            }
-            if not api_config:
-                return
-            # Additive: seed keys the profile doesn't have yet, never overwrite
-            # ones it does. create_profile rewrites the whole file, so the
-            # existing keys have to be carried forward regardless (UI port, idle
-            # timeout, ...), and `config` here is the merged profile + this
-            # invocation's ambient REMEMBER_* environment — letting it win would
-            # make a one-off `REMEMBER_API_LLM_MODEL=... remember-embed recall`
-            # permanently rewrite the user's profile. The profile file is owned
-            # by `configure` and the control center; a daemon start only fills
-            # in what is missing.
-            existing = self._profile_manager.load_profile_config(profile)
-            merged = {**api_config, **existing}
-            self._profile_manager.create_profile(profile, port, merged)
-        except Exception as e:
-            logger.debug(f"Failed to register profile '{profile}' in metadata: {e}")
-
-    def ensure_running(self, config: dict, profile: str, extra_args: list[str] | None = None) -> bool:
-        """
-        Ensure daemon is running, starting it if needed.
-
-        Args:
-            config: Environment configuration dict (REMEMBER_* vars)
-            profile: Profile name for isolation
-            extra_args: Extra CLI arguments to pass to remember-api (e.g. ["--offline"])
-
-        Returns:
-            True if daemon is running (started or already running), False on failure
-        """
-        if self.is_running(profile):
-            logger.debug(f"Daemon already running for profile '{profile}'")
-            if profile:
-                paths = self._profile_manager.resolve_profile_paths(profile)
-                self._register_profile(profile, paths.port, config)
+    def ensure_running(self, config: dict) -> bool:
+        """Start the local daemon unless it is already responding."""
+        if self.is_running():
             return True
-        return self._start_daemon(config, profile, extra_args=extra_args)
+        return self._start_daemon(config)
 
-    def stop(self, profile: str) -> bool:
+    def stop(self) -> bool:
         """
-        Stop the daemon for this profile.
-
-        Args:
-            profile: Profile name
+        Stop the local daemon.
 
         Returns:
             True if stopped successfully, False otherwise
         """
-        paths = self._profile_manager.resolve_profile_paths(profile)
+        paths = daemon_paths()
         port = paths.port
 
         # Every decision here is based on port occupancy, never on /health.
         # A daemon that is alive but busy fails the responsiveness probe
         # (issue #3169), so using it as the already-stopped guard made stop()
-        # report success without sending any signal. Reclaiming the profile's
+        # report success without sending any signal. Reclaiming the daemon's
         # port from an unresponsive listener is the same policy _clear_port()
         # applies on the start path.
         if not self._is_port_in_use(port):
-            logger.debug(f"Daemon not running for profile '{profile}'")
+            logger.debug("Local daemon is not running")
             return True
 
         pid = self._owned_pid_on_port(port, DAEMON_PROCESS_MARKERS, "remember daemon")

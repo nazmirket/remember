@@ -91,11 +91,9 @@ def _connect(monkeypatch, tables: dict[str, _TableState]) -> _Connection:
     return conn
 
 
-def _run(monkeypatch, tables: dict[str, _TableState], extension="pgroonga", store_owned_memories=False) -> _Connection:
+def _run(monkeypatch, tables: dict[str, _TableState], extension="native") -> _Connection:
     conn = _connect(monkeypatch, tables)
-    migrations.ensure_text_search_extension(
-        "postgresql://unused", text_search_extension=extension, store_owned_memories=store_owned_memories
-    )
+    migrations.ensure_text_search_extension("postgresql://unused", text_search_extension=extension)
     return conn
 
 
@@ -104,93 +102,36 @@ def _assert_no_schema_changes(conn: _Connection) -> None:
     assert conn.commits == 0
 
 
-def test_populated_legacy_mental_models_converts_to_pgroonga(monkeypatch):
-    """The one populated transition that is allowed: the derived tsvector that
-    reconciliation used to skip (it checked the pre-rename `reflections` name)
-    is replaced by the pgroonga expression index. Nothing needs a backfill."""
+def test_populated_native_state_is_idempotent(monkeypatch):
     conn = _run(
-        monkeypatch,
-        {
-            "memory_units": _TableState(column="text", index="pgroonga", rows=20),
-            "mental_models": _TableState(column="tsvector", index="gin", rows=5),
-        },
-    )
-
-    assert conn.table_checks == ["memory_units", "mental_models"]
-    assert conn.ddl == [
-        "DROP INDEX IF EXISTS public.idx_mental_models_text_search",
-        "ALTER TABLE public.mental_models DROP COLUMN IF EXISTS search_vector",
-        "CREATE EXTENSION IF NOT EXISTS pgroonga CASCADE",
-        "ALTER TABLE public.mental_models ADD COLUMN IF NOT EXISTS search_vector TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_mental_models_text_search ON public.mental_models "
-        f"USING pgroonga ({mental_models_text_document()}) "
-        "WITH (tokenizer='TokenBigram', normalizer='NormalizerNFKC150')",
-    ]
-    # memory_units already matched, so it is left alone entirely.
-    assert not any("memory_units" in statement for statement in conn.ddl)
-    assert conn.commits == 1
-
-
-def test_pgroonga_state_is_idempotent(monkeypatch):
-    conn = _run(
-        monkeypatch,
-        {
-            "memory_units": _TableState(column="text", index="pgroonga", rows=20),
-            "mental_models": _TableState(column="text", index="pgroonga", rows=5),
-        },
-    )
-
-    assert conn.table_checks == ["memory_units", "mental_models"]
-    _assert_no_schema_changes(conn)
-
-
-def test_populated_memory_units_backend_switch_remains_fail_closed(monkeypatch):
-    conn = _connect(
         monkeypatch,
         {
             "memory_units": _TableState(column="tsvector", index="gin", rows=20),
             "mental_models": _TableState(column="tsvector", index="gin", rows=5),
         },
     )
-
-    with pytest.raises(RuntimeError, match=r"memory_units\(20 rows\)"):
-        migrations.ensure_text_search_extension("postgresql://unused", text_search_extension="pgroonga")
-
+    assert conn.table_checks == ["memory_units", "mental_models"]
     _assert_no_schema_changes(conn)
 
 
-def test_populated_unknown_mental_model_index_remains_fail_closed(monkeypatch):
-    """Only the native tsvector/GIN shape is derived-only; anything else may hold
-    values the reconciler cannot recompute, so it must still refuse."""
+@pytest.mark.parametrize("column,index", [("text", "pgroonga"), (None, None), ("tsvector", "bm25")])
+def test_populated_incompatible_search_column_is_left_untouched(monkeypatch, column, index):
     conn = _connect(
         monkeypatch,
         {
-            "memory_units": _TableState(column="text", index="pgroonga", rows=20),
-            "mental_models": _TableState(column="tsvector", index="bm25", rows=5),
-        },
-    )
-
-    with pytest.raises(RuntimeError, match=r"mental_models\(5 rows\)"):
-        migrations.ensure_text_search_extension("postgresql://unused", text_search_extension="pgroonga")
-
-    _assert_no_schema_changes(conn)
-
-
-def test_populated_mental_models_backfill_backend_remains_fail_closed(monkeypatch):
-    """vchord's bm25vector must be tokenized per row on write, so converting a
-    populated table would leave every existing row unsearchable."""
-    conn = _connect(
-        monkeypatch,
-        {
-            "memory_units": _TableState(column="bm25vector", index="bm25", rows=20),
+            "memory_units": _TableState(column=column, index=index, rows=20),
             "mental_models": _TableState(column="tsvector", index="gin", rows=5),
         },
     )
-
-    with pytest.raises(RuntimeError, match=r"mental_models\(5 rows\)"):
-        migrations.ensure_text_search_extension("postgresql://unused", text_search_extension="vchord")
-
+    with pytest.raises(RuntimeError, match=r"memory_units\(20 rows\)"):
+        migrations.ensure_text_search_extension("postgresql://unused")
     _assert_no_schema_changes(conn)
+
+
+def test_unsupported_search_extension_is_rejected_before_connecting(monkeypatch):
+    monkeypatch.setattr(migrations, "create_engine", lambda *args, **kwargs: pytest.fail("unexpected connection"))
+    with pytest.raises(ValueError, match="Only native"):
+        migrations.ensure_text_search_extension("postgresql://unused", text_search_extension="pgroonga")
 
 
 def test_empty_mental_models_native_reconcile_creates_generated_projection(monkeypatch):
@@ -225,8 +166,7 @@ def test_empty_memory_units_native_reconcile_creates_plain_column(monkeypatch):
     assert "ALTER TABLE public.memory_units ADD COLUMN IF NOT EXISTS search_vector tsvector" in conn.ddl
 
 
-@pytest.mark.parametrize("extension", ["native", "vchord", "pg_textsearch", "pgroonga", "pg_search"])
-def test_reconcile_ddl_is_re_executable(monkeypatch, extension):
+def test_reconcile_ddl_is_re_executable(monkeypatch):
     """Replicas boot concurrently during a rolling restart and each runs this
     reconciliation, so the loser of the race must not crash on DDL the winner
     already committed."""
@@ -236,7 +176,6 @@ def test_reconcile_ddl_is_re_executable(monkeypatch, extension):
             "memory_units": _TableState(column=None, index=None, rows=0),
             "mental_models": _TableState(column=None, index=None, rows=0),
         },
-        extension=extension,
     )
 
     assert conn.ddl, "expected reconciliation to emit DDL"
@@ -246,24 +185,6 @@ def test_reconcile_ddl_is_re_executable(monkeypatch, extension):
             r"|ALTER TABLE \S+ (ADD|DROP) COLUMN IF (NOT )?EXISTS)",
             statement,
         ), f"non re-executable DDL: {statement}"
-
-
-@pytest.mark.parametrize("extension", ["native", "vchord", "pg_textsearch", "pgroonga", "pg_search"])
-def test_store_owned_memories_drops_mental_models_bm25_index_and_reconciles_nothing(monkeypatch, extension):
-    """A custom store answers page search, so the mental_models BM25 index has no reader —
-    yet on native Postgres maintains it on every page write. memory_units holds no rows at all."""
-    conn = _run(
-        monkeypatch,
-        {
-            "memory_units": _TableState(column="text", index="pgroonga", rows=0),
-            "mental_models": _TableState(column="tsvector", index="gin", rows=5),
-        },
-        extension=extension,
-        store_owned_memories=True,
-    )
-
-    assert conn.table_checks == []
-    assert conn.ddl == ["DROP INDEX IF EXISTS public.idx_mental_models_text_search"]
 
 
 def test_populated_mental_models_missing_index_is_rebuilt_in_place(monkeypatch):
@@ -283,20 +204,3 @@ def test_populated_mental_models_missing_index_is_rebuilt_in_place(monkeypatch):
         "CREATE INDEX IF NOT EXISTS idx_mental_models_text_search ON public.mental_models USING gin(search_vector)"
     ]
     assert conn.commits == 1
-
-
-def test_populated_missing_pgroonga_index_ensures_the_extension_first(monkeypatch):
-    conn = _run(
-        monkeypatch,
-        {
-            "memory_units": _TableState(column="text", index="pgroonga", rows=20),
-            "mental_models": _TableState(column="text", index=None, rows=5),
-        },
-    )
-
-    assert conn.ddl == [
-        "CREATE EXTENSION IF NOT EXISTS pgroonga CASCADE",
-        "CREATE INDEX IF NOT EXISTS idx_mental_models_text_search ON public.mental_models "
-        f"USING pgroonga ({mental_models_text_document()}) "
-        "WITH (tokenizer='TokenBigram', normalizer='NormalizerNFKC150')",
-    ]

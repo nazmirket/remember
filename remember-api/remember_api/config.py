@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from ._pg_search import normalize_pg_search_tokenizer
 from ._vector_index import validate_extension
 from .utils import mask_network_location
 
@@ -34,8 +33,7 @@ def load_dotenv_for_entrypoint() -> None:
     embedding application's own configuration.
 
     This helper is therefore called explicitly from Remember's standalone entry
-    points only — the API server (CLI and ``remember_api.server:app``), the
-    worker, and the admin CLI. ``override=True`` is deliberate: it preserves the
+    points only — the API server and admin CLI. ``override=True`` is deliberate: it preserves the
     exact precedence those entry points have always had (a discovered ``.env``
     is authoritative over the ambient process environment). Because a library
     import never reaches this code path, that precedence no longer leaks into
@@ -161,8 +159,6 @@ def normalize_config_dict(config: dict[str, Any]) -> dict[str, Any]:
 ENV_DATABASE_BACKEND = "REMEMBER_API_DATABASE_BACKEND"
 ENV_DATABASE_URL = "REMEMBER_API_DATABASE_URL"
 ENV_READ_DATABASE_URL = "REMEMBER_API_READ_DATABASE_URL"
-ENV_READ_DB_POOL_MIN_SIZE = "REMEMBER_API_READ_DB_POOL_MIN_SIZE"
-ENV_READ_DB_POOL_MAX_SIZE = "REMEMBER_API_READ_DB_POOL_MAX_SIZE"
 ENV_MIGRATION_DATABASE_URL = "REMEMBER_API_MIGRATION_DATABASE_URL"
 ENV_DATABASE_CONNECT_HOOK = "REMEMBER_API_DATABASE_CONNECT_HOOK"
 ENV_DATABASE_SCHEMA = "REMEMBER_API_DATABASE_SCHEMA"
@@ -621,8 +617,6 @@ ENV_ANN_ITERATIVE_SCAN = "REMEMBER_API_ANN_ITERATIVE_SCAN"
 ENV_ANN_MAX_SCAN_TUPLES = "REMEMBER_API_ANN_MAX_SCAN_TUPLES"
 ENV_TEXT_SEARCH_EXTENSION = "REMEMBER_API_TEXT_SEARCH_EXTENSION"
 ENV_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE = "REMEMBER_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE"
-ENV_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER = "REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER"
-ENV_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA = "REMEMBER_API_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA"
 ENV_LLM_OUTPUT_LANGUAGE = "REMEMBER_API_LLM_OUTPUT_LANGUAGE"
 ENV_QUERY_ANALYZER_LANGUAGES = "REMEMBER_API_QUERY_ANALYZER_LANGUAGES"
 
@@ -664,7 +658,6 @@ ENV_RECALL_PHASE_SAMPLE_EVERY = "REMEMBER_API_RECALL_PHASE_SAMPLE_EVERY"
 ENV_GZIP_MIN_SIZE = "REMEMBER_API_GZIP_MIN_SIZE"
 ENV_LOOP_LAG_REPORT_SECONDS = "REMEMBER_API_LOOP_LAG_REPORT_SECONDS"
 ENV_LOOP_LAG_METRIC = "REMEMBER_API_LOOP_LAG_METRIC"
-ENV_METRICS_WORKER_LABEL = "REMEMBER_API_METRICS_WORKER_LABEL"
 ENV_LINK_EXPANSION_PER_ENTITY_LIMIT = "REMEMBER_API_LINK_EXPANSION_PER_ENTITY_LIMIT"
 ENV_LINK_EXPANSION_TIMEOUT = "REMEMBER_API_LINK_EXPANSION_TIMEOUT"
 ENV_RETAIN_BATCH_DOCUMENT_WRITES = "REMEMBER_API_RETAIN_BATCH_DOCUMENT_WRITES"
@@ -673,13 +666,6 @@ ENV_BANK_INFO_CACHE_MAX_ENTRIES = "REMEMBER_API_BANK_INFO_CACHE_MAX_ENTRIES"
 ENV_BANK_ALIAS_CACHE_TTL_SECONDS = "REMEMBER_API_BANK_ALIAS_CACHE_TTL_SECONDS"
 ENV_BANK_ALIAS_CACHE_MAX_ENTRIES = "REMEMBER_API_BANK_ALIAS_CACHE_MAX_ENTRIES"
 ENV_BANK_STATS_CACHE_TTL_SECONDS = "REMEMBER_API_BANK_STATS_CACHE_TTL_SECONDS"
-ENV_BANK_STATS_CACHE_MAX_ENTRIES = "REMEMBER_API_BANK_STATS_CACHE_MAX_ENTRIES"
-# Request headers copied into RequestContext.extra_headers for extensions to read.
-# Comma-separated, matched case-insensitively. Empty by default: extensions only
-# ever see headers an operator has explicitly opted in, so a custom
-# TenantExtension/OperationValidatorExtension can't be handed request data its
-# author never asked for.
-ENV_EXTENSION_PASSTHROUGH_HEADERS = "REMEMBER_API_EXTENSION_PASSTHROUGH_HEADERS"
 
 # OpenTelemetry tracing configuration
 ENV_OTEL_TRACES_ENABLED = "REMEMBER_API_OTEL_TRACES_ENABLED"
@@ -738,17 +724,10 @@ ENV_RETAIN_ATTACHMENT_MAX_COUNT = "REMEMBER_API_RETAIN_ATTACHMENT_MAX_COUNT"
 ENV_RETAIN_MAX_ATTACHMENTS_PER_CHUNK = "REMEMBER_API_RETAIN_MAX_ATTACHMENTS_PER_CHUNK"
 
 # File storage configuration
-ENV_FILE_STORAGE_TYPE = "REMEMBER_API_FILE_STORAGE_TYPE"
-# "module.path:ClassName" naming a FileStorage implementation. Every other
-# REMEMBER_API_FILE_STORAGE_* variable is handed to it as a lowercased config dict,
-# so those stay dynamic and are read from the environment by the storage factory.
-ENV_FILE_STORAGE_EXTENSION = "REMEMBER_API_FILE_STORAGE_EXTENSION"
 ENV_STORE_DOCUMENT_TEXT = "REMEMBER_API_STORE_DOCUMENT_TEXT"
 ENV_DEFAULT_TIMEZONE = "REMEMBER_API_DEFAULT_TIMEZONE"
 
 # Document transfer (export/import documents between banks without re-running the LLM)
-ENV_ENABLE_DOCUMENT_EXPORT_API = "REMEMBER_API_ENABLE_DOCUMENT_EXPORT_API"
-ENV_ENABLE_DOCUMENT_IMPORT_API = "REMEMBER_API_ENABLE_DOCUMENT_IMPORT_API"
 
 # Observations settings (consolidated knowledge from facts)
 ENV_ENABLE_OBSERVATIONS = "REMEMBER_API_ENABLE_OBSERVATIONS"
@@ -782,19 +761,6 @@ ENV_PAGE_DEFAULT_TRIGGER = "REMEMBER_API_PAGE_DEFAULT_TRIGGER"
 ENV_PAGE_DEFAULT_TRIGGER_DEPRECATED = "REMEMBER_API_KNOWLEDGE_PAGE_DEFAULT_TRIGGER"
 ENV_REFLECT_DEFAULT_OPTIONS = "REMEMBER_API_REFLECT_DEFAULT_OPTIONS"
 
-# Webhook configuration (global, static - server-level only)
-ENV_WEBHOOK_URL = "REMEMBER_API_WEBHOOK_URL"
-ENV_WEBHOOK_SECRET = "REMEMBER_API_WEBHOOK_SECRET"
-ENV_WEBHOOK_EVENT_TYPES = "REMEMBER_API_WEBHOOK_EVENT_TYPES"
-# SSRF hardening for outbound webhook delivery. Private/loopback/link-local
-# destinations are blocked by default; list hosts or IP/CIDRs here to re-permit
-# them (e.g. "127.0.0.1" for local testing, or an internal receiver).
-ENV_WEBHOOK_ALLOWED_HOSTS = "REMEMBER_API_WEBHOOK_ALLOWED_HOSTS"
-# When true, the delivery-history API returns the raw upstream response body.
-# Off by default: returning arbitrary internal response bodies to the caller is
-# an information-exfiltration primitive. The delivery status is always returned.
-ENV_WEBHOOK_EXPOSE_RESPONSE_BODY = "REMEMBER_API_WEBHOOK_EXPOSE_RESPONSE_BODY"
-
 # Built-in llama.cpp configuration (for provider=llamacpp)
 ENV_LLAMACPP_MODEL_PATH = "REMEMBER_API_LLAMACPP_MODEL_PATH"
 ENV_LLAMACPP_GPU_LAYERS = "REMEMBER_API_LLAMACPP_GPU_LAYERS"
@@ -812,7 +778,6 @@ ENV_RUN_MIGRATIONS_ON_STARTUP = "REMEMBER_API_RUN_MIGRATIONS_ON_STARTUP"
 # alembic's import graph and its psycopg2 sync engine out of a long-lived server.
 # "false" (the default) runs them in-process. See migrations._should_isolate_migrations.
 ENV_MIGRATION_ISOLATION = "REMEMBER_API_MIGRATION_ISOLATION"
-ENV_MIGRATION_CONCURRENCY = "REMEMBER_API_MIGRATION_CONCURRENCY"
 
 # Database connection pool
 ENV_DB_POOL_MIN_SIZE = "REMEMBER_API_DB_POOL_MIN_SIZE"
@@ -838,7 +803,6 @@ ENV_WORKER_ID = "REMEMBER_API_WORKER_ID"
 ENV_WORKER_POLL_INTERVAL_MS = "REMEMBER_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "REMEMBER_API_WORKER_MAX_RETRIES"
 ENV_WORKER_TASK_RETRY_BACKOFF_SECONDS = "REMEMBER_API_WORKER_TASK_RETRY_BACKOFF_SECONDS"
-ENV_WORKER_HTTP_PORT = "REMEMBER_API_WORKER_HTTP_PORT"
 ENV_WORKER_MAX_SLOTS = "REMEMBER_API_WORKER_MAX_SLOTS"
 ENV_WORKER_SHUTDOWN_DRAIN_SECONDS = "REMEMBER_API_WORKER_SHUTDOWN_DRAIN_SECONDS"
 # How long a task shed for store backpressure is held before it is retried.
@@ -862,11 +826,6 @@ WORKER_SLOT_TYPE_DEFAULTS: dict[str, int] = {
     "refresh_mental_model": 0,
     "graph_maintenance": 0,
     "vector_index_maintenance": 0,
-    "import_documents": 0,
-    "export_documents": 0,
-    "import_bank": 0,
-    "export_bank": 0,
-    "clone_bank": 0,
 }
 
 
@@ -908,7 +867,6 @@ def _parse_worker_slot_reservations() -> dict[str, int]:
 ENV_WORKER_CONSOLIDATION_BANK_PRIORITY = "REMEMBER_API_WORKER_CONSOLIDATION_BANK_PRIORITY"
 ENV_RETAIN_MAX_CONCURRENT = "REMEMBER_API_RETAIN_MAX_CONCURRENT"
 ENV_RETAIN_SUBBATCH_CONCURRENCY = "REMEMBER_API_RETAIN_SUBBATCH_CONCURRENCY"
-ENV_RETAIN_STORE_MAX_CONCURRENT = "REMEMBER_API_RETAIN_STORE_MAX_CONCURRENT"
 ENV_RETAIN_WALL_TIMEOUT = "REMEMBER_API_RETAIN_WALL_TIMEOUT"
 ENV_CONSOLIDATION_WALL_TIMEOUT = "REMEMBER_API_CONSOLIDATION_WALL_TIMEOUT"
 
@@ -1154,7 +1112,7 @@ DEFAULT_EMBEDDING_DIMENSION = 384
 
 DEFAULT_RERANKER_PROVIDER = "local"
 DEFAULT_RERANKER_SEND_BANK_AS_HEADER = False
-DEFAULT_RERANKER_LOCAL_MODEL = "remember-ai/hs-rerank-1"
+DEFAULT_RERANKER_LOCAL_MODEL = "hindsight-ai/hs-rerank-1"
 DEFAULT_RERANKER_LOCAL_FORCE_CPU = False  # Force CPU mode for local reranker
 DEFAULT_RERANKER_LOCAL_MAX_CONCURRENT = 4  # Limit concurrent CPU-bound reranking to prevent thrashing
 DEFAULT_RERANKER_LOCAL_TRUST_REMOTE_CODE = (
@@ -1285,10 +1243,6 @@ DEFAULT_RERANKER_ONNX_CPU_MEM_ARENA = False  # Arena never shrinks; off keeps RS
 
 DEFAULT_RERANKER_TYPESAFE_MODEL = "jev-latest"
 DEFAULT_RERANKER_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
-# Hindsight Inference: embeddings (OpenAI-compatible /v1/embeddings), reranking (Cohere-style
-# /v1/rerank) and the decision model (System One). hs-rerank-1 reranks and hs-decide-1-flash decides.
-# Hindsight Inference keys come from the provider-specific API key setting.
-HINDSIGHT_INFERENCE_URL = "https://inference.hindsight.vectorize.io"
 DEFAULT_RERANKER_TYPESAFE_MAX_CONCURRENT = 24
 # Off by default: dropping changes what recall returns, so it is opt-in.
 DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES = False
@@ -1301,7 +1255,7 @@ DECISION_MODEL_OPERATIONS: tuple[DecisionModelOperation, ...] = ("recall", "refl
 @dataclass(frozen=True)
 class _DecisionProviderDefaults:
     model: str
-    #: None when the URL is per account and must be configured (Cloudflare).
+    #: Default URL; None means it must be configured.
     base_url: str | None
     #: The vocabulary the model counts its window in; None when unknown, which counts
     #: with REMEMBER_API_TOKENIZER_ENCODING.
@@ -1309,35 +1263,18 @@ class _DecisionProviderDefaults:
     #: Most tokens one request may carry, sized for the model's window; None takes
     #: DEFAULT_DECISION_MODEL_MAX_REQUEST_TOKENS.
     max_request_tokens: int | None = None
-    #: ``base_url`` fits each request to the window of the model serving it, so on that URL the
-    #: client does not split by tokens. Any other URL (the model served on your own vLLM) does not.
-    default_url_fits_requests: bool = False
 
 
 # "none": no decision model; operations that could use one keep their LLM-only path.
-# hindsight, typesafe and cloudflare speak the System One API; openai has its own Decisions API.
-# The optional Hindsight Inference provider uses REMEMBER_API_DECISION_MODEL_API_KEY.
-# Hindsight Inference fits each request to the
-# window of the model that serves it and merges the answers, so the whole pool goes in one request.
-# It used to split at 54k tokens there too, counted on the whole JSON body: about twice the text the
-# model reads, so pools that fit were sent as 2+ calls (#6489). The 54k still applies on a custom URL,
-# where nothing fits the request: hs-decide-1-flash has a 64k window, and the margin is for counting
-# it with o200k_base, not its own vocabulary.
+# TypeSafe speaks System One; OpenAI has its own Decisions API.
 DECISION_MODEL_PROVIDER_DEFAULTS = {
-    "hindsight": _DecisionProviderDefaults(
-        model="hs-decide-1-flash",
-        base_url=HINDSIGHT_INFERENCE_URL,
-        max_request_tokens=54_000,
-        default_url_fits_requests=True,
-    ),
     "typesafe": _DecisionProviderDefaults(model="jev-latest", base_url="https://api.typesafe.ai", tokenizer="jev"),
-    "cloudflare": _DecisionProviderDefaults(model="clef", base_url=None),
     "openai": _DecisionProviderDefaults(model="gpt-6-luna", base_url="https://api.openai.com"),
 }
 DECISION_MODEL_PROVIDERS = ("none", *DECISION_MODEL_PROVIDER_DEFAULTS)
 # Providers whose endpoint is System One itself (<base_url>/v1/systemone), which reflect's
 # client (TypeSafeCrossEncoder) speaks.
-SYSTEM_ONE_DECISION_MODEL_PROVIDERS = frozenset({"hindsight", "typesafe"})
+SYSTEM_ONE_DECISION_MODEL_PROVIDERS = frozenset({"typesafe"})
 DEFAULT_DECISION_MODEL_PROVIDER = "none"
 DEFAULT_DECISION_MODEL_TIMEOUT = 60.0
 DEFAULT_DECISION_MODEL_MAX_CONCURRENT = 24
@@ -1363,8 +1300,8 @@ def _decision_model_env(operation: str, setting: str) -> str:
     return f"REMEMBER_API_{operation.upper()}_DECISION_MODEL_{setting}"
 
 
-# Vector extension (pgvector, vchord, pgvectorscale, or AlloyDB ScaNN)
-DEFAULT_VECTOR_EXTENSION = "pgvector"  # Options: "pgvector", "vchord", "pgvectorscale", "scann"
+# Vector extension for the local database.
+DEFAULT_VECTOR_EXTENSION = "pgvector"
 # Let an ANN scan resume until the query's LIMIT is met, instead of stopping when its
 # first candidate list drains. Off, a recall can never retrieve more rows than the
 # candidate list holds (pgvector: hnsw.ef_search, 200), so a larger recall budget
@@ -1382,22 +1319,12 @@ DEFAULT_ANN_ITERATIVE_SCAN = True
 # so even 1 leaves the pre-existing behaviour intact. pgvector's own default is 20000.
 DEFAULT_ANN_MAX_SCAN_TUPLES = 4000
 
-# Text search extension (native PostgreSQL, vchord BM25, Timescale pg_textsearch,
-# pgroonga, or ParadeDB pg_search). Unused by banks with enable_text_search off.
-# Every PostgreSQL full-text backend `build_bm25_arm` dispatches on. Exported so
-# tests can enumerate the family rather than hardcoding a copy that drifts — a
-# backend added here but forgotten in one of the arm builders is exactly how
-# `min_scores.keyword` became a no-op on four of them (#3882).
-VALID_TEXT_SEARCH_EXTENSIONS = ("native", "vchord", "pg_textsearch", "pgroonga", "pg_search")
+# The local database uses PostgreSQL's native full-text index.
+VALID_TEXT_SEARCH_EXTENSIONS = ("native",)
 DEFAULT_TEXT_SEARCH_EXTENSION = "native"
 
-# PostgreSQL text search dictionary used by the native tsvector backend. Only
-# affects text_search_extension == "native"; other backends use their own
-# tokenizers (vchord: llmlingua2, pg_textsearch: hardcoded english,
-# pgroonga: TokenBigram polyglot, pg_search: per-field Tantivy tokenizer).
+# PostgreSQL text-search dictionary for the native tsvector index.
 DEFAULT_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE = "english"
-DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER = ""
-DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA = "paradedb"
 
 # Per-candidate truncation before rerank, applied to every provider. Off by default;
 # set it to the model's context window (or lower, to bound request size on a CPU-only
@@ -1421,7 +1348,7 @@ DEFAULT_EMBEDDINGS_MAX_INPUT_TOKENS: int | None = 8192
 ENV_TOKENIZER_ENCODING = "REMEMBER_API_TOKENIZER_ENCODING"
 DEFAULT_TOKENIZER_ENCODING = "o200k_base"
 
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8888
 DEFAULT_BASE_PATH = ""  # Empty string = root path
 DEFAULT_LOG_LEVEL = "info"
@@ -1504,7 +1431,6 @@ DEFAULT_RECALL_PHASE_SAMPLE_EVERY = 1  # Record 1 in N recall-phase observations
 DEFAULT_GZIP_MIN_SIZE = 1024  # Min response bytes to gzip; negative disables compression
 DEFAULT_LOOP_LAG_REPORT_SECONDS = 0.0  # Event-loop lag probe report interval; 0 disables it
 DEFAULT_LOOP_LAG_METRIC = False  # Record every event-loop lag sample as a histogram
-DEFAULT_METRICS_WORKER_LABEL = False  # /metrics covers every worker, labelled api_worker=<slot>
 DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT = 200  # Max target units per entity in graph expansion
 DEFAULT_LINK_EXPANSION_TIMEOUT = 10.0  # Timeout (seconds) for entity expansion query
 # The bank's own row (name/disposition/mission) and its config, cached per process so a
@@ -1537,7 +1463,6 @@ DEFAULT_BANK_INFO_CACHE_MAX_ENTRIES = 2048  # LRU bound across (schema, bank) ke
 DEFAULT_BANK_ALIAS_CACHE_TTL_SECONDS = 10.0
 DEFAULT_BANK_ALIAS_CACHE_MAX_ENTRIES = 2048  # LRU bound across (schema, alias) keys
 DEFAULT_BANK_STATS_CACHE_TTL_SECONDS = 60.0  # TTL for get_bank_stats result cache; 0 disables
-DEFAULT_BANK_STATS_CACHE_MAX_ENTRIES = 1024  # LRU bound across (schema, bank) keys
 
 # Retain settings
 DEFAULT_RETAIN_MAX_COMPLETION_TOKENS = 64000  # Max tokens for fact extraction LLM call
@@ -1604,13 +1529,10 @@ DEFAULT_LLM_DEBUG_DUMP_4XX = False  # Log the exact request behind any LLM 4xx (
 DEFAULT_RETAIN_BATCH_POLL_INTERVAL_SECONDS = 60  # Batch API polling interval in seconds
 
 # File storage defaults
-DEFAULT_FILE_STORAGE_TYPE = "native"  # PostgreSQL BYTEA storage
 DEFAULT_STORE_DOCUMENT_TEXT = True  # Persist raw source text in documents.original_text / chunks.chunk_text
 DEFAULT_DEFAULT_TIMEZONE = "UTC"  # IANA zone a retain timestamp with no UTC offset is read in
 
 # Document transfer defaults (export/import enabled by default; gated independently)
-DEFAULT_ENABLE_DOCUMENT_EXPORT_API = True
-DEFAULT_ENABLE_DOCUMENT_IMPORT_API = True
 
 # Observations defaults (consolidated knowledge from facts)
 DEFAULT_ENABLE_OBSERVATIONS = True  # Observations enabled by default
@@ -1700,7 +1622,6 @@ MIGRATION_ISOLATION_CHOICES = ("true", "false")
 # Number of tenant schemas to migrate concurrently. Each schema runs in its own
 # process (Alembic's command.upgrade() is not thread-safe); within a schema the
 # work is always sequential. 1 = fully sequential (the safe default).
-DEFAULT_MIGRATION_CONCURRENCY = 1
 
 # Database connection pool
 DEFAULT_DB_POOL_MIN_SIZE = 5
@@ -1772,7 +1693,6 @@ DEFAULT_WORKER_ID = None  # Will use hostname if not specified
 DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
 DEFAULT_WORKER_TASK_RETRY_BACKOFF_SECONDS = 60  # Seconds between retries on transient task failure
-DEFAULT_WORKER_HTTP_PORT = 8889  # HTTP port for worker metrics/health
 DEFAULT_WORKER_MAX_SLOTS = 10  # Total concurrent tasks per worker
 # How long shutdown waits for in-flight tasks before cancelling them and handing their
 # rows back to 'pending'. Counted from SIGTERM. Drain + ~5s cancel + ~2s release must fit
@@ -1789,11 +1709,6 @@ DEFAULT_RETAIN_MAX_CONCURRENT = 4  # Max concurrent retain DB phases (HNSW reads
 # overlapping a few hides that wait. 1 keeps the splitter exactly one slice ahead of the work,
 # which is what bounds how much of a large document is resident; raise it knowingly.
 DEFAULT_RETAIN_SUBBATCH_CONCURRENCY = 1
-# The retain write phase, for a bank whose store owns the write path. The limit above exists to
-# stop concurrent HNSW index work thrashing the SQL store; a store that keeps its own index has no
-# such contention, so that number is the wrong bound for it — but not no bound, since the phase
-# still holds a decoded batch while it runs.
-DEFAULT_RETAIN_STORE_MAX_CONCURRENT = 16
 # Wall-clock ceiling for one retain task in the worker (0 disables). This is a
 # deadlock/wedge backstop, not a latency target: a retain that blocks forever on
 # a lock, an LLM permit or a queue put would otherwise hold its worker slot until
@@ -1916,22 +1831,14 @@ DEFAULT_CONSOLIDATION_RECONCILE_INTERVAL_SECONDS = 300
 # due for a refresh. This is the *check* cadence; the actual schedule is the
 # per-model cron expression in the mental model's trigger. 0 disables the sweep.
 #
-# Discovery is one cross-tenant round-trip that probes every schema holding a
-# mental_models table, so its cost scales with tenant count while the models it
-# looks for are rare. Five minutes keeps that cost proportionate; the floor it
-# imposes on cron granularity (a `* * * * *` schedule fires every 5 minutes, not
-# every minute) is why it stays tunable.
+# Five minutes sets the minimum schedule granularity and remains configurable.
 DEFAULT_MENTAL_MODEL_REFRESH_TICK_SECONDS = 300
 
 # How often the audit_log / llm_requests retention sweeps run. Retention windows
 # are measured in days, so this only sets how promptly expired rows disappear.
 DEFAULT_RETENTION_SWEEP_INTERVAL_SECONDS = 3600
 
-# How often terminal async_operations rows past their retention are pruned. One
-# bounded batch per tenant schema per run, so this also sets the drain rate for a
-# backlog (batch size: REMEMBER_API_OPERATION_CLEANUP_BATCH_SIZE). Like the
-# retention sweeps it deletes rows whose retention is counted in days, so a slow
-# cadence costs nothing but avoids a per-tick cross-tenant probe. 0 disables it.
+# How often expired terminal operations are removed in bounded batches. 0 disables it.
 DEFAULT_OPERATION_CLEANUP_INTERVAL_SECONDS = 900
 
 # How often attachments their document does not reference are deleted — the images
@@ -1986,13 +1893,6 @@ DEFAULT_VECTOR_INDEX_MAINTENANCE_MIN_INTERVAL_SECONDS = 900
 
 # Default embedding dimension (used by initial migration, adjusted at runtime)
 EMBEDDING_DIMENSION = DEFAULT_EMBEDDING_DIMENSION
-
-# Webhook configuration defaults
-DEFAULT_WEBHOOK_URL = None  # None = no global webhook configured
-DEFAULT_WEBHOOK_SECRET = None  # None = no signing
-DEFAULT_WEBHOOK_EVENT_TYPES = "consolidation.completed"  # Comma-separated; default = all supported events
-DEFAULT_WEBHOOK_ALLOWED_HOSTS: list[str] = []  # Empty = public destinations only (private ranges blocked)
-DEFAULT_WEBHOOK_EXPOSE_RESPONSE_BODY = False  # Don't return raw upstream bodies to API callers
 
 
 class JsonFormatter(logging.Formatter):
@@ -2885,8 +2785,6 @@ class RememberConfig:
     # Optional read-replica URL for recall queries. When set, the engine opens
     # a second pool and routes recall SELECTs through it.
     read_database_url: str | None
-    read_db_pool_min_size: int
-    read_db_pool_max_size: int
     migration_database_url: str | None
     # ``module.path:function`` naming an async callable with asyncpg.connect's
     # signature. Every new physical connection goes through it, so rotated or
@@ -2894,21 +2792,12 @@ class RememberConfig:
     # without a restart (#6163).
     database_connect_hook: str | None
     database_schema: str
-    vector_extension: str  # "pgvector", "vchord", "pgvectorscale", or "scann"
+    vector_extension: str  # pgvector
     ann_iterative_scan: bool
     ann_max_scan_tuples: int
-    text_search_extension: str  # "native", "vchord", "pg_textsearch", "pgroonga", or "pg_search"
-    # PostgreSQL text search dictionary for the "native" backend (ignored by
-    # other backends). Only the "native" backend reads this field; pgroonga
-    # uses TokenBigram, vchord uses llmlingua2, pg_textsearch hardcodes english,
-    # pg_search uses Tantivy per-field tokenizers.
+    text_search_extension: str  # native PostgreSQL text search
+    # PostgreSQL text search dictionary for native search.
     text_search_extension_native_language: str
-    # ParadeDB pg_search tokenizer used when building BM25 indexes. Empty keeps
-    # ParadeDB's default tokenizer.
-    text_search_extension_pg_search_tokenizer: str
-    # ParadeDB pg_search function schema (default: "paradedb", e.g. "pgsearch"
-    # for certain managed PostgreSQL distributions).
-    text_search_extension_pg_search_function_schema: str
     # Restrict dateparser's language detection in the recall temporal analyzer
     # (comma-separated ISO codes, e.g. "en" or "en,zh"). Empty keeps full
     # auto-detection across all 200+ locales. Restricting is much faster and
@@ -3151,7 +3040,6 @@ class RememberConfig:
     access_log: bool
     daemon_log: str | None  # None = ~/.remember/daemon.log
     profile: str | None  # Raw JSON; parsed by remember_api.profiling
-    file_storage_extension: str | None  # "module.path:ClassName"
     backpressure_defer_seconds: int
     # None when unset: the provider only treats this as a deployment-wide override of the
     # caller's base_url when the operator actually set it.
@@ -3184,7 +3072,6 @@ class RememberConfig:
     gzip_min_size: int
     loop_lag_report_seconds: float
     loop_lag_metric: bool
-    metrics_worker_label: bool
     link_expansion_per_entity_limit: int
     link_expansion_timeout: float
     retain_batch_document_writes: bool
@@ -3193,7 +3080,6 @@ class RememberConfig:
     bank_alias_cache_ttl_seconds: float
     bank_alias_cache_max_entries: int
     bank_stats_cache_ttl_seconds: float
-    bank_stats_cache_max_entries: int
 
     # Retain settings
     retain_max_completion_tokens: int
@@ -3219,11 +3105,8 @@ class RememberConfig:
     retain_max_attachments_per_chunk: int  # Hard cap on images in a single extraction chunk
 
     # File storage (static - server-level only)
-    file_storage_type: str  # "native" (PostgreSQL), or an extension-defined backend
     store_document_text: bool  # When False, store NULL original_text / empty chunk_text
     default_timezone: str  # IANA zone for retain times that carry no UTC offset
-    enable_document_export_api: bool
-    enable_document_import_api: bool
 
     # Observations settings (consolidated knowledge from facts)
     enable_observations: bool
@@ -3317,7 +3200,6 @@ class RememberConfig:
     # Database migrations
     run_migrations_on_startup: bool
     migration_isolation: str
-    migration_concurrency: int
 
     # Database connection pool
     db_pool_min_size: int
@@ -3339,7 +3221,6 @@ class RememberConfig:
     worker_poll_interval_ms: int
     worker_max_retries: int
     worker_task_retry_backoff_seconds: int
-    worker_http_port: int
     worker_max_slots: int
     worker_shutdown_drain_seconds: float
     worker_slot_reservations: dict[str, int]
@@ -3348,7 +3229,6 @@ class RememberConfig:
     operation_cleanup_batch_size: int
     retain_max_concurrent: int
     retain_subbatch_concurrency: int
-    retain_store_max_concurrent: int
     retain_wall_timeout: int
     consolidation_wall_timeout: int
 
@@ -3415,11 +3295,6 @@ class RememberConfig:
     # Unused while vector_index_min_rows is 0.
     vector_index_maintenance_min_interval_seconds: int
 
-    # Webhook configuration (static - server-level only, not per-bank)
-    webhook_url: str | None  # Global webhook URL (None = disabled)
-    webhook_secret: str | None  # HMAC signing secret (None = unsigned)
-    webhook_event_types: list[str]  # Event types to deliver globally
-
     # Defaulted fields (source-compatible additions — existing direct constructor callers keep working).
     # Keep at the end of the dataclass; Python forbids non-default fields after default fields.
     embeddings_openai_batch_size: int = DEFAULT_EMBEDDINGS_OPENAI_BATCH_SIZE
@@ -3458,22 +3333,7 @@ class RememberConfig:
     bm25_max_query_terms: int = DEFAULT_BM25_MAX_QUERY_TERMS
     bm25_selective_terms: bool = DEFAULT_BM25_SELECTIVE_TERMS
 
-    # Webhook SSRF hardening (static, server-level only — deliberately NOT
-    # per-bank configurable: a tenant must not be able to re-open the private
-    # ranges or turn response-body exfiltration back on for itself).
-    webhook_allowed_hosts: list[str] = field(default_factory=list)
-    webhook_expose_response_body: bool = DEFAULT_WEBHOOK_EXPOSE_RESPONSE_BODY
-
-    # Headers forwarded to extensions via RequestContext.extra_headers (static,
-    # server-level only — deliberately NOT per-bank configurable: a tenant must
-    # not be able to widen the set of request headers its own extension code
-    # sees). Stored lower-cased; empty means no header is ever forwarded.
-    extension_passthrough_headers: list[str] = field(default_factory=list)
-
-    # Background maintenance cadences (static, server-level only). Each sweep's
-    # discovery is one cross-tenant round-trip that probes every schema holding
-    # the relevant table, so its cost scales with tenant count and the cadence is
-    # the lever a large deployment tunes. 0 disables the job.
+    # Background maintenance cadences for the configured local schema. 0 disables a job.
     retention_sweep_interval_seconds: int = DEFAULT_RETENTION_SWEEP_INTERVAL_SECONDS
     operation_cleanup_interval_seconds: int = DEFAULT_OPERATION_CLEANUP_INTERVAL_SECONDS
     attachment_sweep_interval_seconds: int = DEFAULT_ATTACHMENT_SWEEP_INTERVAL_SECONDS
@@ -3816,28 +3676,6 @@ class RememberConfig:
                 f"'french', 'simple', 'zhparser'."
             )
 
-        # Validate text_search_extension_pg_search_function_schema as a PG identifier.
-        # Embedded directly into raw SQL via <schema>.score(...) etc., so we
-        # reject anything that isn't a plain identifier to prevent injection.
-        # Empty/whitespace values fall back to the default ("paradedb").
-        schema = (self.text_search_extension_pg_search_function_schema or "").strip().lower()
-        if not schema:
-            self.text_search_extension_pg_search_function_schema = (
-                DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA
-            )
-        elif not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", schema):
-            raise ValueError(
-                f"Invalid text_search_extension_pg_search_function_schema: "
-                f"{self.text_search_extension_pg_search_function_schema!r}. Must be a valid PostgreSQL identifier "
-                f"(letters, digits, underscores; not starting with a digit). Examples: 'paradedb', 'pgsearch'."
-            )
-        else:
-            self.text_search_extension_pg_search_function_schema = schema
-
-        self.text_search_extension_pg_search_tokenizer = normalize_pg_search_tokenizer(
-            self.text_search_extension_pg_search_tokenizer
-        )
-
         for field_name in (
             "semantic_min_similarity",
             "graph_seed_min_similarity",
@@ -4012,8 +3850,6 @@ class RememberConfig:
             ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
             read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
-            read_db_pool_min_size=int(os.getenv(ENV_READ_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),
-            read_db_pool_max_size=int(os.getenv(ENV_READ_DB_POOL_MAX_SIZE, str(DEFAULT_DB_POOL_MAX_SIZE))),
             migration_database_url=os.getenv(ENV_MIGRATION_DATABASE_URL) or None,
             database_connect_hook=os.getenv(ENV_DATABASE_CONNECT_HOOK) or None,
             database_schema=os.getenv(ENV_DATABASE_SCHEMA, DEFAULT_DATABASE_SCHEMA),
@@ -4027,14 +3863,6 @@ class RememberConfig:
                 ENV_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE,
                 DEFAULT_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE,
             ).lower(),
-            text_search_extension_pg_search_tokenizer=os.getenv(
-                ENV_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER,
-                DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_TOKENIZER,
-            ),
-            text_search_extension_pg_search_function_schema=os.getenv(
-                ENV_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA,
-                DEFAULT_TEXT_SEARCH_EXTENSION_PG_SEARCH_FUNCTION_SCHEMA,
-            ),
             query_analyzer_languages=(
                 [code.strip().lower() for code in raw.split(",") if code.strip()] or None
                 if (raw := os.getenv(ENV_QUERY_ANALYZER_LANGUAGES, "").strip())
@@ -4452,7 +4280,6 @@ class RememberConfig:
             access_log=os.getenv(ENV_ACCESS_LOG, "").lower() in ("1", "true", "yes", "on") or DEFAULT_ACCESS_LOG,
             daemon_log=os.getenv(ENV_DAEMON_LOG) or None,
             profile=os.getenv(ENV_PROFILE, "").strip() or None,
-            file_storage_extension=os.getenv(ENV_FILE_STORAGE_EXTENSION) or None,
             backpressure_defer_seconds=int(
                 os.getenv(ENV_BACKPRESSURE_DEFER_SECONDS, str(DEFAULT_BACKPRESSURE_DEFER_SECONDS))
             ),
@@ -4515,7 +4342,6 @@ class RememberConfig:
             gzip_min_size=int(os.getenv(ENV_GZIP_MIN_SIZE, str(DEFAULT_GZIP_MIN_SIZE))),
             loop_lag_report_seconds=float(os.getenv(ENV_LOOP_LAG_REPORT_SECONDS, str(DEFAULT_LOOP_LAG_REPORT_SECONDS))),
             loop_lag_metric=_parse_boolean_env(ENV_LOOP_LAG_METRIC, DEFAULT_LOOP_LAG_METRIC),
-            metrics_worker_label=_parse_boolean_env(ENV_METRICS_WORKER_LABEL, DEFAULT_METRICS_WORKER_LABEL),
             link_expansion_per_entity_limit=int(
                 os.getenv(ENV_LINK_EXPANSION_PER_ENTITY_LIMIT, str(DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT))
             ),
@@ -4538,9 +4364,6 @@ class RememberConfig:
             ),
             bank_stats_cache_ttl_seconds=float(
                 os.getenv(ENV_BANK_STATS_CACHE_TTL_SECONDS, str(DEFAULT_BANK_STATS_CACHE_TTL_SECONDS))
-            ),
-            bank_stats_cache_max_entries=int(
-                os.getenv(ENV_BANK_STATS_CACHE_MAX_ENTRIES, str(DEFAULT_BANK_STATS_CACHE_MAX_ENTRIES))
             ),
             # Optimization flags
             skip_llm_verification=os.getenv(ENV_SKIP_LLM_VERIFICATION, "false").lower() == "true",
@@ -4597,17 +4420,8 @@ class RememberConfig:
                 os.getenv(ENV_RETAIN_MAX_ATTACHMENTS_PER_CHUNK, str(DEFAULT_RETAIN_MAX_ATTACHMENTS_PER_CHUNK))
             ),
             # File storage
-            file_storage_type=os.getenv(ENV_FILE_STORAGE_TYPE, DEFAULT_FILE_STORAGE_TYPE),
             store_document_text=os.getenv(ENV_STORE_DOCUMENT_TEXT, str(DEFAULT_STORE_DOCUMENT_TEXT)).lower() == "true",
             default_timezone=_validate_default_timezone(os.getenv(ENV_DEFAULT_TIMEZONE, DEFAULT_DEFAULT_TIMEZONE)),
-            enable_document_export_api=os.getenv(
-                ENV_ENABLE_DOCUMENT_EXPORT_API, str(DEFAULT_ENABLE_DOCUMENT_EXPORT_API)
-            ).lower()
-            == "true",
-            enable_document_import_api=os.getenv(
-                ENV_ENABLE_DOCUMENT_IMPORT_API, str(DEFAULT_ENABLE_DOCUMENT_IMPORT_API)
-            ).lower()
-            == "true",
             # Observations settings (consolidated knowledge from facts)
             enable_observations=os.getenv(ENV_ENABLE_OBSERVATIONS, str(DEFAULT_ENABLE_OBSERVATIONS)).lower() == "true",
             enable_auto_consolidation=os.getenv(
@@ -4712,7 +4526,6 @@ class RememberConfig:
             # Database migrations
             run_migrations_on_startup=os.getenv(ENV_RUN_MIGRATIONS_ON_STARTUP, "true").lower() == "true",
             migration_isolation=_parse_migration_isolation(),
-            migration_concurrency=int(os.getenv(ENV_MIGRATION_CONCURRENCY, str(DEFAULT_MIGRATION_CONCURRENCY))),
             # Database connection pool
             db_pool_min_size=int(os.getenv(ENV_DB_POOL_MIN_SIZE, str(DEFAULT_DB_POOL_MIN_SIZE))),
             db_pool_max_size=int(os.getenv(ENV_DB_POOL_MAX_SIZE, str(DEFAULT_DB_POOL_MAX_SIZE))),
@@ -4752,7 +4565,6 @@ class RememberConfig:
                     str(DEFAULT_WORKER_TASK_RETRY_BACKOFF_SECONDS),
                 )
             ),
-            worker_http_port=int(os.getenv(ENV_WORKER_HTTP_PORT, str(DEFAULT_WORKER_HTTP_PORT))),
             worker_max_slots=int(os.getenv(ENV_WORKER_MAX_SLOTS, str(DEFAULT_WORKER_MAX_SLOTS))),
             worker_shutdown_drain_seconds=float(
                 os.getenv(ENV_WORKER_SHUTDOWN_DRAIN_SECONDS, str(DEFAULT_WORKER_SHUTDOWN_DRAIN_SECONDS))
@@ -4774,9 +4586,6 @@ class RememberConfig:
             retain_max_concurrent=int(os.getenv(ENV_RETAIN_MAX_CONCURRENT, str(DEFAULT_RETAIN_MAX_CONCURRENT))),
             retain_subbatch_concurrency=int(
                 os.getenv(ENV_RETAIN_SUBBATCH_CONCURRENCY, str(DEFAULT_RETAIN_SUBBATCH_CONCURRENCY))
-            ),
-            retain_store_max_concurrent=int(
-                os.getenv(ENV_RETAIN_STORE_MAX_CONCURRENT, str(DEFAULT_RETAIN_STORE_MAX_CONCURRENT))
             ),
             retain_wall_timeout=int(os.getenv(ENV_RETAIN_WALL_TIMEOUT, str(DEFAULT_RETAIN_WALL_TIMEOUT))),
             consolidation_wall_timeout=int(
@@ -4954,24 +4763,6 @@ class RememberConfig:
                 os.getenv(ENV_MAINTENANCE_START_JITTER_SECONDS),
                 DEFAULT_MAINTENANCE_START_JITTER_SECONDS,
             ),
-            # Webhook configuration (static, server-level only)
-            webhook_url=os.getenv(ENV_WEBHOOK_URL) or DEFAULT_WEBHOOK_URL,
-            webhook_secret=os.getenv(ENV_WEBHOOK_SECRET) or DEFAULT_WEBHOOK_SECRET,
-            webhook_event_types=[
-                t.strip()
-                for t in os.getenv(ENV_WEBHOOK_EVENT_TYPES, DEFAULT_WEBHOOK_EVENT_TYPES).split(",")
-                if t.strip()
-            ],
-            webhook_allowed_hosts=[h.strip() for h in os.getenv(ENV_WEBHOOK_ALLOWED_HOSTS, "").split(",") if h.strip()],
-            webhook_expose_response_body=_parse_boolean_env(
-                ENV_WEBHOOK_EXPOSE_RESPONSE_BODY, DEFAULT_WEBHOOK_EXPOSE_RESPONSE_BODY
-            ),
-            # Lower-cased here so the transports can match incoming header names
-            # case-insensitively (HTTP header names are case-insensitive) without
-            # re-normalising the allowlist on every request.
-            extension_passthrough_headers=[
-                h.lower() for h in _parse_str_list(os.getenv(ENV_EXTENSION_PASSTHROUGH_HEADERS, ""))
-            ],
         )
         return config
 
@@ -5060,10 +4851,6 @@ class RememberConfig:
             )
         if provider == "none":
             return None
-        # Hindsight's decision model is set up for consolidation, reflect and pages. Recall keeps
-        # its reranker unless the recall override names it: on recall the reranker evaluated better.
-        if provider == "hindsight" and operation == "recall" and own_provider is None:
-            return None
         defaults = DECISION_MODEL_PROVIDER_DEFAULTS[provider]
         inherits_global = provider == (self.decision_model_provider or "").lower()
 
@@ -5076,8 +4863,6 @@ class RememberConfig:
         base_url = setting("base_url") or defaults.base_url
         if self.decision_model_max_request_tokens:
             max_request_tokens: int | None = self.decision_model_max_request_tokens
-        elif defaults.default_url_fits_requests and (base_url or "").rstrip("/") == defaults.base_url:
-            max_request_tokens = None
         else:
             max_request_tokens = defaults.max_request_tokens or DEFAULT_DECISION_MODEL_MAX_REQUEST_TOKENS
         # Checked here, not on the first request: a ceiling no request fits, or a cap no

@@ -49,7 +49,7 @@ def routed():
 def test_default_is_no_label_so_existing_series_are_untouched(collector):
     """A store that does not override backend_name_for names nothing: no label, so no new series
     and no break in the history of the ones a deployment already has."""
-    store = PostgresMemories({})
+    store = PostgresMemories()
     assert store.backend_name_for("any-bank") == ""
     with patch("remember_api.engine.memories.get_memories", return_value=store):
         with collector.record_operation("recall", bank_id="bank"):

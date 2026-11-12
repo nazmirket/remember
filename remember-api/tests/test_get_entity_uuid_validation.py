@@ -24,7 +24,6 @@ from remember_api.engine.memory_engine import MemoryEngine
 def _stub_engine() -> MemoryEngine:
     engine = object.__new__(MemoryEngine)
     engine._authenticate_tenant = AsyncMock()
-    engine._operation_validator = None
     # 让 _get_backend 返回一个 mock conn，但它永远不会被到达
     # 因为 uuid.UUID(bad) 会先 raise
     engine._get_backend = AsyncMock(return_value=MagicMock())

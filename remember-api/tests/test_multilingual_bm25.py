@@ -369,30 +369,6 @@ def test_postgresql_native_bm25_zero_cap_keeps_existing_unlimited_behavior():
     assert PostgreSQLDialect().prepare_bm25_text(tokens, query, max_query_terms=0) == "alpha | beta | alpha"
 
 
-def test_postgresql_extension_bm25_keeps_raw_query_text():
-    query = "Alpha beta alpha, gamma delta beta epsilon"
-    tokens = tokenize_query(query)
-
-    for ext in ("vchord", "pg_search", "pg_textsearch", "pgroonga"):
-        assert (
-            PostgreSQLDialect().prepare_bm25_text(tokens, query, text_search_extension=ext, max_query_terms=3) == query
-        )
-
-
-def test_postgresql_pgroonga_bm25_arm_uses_pgroonga_tokenize():
-    arm = PostgreSQLDialect().build_bm25_arm(
-        table="memory_units",
-        cols="id, text",
-        fact_type="world",
-        bank_id_param="$2",
-        limit_param="$3",
-        text_param="$4",
-        text_search_extension="pgroonga",
-    )
-    assert "pgroonga_tokenize($4, 'tokenizer', 'TokenBigram', 'normalizer', 'NormalizerNFKC150')" in arm
-    assert "string_agg(pgroonga_query_escape(elem->>'value'), ' OR ')" in arm
-
-
 @pytest.mark.asyncio
 async def test_combined_retrieval_rejects_config_missing_bm25_cap(monkeypatch):
     """A config object lacking the BM25 cap fields fails loudly instead of defaulting.
@@ -485,8 +461,6 @@ async def test_selective_terms_flag_gates_the_pg_stats_lookup(monkeypatch, selec
         bm25_min_score=0.0,
         text_search_extension="native",
         text_search_extension_native_language="english",
-        text_search_extension_pg_search_function_schema="paradedb",
-        text_search_extension_pg_search_tokenizer="",
         bm25_max_query_terms=16,
         bm25_selective_terms=selective,
     )

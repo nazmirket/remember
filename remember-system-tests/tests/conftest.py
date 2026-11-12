@@ -217,25 +217,6 @@ def wif_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterato
     server.stop()
 
 
-@pytest.fixture(scope="session")
-def custom_llm_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
-    """A server whose LLM is an operator's own class, named by its import path.
-
-    The LLM provider is server-level, hence a process. HTTP only, for the same reason
-    as ``typesafe_server``: a worker here would run the other servers' queued work
-    with this server's provider.
-    """
-    server = start_remember_server(
-        stub_url=stub_server.url,
-        log_path=tmp_path_factory.mktemp("custom-llm-server") / "server.log",
-        extra_env={
-            "REMEMBER_API_LLM_PROVIDER": "marked_llm:MarkedOpenAILLM",
-            "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "server_extensions"),
-            "REMEMBER_API_WORKER_ENABLED": "false",
-        },
-    )
-    yield server
-    server.stop()
 
 
 @pytest.fixture(scope="session")
@@ -266,67 +247,17 @@ def logged_out_primary_server(stub_server, tmp_path_factory: pytest.TempPathFact
     server.stop()
 
 
-@pytest.fixture(scope="session")
-def scoped_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
-    """A server whose operation validator confines each API key to ``user:<key>`` + ``kind:rule``.
-
-    The validator (``server_extensions/tag_scope_validator.py``) is server-level, so it costs
-    a process of its own. Session-scoped and started lazily, like ``typesafe_server``.
-    """
-    log_path: Path = tmp_path_factory.mktemp("scoped-server") / "server.log"
-    server = start_remember_server(
-        stub_url=stub_server.url,
-        log_path=log_path,
-        extra_env={
-            "REMEMBER_API_OPERATION_VALIDATOR_EXTENSION": "tag_scope_validator:UserTagScope",
-            "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "server_extensions"),
-        },
-    )
-    yield server
-    server.stop()
 
 
 #: The schema of the publication-rules server. Its own, because the hook it tests runs in
 #: the worker: on the shared schema the default server's worker (no validator) claimed its
 #: refreshes about half the time and stored the page the validator would have refused.
-PUBLISHING_SCHEMA = "systest_publishing"
 
 
-@pytest.fixture(scope="session")
-def publishing_server(stub_server, tmp_path_factory: pytest.TempPathFactory) -> Iterator[object]:
-    """A server whose operation validator refuses mental-model pages that break a rule.
-
-    The validator (``server_extensions/publication_rules_validator.py``) is server-level, so
-    it costs a process of its own. Session-scoped and started lazily, like ``typesafe_server``.
-    """
-    log_path: Path = tmp_path_factory.mktemp("publishing-server") / "server.log"
-    server = start_remember_server(
-        stub_url=stub_server.url,
-        log_path=log_path,
-        extra_env={
-            "REMEMBER_API_DATABASE_SCHEMA": PUBLISHING_SCHEMA,
-            "REMEMBER_API_OPERATION_VALIDATOR_EXTENSION": "publication_rules_validator:PublicationRules",
-            "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "server_extensions"),
-        },
-    )
-    yield server
-    server.stop()
 
 
-@pytest.fixture
-async def publishing_client(publishing_server) -> AsyncIterator[Remember]:
-    client = Remember(base_url=publishing_server.url)
-    yield client
-    await client.aclose()
 
 
-@pytest.fixture
-async def publishing_bank(publishing_client: Remember) -> AsyncIterator[str]:
-    """A bank of this test's own on ``publishing_server``, deleted when the test ends."""
-    name = f"{BANK_PREFIX}{uuid.uuid4().hex[:12]}"
-    yield name
-    with contextlib.suppress(Exception):
-        await publishing_client.banks.delete_bank(name)
 
 
 @pytest.fixture(scope="session")
@@ -412,11 +343,6 @@ async def wif_client(wif_server) -> AsyncIterator[Remember]:
     await client.aclose()
 
 
-@pytest.fixture
-async def custom_llm_client(custom_llm_server) -> AsyncIterator[Remember]:
-    client = Remember(base_url=custom_llm_server.url)
-    yield client
-    await client.aclose()
 
 
 @pytest.fixture

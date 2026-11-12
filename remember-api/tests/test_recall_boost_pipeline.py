@@ -68,11 +68,10 @@ def recall_harness(monkeypatch: pytest.MonkeyPatch) -> _RecallHarness:
     monkeypatch.setattr(config, "reranker_max_candidates_low", 0)
     monkeypatch.setattr(memory_engine, "get_config", lambda: config)
     engine = memory_engine.MemoryEngine.__new__(memory_engine.MemoryEngine)
-    engine._operation_validator = None
     engine._config_resolver = _ConfigResolver()
     engine._search_semaphore = asyncio.Semaphore(2)
     engine._initialized = True
-    engine._read_backend = object()
+    engine._backend = object()
     engine.embeddings = object()
     engine.query_analyzer = object()
     engine._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=_Primary())

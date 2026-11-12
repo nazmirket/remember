@@ -40,11 +40,6 @@ class SchemaTenantExtension(TenantExtension):
     async def authenticate(self, request_context: RequestContext) -> TenantContext:
         return TenantContext(schema_name=self.schema_name)
 
-    async def list_tenants(self) -> list:
-        from remember_api.extensions.tenant import Tenant
-
-        return [Tenant(schema=self.schema_name)]
-
 
 def get_test_schema(prefix: str, worker_id: str) -> str:
     """Get unique schema name per xdist worker."""
@@ -373,59 +368,6 @@ class TestEmbeddingDimension:
         # Cleanup
         clear_mental_model_embeddings(db_url, schema)
 
-    def test_store_owned_memories_leaves_memory_units_untouched(self, dimension_test_schema):
-        """A custom memories store owns the memory rows, so memory_units is never resized —
-        not even when it holds rows that would otherwise block the change — while
-        mental_models, which stays in Postgres, still follows the model."""
-        db_url, schema = dimension_test_schema
-
-        clear_embeddings(db_url, schema)
-        clear_mental_model_embeddings(db_url, schema)
-        # An earlier test's blocked mental_models change can leave memory_units resized.
-        _ensure_embedding_dimension_with_retry(db_url, 384, schema=schema)
-        insert_test_embedding(db_url, schema, 384)
-
-        ensure_embedding_dimension(db_url, 768, schema=schema, store_owned_memories=True)
-
-        assert get_column_dimension(db_url, schema) == 384
-        assert get_column_dimension(db_url, schema, table="mental_models") == 768
-
-        # Restore for other tests
-        clear_embeddings(db_url, schema)
-        _ensure_embedding_dimension_with_retry(db_url, 384, schema=schema)
-        assert get_column_dimension(db_url, schema, table="mental_models") == 384
-
-    def test_store_owned_memories_keeps_mental_models_unindexed(self, dimension_test_schema):
-        """The store answers every mental-model vector query, so mental_models.embedding carries
-        no vector index: the one the base migrations built is dropped even when the dimension
-        already matches, and a resize past pgvector's 2000-dim HNSW limit succeeds. Switching
-        back to the Postgres store rebuilds it."""
-        db_url, schema = dimension_test_schema
-
-        clear_embeddings(db_url, schema)
-        clear_mental_model_embeddings(db_url, schema)
-        _ensure_embedding_dimension_with_retry(db_url, 384, schema=schema)
-        assert get_vector_index_names(db_url, schema, "mental_models")
-
-        ensure_embedding_dimension(db_url, 384, schema=schema, store_owned_memories=True)
-        assert get_vector_index_names(db_url, schema, "mental_models") == []
-
-        # Back on the Postgres store at the same dimension — no resize to piggyback on, and the
-        # table is populated — the missing index is still rebuilt.
-        insert_test_mental_model_embedding(db_url, schema, 384)
-        _ensure_embedding_dimension_with_retry(db_url, 384, schema=schema)
-        assert get_vector_index_names(db_url, schema, "mental_models")
-        clear_mental_model_embeddings(db_url, schema)
-
-        ensure_embedding_dimension(db_url, 3072, schema=schema, store_owned_memories=True)
-        assert get_column_dimension(db_url, schema, table="mental_models") == 3072
-        assert get_vector_index_names(db_url, schema, "mental_models") == []
-
-        # Restore for other tests
-        _ensure_embedding_dimension_with_retry(db_url, 384, schema=schema)
-        assert get_column_dimension(db_url, schema, table="mental_models") == 384
-        assert get_vector_index_names(db_url, schema, "mental_models")
-
     async def test_local_embeddings_dimension_detection(self, embeddings):
         """Test that LocalSTEmbeddings correctly detects dimension."""
         # Initialize embeddings if not already done
@@ -549,9 +491,9 @@ class TestOpenAIEmbeddings:
             pool_min_size=1,
             pool_max_size=3,
             run_migrations=False,
-            tenant_extension=SchemaTenantExtension(schema_name),
             task_backend=SyncTaskBackend(),
         )
+        memory._tenant_extension = SchemaTenantExtension(schema_name)
 
         try:
             await memory.initialize()
@@ -619,9 +561,9 @@ class TestOpenAIEmbeddings:
             pool_min_size=1,
             pool_max_size=3,
             run_migrations=False,
-            tenant_extension=SchemaTenantExtension(schema_name),
             task_backend=SyncTaskBackend(),
         )
+        memory._tenant_extension = SchemaTenantExtension(schema_name)
 
         try:
             await memory.initialize()

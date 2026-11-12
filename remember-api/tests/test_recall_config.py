@@ -195,7 +195,6 @@ class TestRefreshTriggerWiring:
         engine.get_mental_model = fake_get_mental_model
         engine.reflect_async = fake_reflect_async
         engine.update_mental_model = fake_update_mental_model
-        engine._operation_validator = None
         engine._tenant_extension = None
         # DB-time refresh watermark — stub so this mock test doesn't reach a real
         # pool (matches the other collaborator stubs above).
@@ -244,7 +243,6 @@ class TestRefreshTriggerWiring:
         engine.get_mental_model = fake_get_mental_model
         engine.reflect_async = fake_reflect_async
         engine.update_mental_model = fake_update_mental_model
-        engine._operation_validator = None
         engine._tenant_extension = None
         # DB-time refresh watermark — stub so this mock test doesn't reach a real
         # pool (matches the other collaborator stubs above).

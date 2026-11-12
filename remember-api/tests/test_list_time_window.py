@@ -392,10 +392,8 @@ def test_unknown_time_field_is_rejected_not_silently_swapped():
         )
 
 
-def test_the_store_owned_branch_validates_too():
-    """`list_documents` returns to a store that owns its documents before any clause
-    is built, so validation has to sit in front of that branch — otherwise an
-    inverted window is a 400 on Postgres and a silently empty page elsewhere."""
+def test_document_time_window_is_validated():
+    """Reject invalid document time fields and inverted time windows."""
     with pytest.raises(ValueError, match="end_date must be after start_date"):
         validate_time_window(
             time_field=None,

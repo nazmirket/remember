@@ -24,7 +24,6 @@ import dataclasses
 
 import random
 import uuid
-from types import SimpleNamespace
 
 import pytest
 
@@ -61,12 +60,6 @@ def test_retain_link_probing_does_not_resume():
 
     assert settings["hnsw.iterative_scan"] == "off"
     assert settings["hnsw.ef_search"] == "60"
-
-
-def test_backends_without_the_knobs_get_no_settings():
-    for ext in ("vchord", "pgvectorscale", "pg_diskann", "scann"):
-        assert ann_search_tuning_settings(ext, kind="high_recall") == ()
-        assert ann_search_tuning_settings(ext, kind="low_latency") == ()
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +119,7 @@ def search_path(monkeypatch):
 
 
 async def _search(conn, limit: int, **kwargs):
-    await PostgresMemories({}).search(
+    await PostgresMemories().search(
         conn=conn,
         bank_id="bank-1",
         fact_types=["world", "experience"],

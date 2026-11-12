@@ -18,21 +18,10 @@ immediately, which is a far better answer than a response that arrives after the
 caller timed out. Capacity is unchanged; what changes is that the capacity stops
 being spent on work nobody is waiting for.
 
-**Where this runs.** As a FastAPI dependency on the same routes that carry
-``precheck_for``, so a rejection happens *before the request body is deserialised*
-— the cheapest possible point to say no, and the same place an extension already
-rejects on quota.
-
-**Why a lane per operation rather than one global limit.** Per-request cost spans
-three orders of magnitude on this API (measured: ~0.1ms for ``/health/live``,
-~0.5ms for bank stats, ~23ms for a recall). A single global request cap calibrated
-for recall would throttle health checks that the server can serve 100x faster; one
-calibrated for health would never engage for recall. The operations worth limiting
-are exactly the ones :class:`PrecheckOperation` already enumerates.
-
-**The limits are PER WORKER PROCESS.** Each ``--workers N`` process imports the app
-and builds its own controller, so the process-wide budget is ``N x max_in_flight``.
-Size a lane for one worker, not for the cluster.
+**Where this runs.** FastAPI applies admission before reading request bodies for
+retain, recall, and reflect. Each operation has its own limit, so expensive memory
+requests do not throttle lightweight health checks. The local daemon has one
+worker process and one event loop.
 
 A plain ``asyncio.Semaphore`` is correct here because one process runs one event
 loop. (It would not be under ``--event-loops > 1`` on a free-threaded build, where

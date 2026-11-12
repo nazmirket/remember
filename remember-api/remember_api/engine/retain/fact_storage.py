@@ -47,8 +47,8 @@ async def count_document_memory_units(
 ) -> int:
     """Count the memory units a document currently owns.
 
-    This is the number reported as ``memory_unit_count`` by the Documents API and
-    by the ``retain.completed`` webhook. Zero means the document is stored but
+    This is the number reported as ``memory_unit_count`` by the Documents API.
+    Zero means the document is stored but
     unreachable through recall/reflect — only memory units carry embeddings, so a
     document without them cannot be retrieved until it is reprocessed (#3040).
 
@@ -68,7 +68,6 @@ async def insert_facts_batch(
     facts: list[ProcessedFact],
     document_id: str | None = None,
     ops=None,
-    defer_index: bool = False,
 ) -> list[str]:
     """
     Store facts and return their unit ids, in order.
@@ -78,11 +77,6 @@ async def insert_facts_batch(
         bank_id: Bank identifier
         facts: List of ProcessedFact objects to insert
         document_id: Optional document ID to associate with facts
-        defer_index: Ask for ids without the write. The retain orchestrator needs
-            this because it can only supply entity ids and causal edges after
-            Phase-1 placeholders have been remapped onto real unit ids; it then
-            calls `index_facts` with the complete picture. The Postgres store,
-            whose write *is* the insert that mints the ids, ignores it.
 
     Returns:
         List of unit IDs (UUIDs as strings) for the inserted facts
@@ -98,29 +92,7 @@ async def insert_facts_batch(
         bank_id=bank_id,
         facts=facts,
         document_id=document_id,
-        defer_index=defer_index,
     )
-
-
-async def index_facts(
-    bank_id: str,
-    unit_ids: list[str],
-    facts: list[ProcessedFact],
-    document_id: str | None = None,
-    unit_entity_ids: dict[str, list[str]] | None = None,
-) -> None:
-    """Complete a deferred `insert_facts_batch`, now that the edges are known.
-
-    ``unit_entity_ids`` is the unit→entity posting and each fact's causal
-    relations are its edges; both travel with the memory for a store that owns
-    them. A no-op for the Postgres store, which wrote all of it already.
-
-    This is the single, entity-bearing write of the store-owned retain path: the facts
-    land ONCE here, complete, rather than write-then-reattach.
-    """
-    from ..memories import get_memories
-
-    await get_memories().index_facts(bank_id, unit_ids, facts, document_id, unit_entity_ids)
 
 
 async def ensure_bank_exists(conn, bank_id: str, *, ops) -> None:

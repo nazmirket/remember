@@ -21,8 +21,6 @@ from remember_api.api.http import (
     RecallResponse,
     ReflectResponse,
     RetainResponse,
-    WebhookDeliveryResponse,
-    WebhookResponse,
     _response_model_must_keep_nulls,
 )
 
@@ -59,7 +57,7 @@ def test_high_traffic_responses_are_cleaned() -> None:
 def test_required_nullable_responses_are_preserved() -> None:
     # These carry a required-nullable field (e.g. error_message, content_hash) that
     # strict clients expect present -> must keep emitting nulls.
-    for model in (DocumentResponse, OperationResponse, WebhookResponse, WebhookDeliveryResponse):
+    for model in (DocumentResponse, OperationResponse):
         assert _response_model_must_keep_nulls(model) is True
 
 

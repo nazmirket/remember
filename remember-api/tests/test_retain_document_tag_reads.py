@@ -6,12 +6,11 @@ import random
 import asyncpg
 
 from remember_api.engine.memories import postgres
-from remember_api.engine.memories.base import DocumentTags, MemoriesExtension
 
 
 async def test_batched_read_matches_per_document_read(pg0_db_url, monkeypatch):
     monkeypatch.setattr(postgres, "fq_store_table", lambda name: f"pg_temp.{name}")
-    store = postgres.PostgresMemories({})
+    store = postgres.PostgresMemories()
     conn = await asyncpg.connect(pg0_db_url)
     try:
         await conn.execute(
@@ -37,19 +36,3 @@ async def test_batched_read_matches_per_document_read(pg0_db_url, monkeypatch):
         assert batched == per_doc
     finally:
         await conn.close()
-
-
-async def test_default_keeps_a_record_without_tags_as_existing():
-    """A store record with no tags key must still count as existing (and so be refused to a
-    restricted writer), not be dropped like `documents_tags` drops it."""
-
-    class Store:
-        async def current_document_tags(self, *, conn, fq_table, bank_id, document_id, for_update=False):
-            return {"tagless": DocumentTags(found=True, tags=None)}.get(
-                document_id, DocumentTags(found=False, tags=None)
-            )
-
-    got = await MemoriesExtension.existing_documents_tags(
-        Store(), conn=None, fq_table=None, bank_id="b", document_ids=["tagless", "missing"]
-    )
-    assert got == {"tagless": None}

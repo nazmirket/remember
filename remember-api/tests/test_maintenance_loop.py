@@ -369,6 +369,33 @@ class TestRetentionSweepPacing:
             await self._drop(memory, table)
 
     @pytest.mark.asyncio
+    async def test_retention_does_not_touch_another_schema(self, memory: MemoryEngine):
+        """The local daemon must leave unrelated schemas in the database untouched."""
+        from remember_api.config import get_config
+
+        table = await self._make_probe_table(memory, expired=1, recent=0)
+        other_schema = f"retention_other_{uuid.uuid4().hex[:8]}"
+        local_schema = get_config().database_schema or "public"
+        assert other_schema != local_schema
+        try:
+            async with memory._pool.acquire() as conn:
+                await conn.execute(f'CREATE SCHEMA "{other_schema}"')
+                await conn.execute(
+                    f'CREATE TABLE "{other_schema}".{table} '
+                    "(id UUID PRIMARY KEY DEFAULT gen_random_uuid(), started_at TIMESTAMPTZ NOT NULL)"
+                )
+                await conn.execute(
+                    f"INSERT INTO \"{other_schema}\".{table} (started_at) VALUES (now() - INTERVAL '10 days')"
+                )
+            assert await MaintenanceLoop(memory)._purge_expired(table, "started_at", 7) == 1
+            async with memory._pool.acquire() as conn:
+                assert await conn.fetchval(f'SELECT COUNT(*) FROM "{other_schema}".{table}') == 1
+        finally:
+            async with memory._pool.acquire() as conn:
+                await conn.execute(f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE')
+            await self._drop(memory, table)
+
+    @pytest.mark.asyncio
     async def test_per_run_batch_ceiling_bounds_one_sweep(self, memory: MemoryEngine, monkeypatch):
         """A backlog is drained over several runs rather than in one long statement."""
         import remember_api.engine.maintenance as maintenance_mod
@@ -446,9 +473,6 @@ class TestOperationCleanupJob:
         engine = MagicMock()
         engine._backend = backend
         engine._tenant_extension.list_tenants = AsyncMock(return_value=[SimpleNamespace(schema=s) for s in tenants])
-        # The sweep purges expired export archives before pruning each schema's rows;
-        # stub it as a no-op so these tests stay focused on discovery + prune scoping.
-        engine.purge_expired_export_archives = AsyncMock(return_value=0)
         return engine, backend, conn
 
     @staticmethod
@@ -462,57 +486,22 @@ class TestOperationCleanupJob:
         return [call.args[1] for call in backend.ops.prune_terminal_operations.await_args_list]
 
     @pytest.mark.asyncio
-    async def test_only_schemas_reported_as_expired_are_pruned(self, monkeypatch):
-        engine, backend, conn = self._make_engine(
-            expired=["public", "tenant_b"], tenants=("public", "tenant_a", "tenant_b")
-        )
-        loop = MaintenanceLoop(engine)
+    async def test_cleanup_prunes_only_the_configured_schema(self, monkeypatch):
+        from types import SimpleNamespace
+        import remember_api.engine.maintenance as maintenance_mod
 
-        await loop._run_operation_cleanup(self._cfg())
-
-        # One discovery round-trip, carrying the configured retention window.
-        conn.fetch.assert_awaited_once()
-        # Schema-qualified via fq_routine, so a non-public deployment calls its own
-        # copy rather than a public one that may not exist (#2638).
-        assert '"public".schemas_with_expired_operations' in conn.fetch.await_args.args[0]
-        assert conn.fetch.await_args.args[1] == 30
-        # tenant_a has nothing expired, so it costs no connection or transaction.
-        assert self._pruned_tables(backend) == ['"public".async_operations', '"tenant_b".async_operations']
+        monkeypatch.setattr(maintenance_mod, "get_config", lambda: SimpleNamespace(database_schema="local_only"))
+        engine, backend, conn = self._make_engine(expired=["public", "another"])
+        await MaintenanceLoop(engine)._run_operation_cleanup(self._cfg())
+        assert self._pruned_tables(backend) == ['"local_only".async_operations']
+        conn.fetch.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_nothing_expired_anywhere_skips_pruning_entirely(self):
-        engine, backend, _conn = self._make_engine(expired=[], tenants=("public", "tenant_a"))
-        loop = MaintenanceLoop(engine)
-
-        await loop._run_operation_cleanup(self._cfg())
-
-        backend.ops.prune_terminal_operations.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_schema_no_tenant_claims_is_skipped(self):
-        """The routine reports every schema owning an async_operations table,
-        including ones tenant discovery doesn't claim; pruning stays scoped."""
-        engine, backend, _conn = self._make_engine(expired=["public", "stranger"], tenants=("public",))
-        loop = MaintenanceLoop(engine)
-
-        await loop._run_operation_cleanup(self._cfg())
-
-        assert self._pruned_tables(backend) == ['"public".async_operations']
-
-    @pytest.mark.asyncio
-    async def test_missing_routine_skips_the_sweep(self):
-        """Without the routine there is no sweep — deliberately no full-scan
-        fallback, so a deployment that never ran the migration fails loudly in
-        the logs rather than silently paying the per-tenant cost."""
-        engine, backend, _conn = self._make_engine(
-            fetch_error=RuntimeError("function schemas_with_expired_operations(integer) does not exist"),
-            tenants=("public", "tenant_a"),
-        )
-        loop = MaintenanceLoop(engine)
-
-        await loop._run_operation_cleanup(self._cfg())
-
-        backend.ops.prune_terminal_operations.assert_not_awaited()
+    async def test_cleanup_failure_does_not_stop_the_loop(self, caplog):
+        engine, backend, _conn = self._make_engine()
+        backend.ops.prune_terminal_operations.side_effect = RuntimeError("database unavailable")
+        await MaintenanceLoop(engine)._run_operation_cleanup(self._cfg())
+        assert "database unavailable" in caplog.text
 
     @pytest.mark.asyncio
     async def test_tick_schedules_cleanup_only_when_retention_enabled(self, monkeypatch):
@@ -553,52 +542,6 @@ class TestOperationCleanupJob:
         cfg.operation_cleanup_interval_seconds = 900
         await loop._tick()
         loop._run_operation_cleanup.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_archive_purge_shares_the_prune_batch_bound(self):
-        """The archive purge is bounded by the same batch size as the row prune.
-
-        Unbounded, it re-selects every expired export and re-deletes blobs that are
-        already gone on every cycle — ``storage_key`` survives in the row until the
-        row itself is pruned, so nothing marks the blob as handled.
-        """
-        engine, _backend, _conn = self._make_engine(expired=["public"], tenants=("public",))
-        loop = MaintenanceLoop(engine)
-
-        await loop._run_operation_cleanup(self._cfg(batch=250))
-
-        assert engine.purge_expired_export_archives.await_args.kwargs["batch_size"] == 250
-
-
-@pytest.mark.asyncio
-async def test_reconcile_finds_a_store_owned_banks_backlog(memory: MemoryEngine, request_context, monkeypatch):
-    """The discovery routine reads `memory_units`, which a store-owned bank leaves empty, so it
-    never names one. Its backlog has to come from the store, or a fact requeued by
-    `recover_consolidation` waits forever."""
-    from remember_api.engine.memories import set_memories
-    from tests.test_memories_extension import InMemoryMemories, _seed
-
-    store = InMemoryMemories({})
-    set_memories(store)
-    try:
-        bank = await _make_bank(
-            memory, request_context, "store", '{"enable_observations": true, "enable_auto_consolidation": true}'
-        )
-        await _seed(store, bank, text="waiting for consolidation", fact_type="world")
-
-        submitted: list[str] = []
-
-        async def _record(*, bank_id, request_context, observation_scopes=None):
-            submitted.append(bank_id)
-            return {"operation_id": str(uuid.uuid4())}
-
-        monkeypatch.setattr(memory, "submit_async_consolidation", _record)
-
-        await MaintenanceLoop(memory)._run_reconcile()
-    finally:
-        set_memories(None)
-
-    assert bank in submitted
 
 
 @pytest.mark.asyncio

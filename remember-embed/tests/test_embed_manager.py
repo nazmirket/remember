@@ -28,8 +28,6 @@ _posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process 
 
 def _startup_manager(is_running: MagicMock) -> DaemonEmbedManager:
     manager = DaemonEmbedManager()
-    manager._profile_manager = MagicMock()
-    manager._profile_manager.load_profile_config.return_value = {}
     manager._clear_port = MagicMock(return_value=True)
     manager.is_running = is_running
     manager._component_version = MagicMock(return_value="0.0.0")
@@ -48,14 +46,14 @@ def _running_process() -> MagicMock:
 def test_start_timeout_terminates_spawned_daemon_group(tmp_path, monkeypatch):
     manager = _startup_manager(MagicMock(return_value=False))
     process = _running_process()
-    paths = SimpleNamespace(log=tmp_path / "daemon.log", port=9177)
+    paths = SimpleNamespace(config=tmp_path / "config.env", log=tmp_path / "daemon.log", port=9177)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.DAEMON_STARTUP_TIMEOUT", 0)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
     killpg = MagicMock()
     monkeypatch.setattr("remember_embed.daemon_embed_manager.os.killpg", killpg)
 
     with patch("remember_embed.daemon_embed_manager.subprocess.Popen", return_value=process) as popen:
-        assert manager._start_daemon_locked({}, "test", paths) is False
+        assert manager._start_daemon_locked({}, paths) is False
 
     assert popen.call_args.args[0] == ["remember-api", "--port", "9177"]
     # The whole group, so a uvx launcher's remember-api grandchild goes too.
@@ -66,12 +64,12 @@ def test_start_timeout_terminates_spawned_daemon_group(tmp_path, monkeypatch):
 def test_startup_keeps_polling_after_transient_stability_failure(tmp_path, monkeypatch):
     manager = _startup_manager(MagicMock(side_effect=[False, True, False, True, True]))
     process = _running_process()
-    paths = SimpleNamespace(log=tmp_path / "daemon.log", port=9177)
+    paths = SimpleNamespace(config=tmp_path / "config.env", log=tmp_path / "daemon.log", port=9177)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.time.time", lambda: 0)
 
     with patch("remember_embed.daemon_embed_manager.subprocess.Popen", return_value=process):
-        assert manager._start_daemon_locked({}, "test", paths) is True
+        assert manager._start_daemon_locked({}, paths) is True
 
     process.wait.assert_not_called()
     assert manager.is_running.call_count == 5
@@ -81,11 +79,11 @@ def test_startup_fails_fast_when_daemon_exits(tmp_path, monkeypatch):
     manager = _startup_manager(MagicMock(return_value=False))
     process = _running_process()
     process.poll.return_value = 1
-    paths = SimpleNamespace(log=tmp_path / "daemon.log", port=9177)
+    paths = SimpleNamespace(config=tmp_path / "config.env", log=tmp_path / "daemon.log", port=9177)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.time.sleep", MagicMock(side_effect=AssertionError))
 
     with patch("remember_embed.daemon_embed_manager.subprocess.Popen", return_value=process):
-        assert manager._start_daemon_locked({}, "test", paths) is False
+        assert manager._start_daemon_locked({}, paths) is False
 
     manager.is_running.assert_called_once()  # the pre-spawn check only
 
@@ -94,10 +92,10 @@ def _spawned_env(manager, tmp_path, monkeypatch) -> dict:
     """Run _start_daemon_locked up to the spawn and return the env Popen received."""
     process = _running_process()
     process.poll.return_value = 1  # exit at once so the startup loop ends
-    paths = SimpleNamespace(log=tmp_path / "daemon.log", port=9177)
+    paths = SimpleNamespace(config=tmp_path / "config.env", log=tmp_path / "daemon.log", port=9177)
     monkeypatch.setattr("remember_embed.daemon_embed_manager.time.sleep", lambda _seconds: None)
     with patch("remember_embed.daemon_embed_manager.subprocess.Popen", return_value=process) as popen:
-        manager._start_daemon_locked({}, "test", paths)
+        manager._start_daemon_locked({}, paths)
     return popen.call_args.kwargs["env"]
 
 
@@ -189,39 +187,18 @@ def test_start_timeout_kills_daemon_on_windows(monkeypatch):
     process.kill.assert_called_once_with()
 
 
-def test_sanitize_profile_name_via_db_url():
-    """Test profile name sanitization through database URL generation."""
-    manager = DaemonEmbedManager()
-
-    # Test None defaults to "default"
-    assert manager.get_database_url(None) == "pg0://remember-embed-default"
-
-    # Test simple alphanumeric names
-    assert manager.get_database_url("myapp") == "pg0://remember-embed-myapp"
-    assert manager.get_database_url("my-app") == "pg0://remember-embed-my-app"
-    assert manager.get_database_url("my_app") == "pg0://remember-embed-my_app"
-    assert manager.get_database_url("app123") == "pg0://remember-embed-app123"
-
-    # Test special characters get replaced with dashes
-    assert manager.get_database_url("my app") == "pg0://remember-embed-my-app"
-    assert manager.get_database_url("my.app") == "pg0://remember-embed-my-app"
-    assert manager.get_database_url("my@app!") == "pg0://remember-embed-my-app-"
-    assert manager.get_database_url("My App 2.0!") == "pg0://remember-embed-My-App-2-0-"
-
-
 def test_get_database_url_default():
     """Test database URL generation with default pg0."""
     manager = DaemonEmbedManager()
 
-    assert manager.get_database_url("myapp") == "pg0://remember-embed-myapp"
+    assert manager.get_database_url() == "pg0://remember-embed-coding-agent"
 
 
 def test_database_url_ignores_remote_settings(monkeypatch):
     manager = DaemonEmbedManager()
     monkeypatch.setenv("REMEMBER_EMBED_API_DATABASE_URL", "postgresql://remote/inherited")
     monkeypatch.setenv("REMEMBER_API_DATABASE_URL", "postgresql://remote/inherited")
-    config = {"REMEMBER_API_DATABASE_URL": "postgresql://remote/profile"}
-    assert manager.resolve_database_url("myapp", config) == "pg0://remember-embed-myapp"
+    assert manager.get_database_url() == "pg0://remember-embed-coding-agent"
 
 
 def test_manager_singleton():
@@ -233,74 +210,7 @@ def test_manager_singleton():
     assert type(manager1) == type(manager2)
 
     # They should produce the same results
-    assert manager1.get_database_url("test") == manager2.get_database_url("test")
-
-
-def test_register_profile_skips_when_no_api_keys():
-    """
-    When config carries no REMEMBER_API_* keys there is nothing to persist, so
-    _register_profile must not call create_profile — which would rewrite the
-    profile .env from an empty config.
-
-    Regression test for https://github.com/vectorize-io/hindsight/issues/894
-    """
-    manager = DaemonEmbedManager()
-    manager._profile_manager = MagicMock()
-
-    manager._register_profile("myprofile", 8100, {"REMEMBER_EMBED_API_URL": "http://elsewhere"})
-
-    manager._profile_manager.create_profile.assert_not_called()
-
-
-def test_register_profile_does_not_overwrite_configured_values(tmp_path, monkeypatch):
-    """A daemon start seeds missing keys but never rewrites configured ones.
-
-    `config` reaching _register_profile is the profile merged with this
-    invocation's ambient REMEMBER_* environment. Letting it win would make a
-    one-off `REMEMBER_API_LLM_MODEL=... remember-embed recall` permanently
-    rewrite the user's profile; the file is owned by `configure` and the
-    control center.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-
-    manager = DaemonEmbedManager()
-    manager._profile_manager.create_profile(
-        "p", {"REMEMBER_API_LLM_PROVIDER": "anthropic", "REMEMBER_API_LLM_MODEL": "claude-sonnet-4-20250514"}
-    )
-
-    manager._register_profile(
-        "p",
-        9100,
-        {"REMEMBER_API_LLM_MODEL": "gpt-4o", "REMEMBER_API_LLM_BASE_URL": "https://example.com/v1"},
-    )
-
-    env = (tmp_path / ".remember" / "profiles" / "p.env").read_text(encoding="utf-8")
-    assert "REMEMBER_API_LLM_MODEL=claude-sonnet-4-20250514" in env  # configured value kept
-    assert "REMEMBER_API_LLM_MODEL=gpt-4o" not in env
-    assert "REMEMBER_API_LLM_BASE_URL=https://example.com/v1" in env  # missing key seeded
-
-
-def test_register_profile_calls_create_when_api_keys_present():
-    """
-    When config contains REMEMBER_API_* keys, _register_profile should
-    forward them to create_profile.
-    """
-    manager = DaemonEmbedManager()
-    manager._profile_manager = MagicMock()
-
-    config = {
-        "REMEMBER_API_LLM_PROVIDER": "openai",
-        "REMEMBER_API_LLM_API_KEY": "sk-123",
-        "some_internal_key": "ignored",
-    }
-    manager._register_profile("myprofile", 8100, config)
-
-    manager._profile_manager.create_profile.assert_called_once_with(
-        "myprofile",
-        8100,
-        {"REMEMBER_API_LLM_PROVIDER": "openai"},
-    )
+    assert manager1.get_database_url() == manager2.get_database_url()
 
 
 def _embed_module_in_venv(venv: Path, site_packages: str) -> Path:
@@ -330,27 +240,6 @@ def test_listening_pids_windows_hides_netstat_console(monkeypatch):
 
     assert DaemonEmbedManager._listening_pids(9177) == [4321]
     assert calls[0][1]["creationflags"] == 0x08000000
-
-
-def test_register_profile_preserves_existing_embed_keys(tmp_path, monkeypatch):
-    """_register_profile rewrites the .env on daemon start; it must merge the
-    existing non-API keys (UI port, idle timeout, ...) forward instead of
-    dropping them. Regression for the REMEMBER_EMBED_CP_PORT wipe."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-
-    manager = DaemonEmbedManager()
-    # Seed a profile .env that already carries an embed-only key.
-    manager._profile_manager.create_profile(
-        "p", {"REMEMBER_API_LLM_PROVIDER": "openai", "REMEMBER_EMBED_CP_PORT": "25000"}
-    )
-
-    # Daemon start passes only REMEMBER_API_* config to _register_profile.
-    manager._register_profile("p", 9100, {"REMEMBER_API_LLM_PROVIDER": "openai", "REMEMBER_API_LLM_API_KEY": "sk-x"})
-
-    env = (tmp_path / ".remember" / "profiles" / "p.env").read_text()
-    assert "REMEMBER_EMBED_CP_PORT=25000" in env  # preserved, not wiped
-    assert "REMEMBER_API_LLM_API_KEY=sk-x" not in env
 
 
 def test_is_port_in_use_checks_both_loopback_families(monkeypatch):
@@ -424,7 +313,7 @@ def test_liveness_probes_stay_short(tmp_path, monkeypatch):
     probe = _RecordingProbe()
     monkeypatch.setattr("remember_embed.daemon_embed_manager.probe_get", probe)
 
-    assert manager.is_running("hermes") is True
+    assert manager.is_running() is True
     assert probe.reads == [2.0]
     assert all(c == daemon_embed_manager.PROBE_CONNECT_TIMEOUT for c in probe.connects)
 

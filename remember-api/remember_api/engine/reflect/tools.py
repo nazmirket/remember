@@ -198,58 +198,20 @@ async def tool_search_mental_models(
         next_param += 1
 
     # Search mental models by embedding similarity.
-    #
-    # A store that indexes pages answers the ranking and the relevance; Postgres still hydrates the
-    # rows, because the store holds only the searchable half. The tag scope and `exclude_ids` are
-    # pushed down rather than applied afterwards: a hit that gets discarded here has already taken a
-    # top-k slot from a page that would have qualified.
-    from ..memories import get_memories
-
-    store = get_memories()
-    if store.store_owned_for(bank_id):
-        matches = await store.search_pages_semantic(
-            bank_id,
-            embedding=list(query_embedding),
-            limit=max_results,
-            tags=tags,
-            tags_match=tags_match,
-            tag_groups=tag_groups,
-            exclude_ids=exclude_ids,
-        )
-        relevance_by_id = {m.page_id: m.score for m in matches}
-        rows = (
-            await conn.fetch(
-                f"""
-                SELECT
-                    id, name, content,
-                    tags, created_at, last_refreshed_at, last_memory_seen_at, trigger
-                FROM {fq_table("mental_models")}
-                WHERE bank_id = $1 AND id = ANY($2::text[])
-                """,
-                bank_id,
-                list(relevance_by_id),
-            )
-            if relevance_by_id
-            else []
-        )
-        # The store ranked them; the SELECT did not preserve that, so restore it here rather than
-        # returning whatever order the planner produced.
-        rows = sorted(rows, key=lambda r: -relevance_by_id.get(str(r["id"]), 0.0))
-    else:
-        relevance_by_id = None
-        rows = await conn.fetch(
-            f"""
-            SELECT
-                id, name, content,
-                tags, created_at, last_refreshed_at, last_memory_seen_at, trigger,
-                1 - (embedding <=> $2::vector) as relevance
-            FROM {fq_table("mental_models")}
-            WHERE bank_id = $1 AND embedding IS NOT NULL {filters}
-            ORDER BY embedding <=> $2::vector
-            LIMIT $3
-            """,
-            *params,
-        )
+    relevance_by_id = None
+    rows = await conn.fetch(
+        f"""
+        SELECT
+            id, name, content,
+            tags, created_at, last_refreshed_at, last_memory_seen_at, trigger,
+            1 - (embedding <=> $2::vector) as relevance
+        FROM {fq_table("mental_models")}
+        WHERE bank_id = $1 AND embedding IS NOT NULL {filters}
+        ORDER BY embedding <=> $2::vector
+        LIMIT $3
+        """,
+        *params,
+    )
 
     # Per-MM staleness: new in-scope memories since last refresh (includes pending).
     # Every model gets the exact, scoped answer — the agent trusts a model without a

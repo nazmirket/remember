@@ -21,18 +21,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import orjson
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from remember_api.api.admission import AdmissionAbandoned, AdmissionRejected, build_controller_from_config
+from remember_api.api.diagnostics import register_diagnostics_routes
 from remember_api.api.disconnect import ClientDisconnectCancellationMiddleware, get_scope_cancellation_token
 from remember_api.api.observability import HttpObservabilityMiddleware
-from remember_api.api.passthrough_headers import collect_passthrough_headers
-from remember_api.api.unknown_params import UnknownParamsRoute, use_unknown_params_routes
+from remember_api.api.unknown_params import UnknownParamsRoute
 from remember_api.cancellation import OperationCancelledError
 from remember_api.engine import page_markdown
 from remember_api.engine.audit import (
@@ -44,7 +44,7 @@ from remember_api.engine.audit import (
 )
 from remember_api.engine.document_history import DocumentHistoryResponse
 from remember_api.engine.llm_trace import LLMCallType, LLMRequestListResponse, LLMRequestStatsResponse, LLMStatsSplit
-from remember_api.extensions import AuthenticationError, PrecheckContext, PrecheckOperation
+from remember_api.extensions import AuthenticationError
 
 
 def _parse_metadata(metadata: Any) -> dict[str, Any]:
@@ -197,7 +197,6 @@ from remember_api.engine.bank_templates import (
 )
 from remember_api.engine.embeddings import is_embedding_model_mismatch
 from remember_api.engine.llm_interface import ProviderContentPolicyError
-from remember_api.engine.memories.base import StoreWriteUnavailable
 from remember_api.engine.memory_engine import (
     KEEP_PARENT,
     PageTagFilter,
@@ -281,8 +280,7 @@ def _parse_tag_groups_query(raw: str | None, tags: list[str] | None) -> list[Tag
 from remember_api.engine.stored_dates import is_placeholder_date
 from remember_api.engine.structured_output import validate_response_schema
 from remember_api.engine.time_filter import DocumentTimeField, MemoryTimeField
-from remember_api.extensions import HttpExtension, OperationValidationError, load_extension
-from remember_api.liveness import LivenessResponse, liveness_response
+from remember_api.extensions import OperationValidationError
 from remember_api.metrics import (
     create_metrics_collector,
     get_metrics_collector,
@@ -290,7 +288,6 @@ from remember_api.metrics import (
     reset_metrics_collector,
 )
 from remember_api.models import RequestContext
-from remember_api.schema_context import _current_schema
 
 logger = logging.getLogger(__name__)
 
@@ -387,25 +384,8 @@ def _expected_failure(exc: BaseException) -> HTTPException | None:
 
 
 def _store_unavailable(exc: BaseException) -> HTTPException | None:
-    """The 503 for a store that shed this request, or None if it did not.
-
-    A store that cannot take a request *right now* — a bank briefly closed to writes, or indexing
-    that has fallen behind its writers — raises :class:`StoreWriteUnavailable`. The app-level
-    handler turns it into 503 + ``Retry-After``, but only when it escapes the route; every route's
-    catch-all caught it first and answered 500, which tells a client the request is broken. A bulk
-    ingest that stops on a 500 silently loses the rest of what it was writing.
-
-    Walks the cause/context chain because the engine usually wraps the store's error before a route
-    sees it.
-    """
+    """Return a retryable response when the active embedding model is stale."""
     for cur in _exception_chain(exc):
-        if isinstance(cur, StoreWriteUnavailable):
-            return HTTPException(
-                status_code=503,
-                detail=str(cur),
-                headers={"Retry-After": str(cur.retry_after)},
-            )
-        # This server is still on the embedding model a `remember-admin reembed` just replaced.
         if is_embedding_model_mismatch(cur):
             return HTTPException(status_code=503, detail=str(cur), headers={"Retry-After": "30"})
     return None
@@ -2970,44 +2950,6 @@ class ReprocessDocumentResponse(BaseModel):
     items_count: int
 
 
-class DocumentImportSubmitResponse(BaseModel):
-    """Response for the async document-import endpoint (202).
-
-    The import runs in the background; poll the operations endpoint for status.
-    The imported/skipped counts (documents_imported, facts_imported,
-    observations_imported, etc.) are written to the operation's result_metadata.
-    """
-
-    operation_id: str
-    status: str = "pending"
-
-
-class DocumentExportSubmitResponse(BaseModel):
-    """Response for the async document-export endpoint (202).
-
-    The export runs in the background; poll the operations endpoint for status.
-    On completion the operation's ``result_metadata`` carries ``download_url``
-    (fetch the ZIP from GET /v1/default/files/download/{key}), ``storage_key``,
-    ``byte_size``, and ``filename``.
-    """
-
-    operation_id: str
-    status: str = "pending"
-
-
-class BankTransferSubmitResponse(BaseModel):
-    """Response for the unified bank-transfer endpoints (202).
-
-    The transfer runs in the background; poll
-    GET /v1/default/banks/{bank_id}/operations/{operation_id}. An export's
-    ``result_metadata`` carries ``download_url`` / ``storage_key`` /
-    ``byte_size`` / ``filename``; an import's carries the per-component counts.
-    """
-
-    operation_id: str
-    status: str = "pending"
-
-
 class DeleteResponse(BaseModel):
     """Response model for delete operations."""
 
@@ -3993,175 +3935,6 @@ class AsyncOperationSubmitResponse(BaseModel):
     status: str
 
 
-class FeaturesInfo(BaseModel):
-    """Feature flags indicating which capabilities are enabled."""
-
-    observations: bool = Field(description="Whether observations (auto-consolidation) are enabled")
-    mcp: bool = Field(description="Whether MCP (Model Context Protocol) server is enabled")
-    worker: bool = Field(description="Whether the background worker is enabled")
-    bank_config_api: bool = Field(description="Whether per-bank configuration API is enabled")
-    bank_llm_health: bool = Field(description="Whether the per-bank LLM connectivity probe is enabled")
-    document_export_api: bool = Field(description="Whether the document export endpoint is enabled")
-    document_import_api: bool = Field(description="Whether the document import endpoint is enabled")
-    audit_log: bool = Field(description="Whether audit logging is enabled by default (overridable per bank)")
-    llm_trace: bool = Field(description="Whether per-bank LLM request tracing is enabled")
-    store_document_text: bool = Field(
-        description="Whether raw source text is persisted. When false, document/chunk source text is not stored."
-    )
-
-
-class VersionResponse(BaseModel):
-    """Response model for the version/info endpoint."""
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "api_version": "0.9.0",
-                "features": {
-                    "observations": False,
-                    "mcp": True,
-                    "worker": True,
-                    "bank_config_api": False,
-                    "bank_llm_health": True,
-                    "document_export_api": True,
-                    "document_import_api": True,
-                    "audit_log": False,
-                    "llm_trace": False,
-                    "store_document_text": True,
-                },
-            }
-        }
-    )
-
-    api_version: str = Field(description="API version string")
-    features: FeaturesInfo = Field(description="Enabled feature flags")
-
-
-# =========================================================================
-# Webhook Models
-# =========================================================================
-
-
-from remember_api.webhooks.models import WebhookHttpConfig
-
-
-class CreateWebhookRequest(BaseModel):
-    """Request model for registering a webhook."""
-
-    url: str = Field(description="HTTP(S) endpoint URL to deliver events to")
-    secret: str | None = Field(default=None, description="HMAC-SHA256 signing secret (optional)")
-    event_types: list[str] = Field(
-        default=["consolidation.completed"],
-        description="List of event types to deliver. Supported: 'retain.completed', 'consolidation.completed', 'memory_defense.triggered'.",
-    )
-    enabled: bool = Field(default=True, description="Whether this webhook is active")
-    http_config: WebhookHttpConfig = Field(
-        default_factory=WebhookHttpConfig,
-        description="HTTP delivery configuration (method, timeout, headers, params)",
-    )
-
-
-class WebhookResponse(BaseModel):
-    """Response model for a webhook."""
-
-    id: str
-    bank_id: str | None
-    url: str
-    secret: str | None = Field(default=None, description="Signing secret (redacted in responses)")
-    event_types: list[str]
-    enabled: bool
-    http_config: WebhookHttpConfig = Field(default_factory=WebhookHttpConfig)
-    created_at: str | None = None
-    updated_at: str | None = None
-
-
-class UpdateWebhookRequest(BaseModel):
-    """Request model for updating a webhook. Only provided fields are updated."""
-
-    url: str | None = Field(default=None, description="HTTP(S) endpoint URL")
-    secret: str | None = Field(
-        default=None, description="HMAC-SHA256 signing secret. Omit to keep existing; send null to clear."
-    )
-    event_types: list[str] | None = Field(default=None, description="List of event types")
-    enabled: bool | None = Field(default=None, description="Whether this webhook is active")
-    http_config: WebhookHttpConfig | None = Field(default=None, description="HTTP delivery configuration")
-
-
-class WebhookListResponse(BaseModel):
-    """Response model for listing webhooks."""
-
-    items: list[WebhookResponse]
-    total: int = Field(description="Total number of webhooks on the bank (ignores limit/offset)")
-    limit: int = Field(description="Maximum number of webhooks returned in this page")
-    offset: int = Field(description="Offset this page started at")
-
-
-class WebhookDeliveryResponse(BaseModel):
-    """Response model for a webhook delivery record."""
-
-    id: str
-    event_id: str | None = None
-    webhook_id: str | None
-    url: str
-    event_type: str
-    status: str
-    attempts: int
-    next_retry_at: str | None = None
-    last_error: str | None = None
-    last_response_status: int | None = None
-    last_response_body: str | None = None
-    last_attempt_at: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
-
-    @classmethod
-    def from_async_operation_row(cls, row: dict, *, expose_response_body: bool = False) -> "WebhookDeliveryResponse":
-        import json as _json
-
-        raw = row["task_payload"]
-        if isinstance(raw, str):
-            task_payload = _json.loads(raw)
-        elif isinstance(raw, dict):
-            task_payload = raw
-        else:
-            task_payload = {}
-
-        raw_meta = row.get("result_metadata")
-        if isinstance(raw_meta, str):
-            result_metadata = _json.loads(raw_meta) if raw_meta else {}
-        elif isinstance(raw_meta, dict):
-            result_metadata = raw_meta
-        else:
-            result_metadata = {}
-
-        return cls(
-            id=str(row["operation_id"]),
-            event_id=task_payload.get("event_id"),
-            webhook_id=task_payload.get("webhook_id"),
-            url=task_payload.get("url", ""),
-            event_type=task_payload.get("event_type", ""),
-            status=row["status"],
-            attempts=row["retry_count"] + 1,
-            next_retry_at=row["next_retry_at"],
-            last_error=row["error_message"],
-            last_response_status=result_metadata.get("last_status_code"),
-            # The raw upstream body is withheld from API callers by default: it
-            # is an SSRF response-exfiltration primitive. Operators can opt in
-            # via REMEMBER_API_WEBHOOK_EXPOSE_RESPONSE_BODY. Status is always shown.
-            last_response_body=(result_metadata.get("last_response_body") if expose_response_body else None),
-            last_attempt_at=result_metadata.get("last_attempt_at"),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-
-class WebhookDeliveryListResponse(BaseModel):
-    """Response model for listing webhook deliveries."""
-
-    items: list[WebhookDeliveryResponse]
-    next_cursor: str | None = None
-
-
 def _make_audited_http(audit_logger_getter: Callable[[], AuditLogger | None]):
     """Create an audit decorator bound to an audit logger getter.
 
@@ -4269,7 +4042,6 @@ def _stop_claiming_on_sigterm(poller: "WorkerPoller", loop: asyncio.AbstractEven
 def create_app(
     memory: MemoryEngine,
     initialize_memory: bool = True,
-    http_extension: HttpExtension | None = None,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -4278,8 +4050,6 @@ def create_app(
         memory: MemoryEngine instance (already initialized with required parameters).
                 Migrations are controlled by the MemoryEngine's run_migrations parameter.
         initialize_memory: Whether to initialize memory system on startup (default: True)
-        http_extension: Optional HTTP extension to mount custom endpoints under /extension/.
-                       If None, attempts to load from REMEMBER_API_HTTP_EXTENSION env var.
 
     Returns:
         Configured FastAPI application
@@ -4297,11 +4067,6 @@ def create_app(
     from remember_api.profiling import install as _install_profiling
 
     _install_profiling()
-    # Load HTTP extension from environment if not provided
-    if http_extension is None:
-        http_extension = load_extension("HTTP", HttpExtension)
-        if http_extension:
-            logging.info(f"Loaded HTTP extension: {http_extension.__class__.__name__}")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -4335,12 +4100,6 @@ def create_app(
             prometheus_reader = initialize_metrics(service_name="remember-api", service_version="1.0.0")
             create_metrics_collector()
             app.state.prometheus_reader = prometheus_reader
-            if config.metrics_worker_label:
-                # With --workers N a scrape of /metrics reaches one random worker; make every
-                # worker's series part of every scrape (see remember_api.metrics_multiworker).
-                from remember_api.metrics_multiworker import start_worker_metrics
-
-                app.state.worker_metrics = start_worker_metrics(max(1, config.workers))
             logging.info("Metrics initialized - available at /metrics endpoint")
         except Exception as e:
             logging.warning(f"Failed to initialize metrics: {e}. Metrics will be disabled (using no-op collector).")
@@ -4396,7 +4155,6 @@ def create_app(
                 executor=memory.execute_task,
                 poll_interval_ms=config.worker_poll_interval_ms,
                 schema=schema,
-                tenant_extension=memory._tenant_extension,
                 max_slots=config.worker_max_slots,
                 slot_reservations=config.worker_slot_reservations,
                 consolidation_bank_priority=config.worker_consolidation_bank_priority or None,
@@ -4410,17 +4168,6 @@ def create_app(
                 "Worker poller disabled — backend does not support async operations. "
                 "Tasks (mental model refresh, consolidation) will run synchronously."
             )
-
-        # Call tenant extension startup hook (e.g. JWKS fetch for Supabase)
-        tenant_extension = memory.tenant_extension
-        if tenant_extension:
-            await tenant_extension.on_startup()
-            logging.info("Tenant extension started")
-
-        # Call HTTP extension startup hook
-        if http_extension:
-            await http_extension.on_startup()
-            logging.info("HTTP extension started")
 
         yield
 
@@ -4438,16 +4185,6 @@ def create_app(
                 except asyncio.CancelledError:
                     pass
             logging.info("Worker poller stopped")
-
-        # Call tenant extension shutdown hook
-        if tenant_extension:
-            await tenant_extension.on_shutdown()
-            logging.info("Tenant extension stopped")
-
-        # Call HTTP extension shutdown hook
-        if http_extension:
-            await http_extension.on_shutdown()
-            logging.info("HTTP extension stopped")
 
         # Shutdown: Cleanup memory system
         await memory.close()
@@ -4533,23 +4270,6 @@ def create_app(
 
     # Register all routes
     _register_routes(app)
-
-    # Mount HTTP extension router if available
-    if http_extension:
-        extension_router = http_extension.get_router(memory)
-        # include_router does not apply the app's route_class to a router's own
-        # routes, so without this the extension loses the unknown-param reporting
-        # the old middleware gave it (it sat above the router).
-        use_unknown_params_routes(extension_router)
-        app.include_router(extension_router, prefix="/ext", tags=["Extension"])
-        logging.info("HTTP extension router mounted at /ext/")
-
-        # Mount root router if provided (for well-known endpoints, etc.)
-        root_router = http_extension.get_root_router(memory)
-        if root_router:
-            use_unknown_params_routes(root_router)
-            app.include_router(root_router)
-            logging.info("HTTP extension root router mounted")
 
     # Client-disconnect cancellation for recall/reflect. Added LAST so it sits
     # OUTSIDE the @app.middleware("http") (BaseHTTPMiddleware) layers above —
@@ -4671,10 +4391,6 @@ def _register_routes(app: FastAPI):
 
         Returns RequestContext with extracted API key (may be None if no auth header).
 
-        Any header named in REMEMBER_API_EXTENSION_PASSTHROUGH_HEADERS is also
-        copied into ``extra_headers`` for extensions to read. That allowlist is
-        empty by default, so no other header reaches extension code unless an
-        operator opts in.
         """
         # Dependency-resolution start, read by api_recall to split `http_to_handler`.
         request.scope.setdefault("remember_deps_t0", time.perf_counter())
@@ -4684,7 +4400,6 @@ def _register_routes(app: FastAPI):
                 api_key = authorization[7:].strip()
             else:
                 api_key = authorization.strip()
-        extra_headers = collect_passthrough_headers(request.headers.raw, get_config().extension_passthrough_headers)
         # One context per request, reused by every caller. The alias resolution on
         # the route class builds one before FastAPI solves the endpoint's
         # dependencies, and `authenticated_schema` is memoised on the object — so
@@ -4692,7 +4407,7 @@ def _register_routes(app: FastAPI):
         cached = getattr(request.state, "remember_request_context", None)
         if cached is not None:
             return cached
-        context = RequestContext(api_key=api_key, extra_headers=extra_headers)
+        context = RequestContext(api_key=api_key)
         request.state.remember_request_context = context
         return context
 
@@ -4718,11 +4433,11 @@ def _register_routes(app: FastAPI):
 
     app.state.resolve_bank_alias = _resolve_bank_alias
 
-    def admit_for(operation: PrecheckOperation):
+    def admit_for(operation: str):
         """Build a FastAPI dependency that holds an admission permit for the request.
 
         Yield-style so the permit is held for the whole request and released once the
-        response has been produced. Declared alongside ``precheck_for`` on the heavy
+        response has been produced. Declared on the heavy
         routes: FastAPI resolves dependencies before deserialising the body, so an
         overloaded server refuses without ever reading the payload.
 
@@ -4758,73 +4473,6 @@ def _register_routes(app: FastAPI):
 
         return _admit_dep
 
-    def precheck_for(operation: PrecheckOperation):
-        """
-        Build a FastAPI dependency that runs ``OperationValidator.precheck``.
-
-        FastAPI resolves dependencies before deserialising the route's body
-        parameter. Wiring this dependency on the billable POST routes lets
-        an extension reject a request — e.g. with HTTP 402 when a tenant's
-        balance is exhausted — without the request body ever being read or
-        materialised in memory.
-
-        The dependency intentionally:
-        - authenticates the tenant (so ``request_context.tenant_id`` is
-          resolved before the precheck runs);
-        - falls through silently when no validator is configured or the
-          validator's default no-op precheck is in effect;
-        - converts a rejection ``ValidationResult`` into the corresponding
-          ``HTTPException`` directly (the per-route ``OperationValidationError``
-          catch blocks don't see exceptions raised in dependencies, so we
-          translate here instead of relying on each handler's try/except).
-
-        Args:
-            operation: Short identifier for the route, e.g. ``"retain"``.
-
-        Returns:
-            A FastAPI dependency callable suitable for ``Depends(...)``.
-        """
-
-        async def _precheck_dep(
-            bank_id: str,
-            request: Request,
-            request_context: RequestContext = Depends(get_request_context),
-        ) -> None:
-            validator = getattr(app.state.memory, "_operation_validator", None)
-            if validator is None:
-                return
-
-            _t0_dep_auth = time.perf_counter()
-            await app.state.memory._authenticate_tenant(request_context)
-            get_metrics_collector().record_recall_phase("dep_auth", time.perf_counter() - _t0_dep_auth)
-            cl_header = request.headers.get("content-length")
-            content_length: int | None = None
-            if cl_header is not None:
-                try:
-                    parsed = int(cl_header)
-                except ValueError:
-                    parsed = -1
-                if parsed >= 0:
-                    content_length = parsed
-            ctx = PrecheckContext(
-                operation=operation,
-                bank_id=bank_id,
-                request_context=request_context,
-                content_length=content_length,
-            )
-            _t0_dep_precheck = time.perf_counter()
-            result = await validator.precheck(ctx)
-            get_metrics_collector().record_recall_phase("dep_precheck", time.perf_counter() - _t0_dep_precheck)
-            if not result.allowed:
-                raise HTTPException(
-                    status_code=result.status_code,
-                    detail=result.reason or "Operation not allowed",
-                )
-
-            request.scope["remember_deps_done"] = time.perf_counter()
-
-        return _precheck_dep
-
     # Global exception handler for authentication errors
     @app.exception_handler(AuthenticationError)
     async def authentication_error_handler(request, exc: AuthenticationError):
@@ -4833,146 +4481,7 @@ def _register_routes(app: FastAPI):
             content={"detail": str(exc)},
         )
 
-    # A bank briefly closed to writes — a store migrating it between backends holds it for a few
-    # seconds. 503 + Retry-After rather than a 500: nothing is broken, and the difference decides
-    # whether a client retries or reports a failure to the user.
-    @app.exception_handler(StoreWriteUnavailable)
-    async def store_write_unavailable_handler(request, exc: StoreWriteUnavailable):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": str(exc)},
-            headers={"Retry-After": str(getattr(exc, "retry_after", 30))},
-        )
-
-    async def _readiness_response() -> JSONResponse:
-        """Shared body of /health and /health/ready: 200 if healthy, 503 if not."""
-        health = await app.state.memory.health_check()
-        health["checkout_source"] = os.path.realpath(__file__)
-        status_code = 200 if health.get("status") == "healthy" else 503
-        return JSONResponse(content=health, status_code=status_code)
-
-    @app.get(
-        "/health",
-        summary="Health check endpoint",
-        description="Readiness check: verifies the API can reach the database. "
-        "Alias of /health/ready. Use /health/live for liveness probes — this one "
-        "fails whenever the database is unreachable, which must gate traffic, not "
-        "restart the process.",
-        tags=["Monitoring"],
-    )
-    async def health_endpoint():
-        """
-        Health check endpoint that verifies database connectivity.
-
-        Returns 200 if healthy, 503 if unhealthy.
-        """
-        return await _readiness_response()
-
-    @app.get(
-        "/health/ready",
-        summary="Readiness probe",
-        description="Returns 200 when the API can serve traffic (database reachable), "
-        "503 otherwise. Identical to /health, which stays supported as its alias.",
-        tags=["Monitoring"],
-        operation_id="get_readiness",
-    )
-    async def readiness_endpoint():
-        """
-        Readiness probe that verifies database connectivity.
-
-        Returns 200 if ready, 503 if not. A 503 should remove this pod from the
-        Service; it must not restart it.
-        """
-        return await _readiness_response()
-
-    @app.get(
-        "/health/live",
-        response_model=LivenessResponse,
-        summary="Liveness probe",
-        description="Returns 200 whenever the process can serve a request. Performs no "
-        "database access, so a slow or unreachable database never restarts the pod. "
-        "Point livenessProbe here and readinessProbe at /health.",
-        tags=["Monitoring"],
-        operation_id="get_liveness",
-    )
-    async def liveness_endpoint() -> LivenessResponse:
-        """
-        Liveness probe: in-process only, never touches the database.
-
-        Answering at all is the check — Remember serves requests and task work on
-        one event loop, so a wedged loop cannot respond within the probe timeout.
-        """
-        return liveness_response()
-
-    @app.get(
-        "/version",
-        response_model=VersionResponse,
-        summary="Get API version and feature flags",
-        description="Returns API version information and enabled feature flags. "
-        "Use this to check which capabilities are available in this deployment.",
-        tags=["Monitoring"],
-        operation_id="get_version",
-    )
-    # Same handler under /v1, kept out of the OpenAPI spec (it is an alias, not a new operation).
-    # A reverse proxy that routes only /v1 to the API — the Helm chart's default ingress does —
-    # sends a bare /version to the control plane instead, so clients probing capabilities there
-    # silently saw "unsupported" (#5286). Clients try this path first.
-    @app.get("/v1/version", response_model=VersionResponse, include_in_schema=False)
-    async def version_endpoint() -> VersionResponse:
-        """
-        Get API version and enabled features.
-
-        Returns version info and feature flags that can be used by clients
-        to determine which capabilities are available.
-
-        Note: the observations and audit_log flags show the global default.
-        Individual banks may override these via bank-specific configuration.
-        """
-        from remember_api import __version__
-        from remember_api.config import _get_raw_config
-
-        config = _get_raw_config()
-        return VersionResponse(
-            api_version=__version__,
-            features=FeaturesInfo(
-                observations=config.enable_observations,
-                mcp=False,
-                worker=config.worker_enabled,
-                bank_config_api=config.enable_bank_config_api,
-                bank_llm_health=config.enable_bank_llm_health,
-                document_export_api=config.enable_document_export_api,
-                document_import_api=config.enable_document_import_api,
-                audit_log=config.audit_log_enabled,
-                llm_trace=config.llm_trace_enabled,
-                store_document_text=config.store_document_text,
-            ),
-        )
-
-    @app.get(
-        "/metrics",
-        summary="Prometheus metrics endpoint",
-        description="Exports metrics in Prometheus format for scraping",
-        tags=["Monitoring"],
-    )
-    async def metrics_endpoint():
-        """Return Prometheus metrics."""
-        from fastapi.responses import Response
-        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-
-        worker_metrics = getattr(app.state, "worker_metrics", None)
-        # Render off the event loop. generate_latest() (and WorkerMetrics.render, which also does
-        # blocking file I/O) are synchronous, and serialization cost scales with metric cardinality
-        # -- on a large registry it takes seconds. Awaiting it inline blocks the asyncio loop for
-        # that whole duration, so /health, WebSocket handshakes, and every other request this worker
-        # is handling stall until the scrape completes. Offloading to a worker thread doesn't make
-        # the render free -- it is pure Python, so it holds the GIL and only yields every
-        # sys.getswitchinterval() -- but the loop is descheduled in 5ms slices instead of frozen for
-        # the whole render, which is the difference between degraded and dead. Both paths are safe
-        # to call off-thread (generate_latest is designed to be scraped off-thread, and
-        # WorkerMetrics.render only reads a registry + per-worker snapshot files).
-        render = worker_metrics.render if worker_metrics is not None else generate_latest
-        metrics_data = await asyncio.to_thread(render)
-        return Response(content=metrics_data, media_type=CONTENT_TYPE_LATEST)
+    register_diagnostics_routes(app, source_file=__file__)
 
     @app.get(
         "/v1/default/banks/{bank_id}/graph",
@@ -5125,13 +4634,7 @@ def _register_routes(app: FastAPI):
             raise _internal_error(e, f"/v1/default/banks/{bank_id}/memories/list")
 
     async def _require_dry_run_enabled() -> None:
-        """Feature-flag gate for dry-run extraction.
-
-        Declared as a dependency BEFORE ``precheck_for(PrecheckOperation.DRY_RUN_EXTRACT)`` so a
-        disabled route returns 404 regardless of tenant/billing state — FastAPI
-        resolves path-operation dependencies in signature order, so this runs
-        first and preserves the original "disabled → 404" contract.
-        """
+        """Feature-flag gate for dry-run extraction."""
         if not get_config().enable_dry_run_extract:
             raise HTTPException(
                 status_code=404,
@@ -5157,7 +4660,6 @@ def _register_routes(app: FastAPI):
         body: DryRunExtractRequest,
         request_context: RequestContext = Depends(get_request_context),
         _enabled: None = Depends(_require_dry_run_enabled),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.DRY_RUN_EXTRACT)),
     ):
         try:
             override_fields = (
@@ -5406,8 +4908,7 @@ def _register_routes(app: FastAPI):
         request: RecallRequest,
         http_request: Request,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.RECALL)),
-        _admit: None = Depends(admit_for(PrecheckOperation.RECALL)),
+        _admit: None = Depends(admit_for("recall")),
     ):
         """Run a recall and return results with trace."""
         import time
@@ -5654,8 +5155,7 @@ def _register_routes(app: FastAPI):
         request: ReflectRequest,
         http_request: Request,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.REFLECT)),
-        _admit: None = Depends(admit_for(PrecheckOperation.REFLECT)),
+        _admit: None = Depends(admit_for("reflect")),
     ):
         metrics = get_metrics_collector()
 
@@ -6320,7 +5820,6 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         body: CreateMentalModelRequest,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.MENTAL_MODEL_CREATE)),
     ):
         """Create a mental model (async - returns operation_id)."""
         try:
@@ -6372,7 +5871,6 @@ def _register_routes(app: FastAPI):
         mental_model_id: str,
         request: RefreshMentalModelRequest | None = None,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.MENTAL_MODEL_REFRESH)),
     ):
         """Refresh a mental model by re-running its source query (async)."""
         try:
@@ -6419,7 +5917,6 @@ def _register_routes(app: FastAPI):
         bank_id: str,
         mental_model_id: str,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.MENTAL_MODEL_REFRESH)),
     ):
         """Preview a mental model refresh without persisting anything."""
         try:
@@ -7642,7 +7139,7 @@ def _register_routes(app: FastAPI):
         ),
         type: str | None = Query(
             default=None,
-            description="Filter by operation type: retain, consolidation, refresh_mental_model, webhook_delivery",
+            description="Filter by operation type: retain, consolidation, refresh_mental_model",
         ),
         limit: int = Query(default=20, ge=1, le=100, description="Maximum number of operations to return"),
         offset: int = Query(default=0, ge=0, description="Number of operations to skip"),
@@ -8242,10 +7739,6 @@ def _register_routes(app: FastAPI):
             profile = await app.state.memory.get_bank_profile(bank_id, request_context=request_context)
             if profile is None:
                 raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
-            # The template carries the bank's whole config: an admin export, not narrowed
-            # to a tag scope, so scoped callers are refused like the full bank export.
-            await app.state.memory._refuse_bank_wide_if_scoped(bank_id, request_context, "export the bank template")
-
             # Get bank-specific config overrides (not the fully resolved config,
             # so the template only contains what was explicitly set on this bank)
             await app.state.memory._authenticate_tenant(request_context)
@@ -8315,451 +7808,6 @@ def _register_routes(app: FastAPI):
         except Exception as e:
             raise _internal_error(e, f"GET /v1/default/banks/{bank_id}/export")
 
-    # =====================================================================
-    # Document Transfer (Export / Import between banks — no LLM re-extraction)
-    # =====================================================================
-
-    @app.get(
-        # Dedicated path (not under /documents/) to avoid colliding with the
-        # greedy GET /documents/{document_id:path} route, which would otherwise
-        # capture "export"/"import" as a document id.
-        "/v1/default/banks/{bank_id}/document-transfer",
-        summary="Export documents (removed — use POST .../document-transfer/export)",
-        description="**Removed.** The synchronous whole-bank export loaded the entire bank into memory and "
-        "held a database connection for the full request, which could exhaust memory and take down the shared "
-        "API on large banks. Use the asynchronous POST /v1/default/banks/{bank_id}/document-transfer/export "
-        "instead: it returns an operation_id, runs the export in the background, and exposes a download URL on "
-        "completion.",
-        operation_id="export_documents_sync_removed",
-        tags=["Document Transfer"],
-        deprecated=True,
-    )
-    async def api_export_documents_removed(
-        bank_id: str,
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Removed synchronous export — always 410, pointing at the async endpoint."""
-        raise HTTPException(
-            status_code=410,
-            detail=(
-                "Synchronous document export has been removed because it could take down the shared API on "
-                f"large banks. Submit an async export via POST /v1/default/banks/{bank_id}/document-transfer/export, "
-                f"poll GET /v1/default/banks/{bank_id}/operations/{{operation_id}}, then download the archive from "
-                "the download_url in the operation's result_metadata."
-            ),
-        )
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/document-transfer/export",
-        response_model=DocumentExportSubmitResponse,
-        status_code=202,
-        summary="Export documents (async)",
-        description="Submit an async export of a bank's documents (extracted facts, entity names, causal links, "
-        "chunks) as a transfer ZIP archive. Embeddings and database ids are not included — importing re-embeds "
-        "with the target bank's model and re-resolves entities. Runs as a background operation to avoid pinning "
-        "the API on large banks. Returns an operation_id; poll "
-        "GET /v1/default/banks/{bank_id}/operations/{operation_id}. On completion the operation's result_metadata "
-        "carries download_url (fetch the ZIP from GET /v1/default/files/download/{key}), storage_key, byte_size, "
-        "and filename. Pass document_id query params to export specific documents, or omit to export the whole "
-        "bank; include_observations=true carries consolidated observations and include_knowledge_base=true carries "
-        "Mental Models plus Pages (all whole-bank export only).",
-        operation_id="export_documents",
-        tags=["Document Transfer"],
-        # Superseded by POST /v1/default/banks/{bank_id}/transfer/export, which
-        # carries the same document subsets plus the bank's own config and
-        # history. Kept working unchanged for existing callers.
-        deprecated=True,
-    )
-    async def api_export_documents(
-        bank_id: str,
-        document_id: list[str] | None = Query(default=None, description="Document id(s) to export; omit for all"),
-        include_observations: bool = Query(
-            default=False, description="Also export consolidated observations (restored on import; whole-bank only)"
-        ),
-        include_knowledge_base: bool = Query(
-            default=False,
-            description="Also export Mental Models and Pages (restored on import; whole-bank only)",
-        ),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Submit an async document-export operation for a bank."""
-        try:
-            if not get_config().enable_document_export_api:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Document export API is disabled. "
-                    "Set REMEMBER_API_ENABLE_DOCUMENT_EXPORT_API=true to enable.",
-                )
-            profile = await app.state.memory.get_bank_profile(bank_id, request_context=request_context)
-            if profile is None:
-                raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
-
-            try:
-                submission = await app.state.memory.submit_export_documents_async(
-                    bank_id,
-                    request_context,
-                    list(document_id) if document_id else None,
-                    include_observations=include_observations,
-                    include_knowledge_base=include_knowledge_base,
-                )
-            except ValueError as e:
-                # e.g. include_observations combined with a document_id subset.
-                raise HTTPException(status_code=400, detail=str(e))
-            return DocumentExportSubmitResponse(operation_id=submission["operation_id"])
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/document-transfer/export")
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/document-transfer",
-        response_model=DocumentImportSubmitResponse,
-        status_code=202,
-        summary="Import documents (async)",
-        description="Submit a transfer archive (produced by the export endpoint) for import into a bank. Runs as a "
-        "background operation: facts are re-embedded with the target bank's embedding model and entities are "
-        "re-resolved — no LLM extraction. Returns an operation_id; poll "
-        "GET /v1/default/banks/{bank_id}/operations/{operation_id} for status and the imported/skipped counts in "
-        "result_metadata. Use on_conflict to control existing document ids: skip (default), replace, or new-id.",
-        operation_id="import_documents",
-        tags=["Document Transfer"],
-        # Superseded by POST /v1/default/banks/{bank_id}/transfer/import with
-        # mode=merge, which is this endpoint's behaviour under the unified
-        # vocabulary. Kept working unchanged for existing callers.
-        deprecated=True,
-    )
-    @audited("import_documents", request_param=None)
-    async def api_import_documents(
-        bank_id: str,
-        file: UploadFile = File(..., description="Transfer ZIP archive"),
-        on_conflict: str = Query(default="skip", description="skip | replace | new-id"),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Submit a transfer archive for async import into a bank."""
-        try:
-            if not get_config().enable_document_import_api:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Document import API is disabled. "
-                    "Set REMEMBER_API_ENABLE_DOCUMENT_IMPORT_API=true to enable.",
-                )
-            if on_conflict not in ("skip", "replace", "new-id"):
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid on_conflict '{on_conflict}' (expected skip|replace|new-id)"
-                )
-            try:
-                # The upload's spooled file, not its bytes: the archive is read entry by entry.
-                submission = await app.state.memory.import_documents_async(
-                    bank_id, file.file, request_context, on_conflict
-                )
-            except ValueError as e:
-                # Invalid archive / unsupported schema version — fail fast.
-                raise HTTPException(status_code=400, detail=str(e))
-            return DocumentImportSubmitResponse(operation_id=submission["operation_id"])
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/document-transfer")
-
-    # =====================================================================
-    # Bank Transfer (unified export / import)
-    # =====================================================================
-    #
-    # One archive format and one vocabulary for every transfer: what used to be
-    # the document-transfer pair plus the admin-only `remember-admin export-bank`
-    # / `import-bank`. Three booleans choose what travels:
-    #
-    #   include_data        documents, facts, observations, entities and links,
-    #                       attachments (bytes included), the curation archive,
-    #                       the operations log, the maintenance queues, and what
-    #                       the bank synthesized from all of it: mental models,
-    #                       their refresh history and the page tree
-    #   include_bank_config the bank row (per-bank config), directives, webhooks
-    #   include_history     audit_log and llm_requests
-    #
-    # Mental models and pages are data, not configuration: their
-    # evidence cites memory units by id, so they are only coherent alongside the
-    # facts they were derived from.
-    #
-    # The older endpoints stay, and keep their exact request and response shapes.
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/transfer/export",
-        response_model=BankTransferSubmitResponse,
-        status_code=202,
-        summary="Export a bank (async)",
-        description="Submit an async export of a bank as a transfer ZIP archive. Three flags choose what the "
-        "archive carries: include_data (documents, facts, observations, attachments and their bytes, the "
-        "curation archive, the operations log and the maintenance queues), include_bank_config (bank config, "
-        "mental models and their history, pages), include_bank_config (the bank's config "
-        "overrides, directives and webhooks) and include_history "
-        "(audit_log, llm_requests). Embeddings and database ids are never carried — importing re-embeds with "
-        "the target bank's model and re-resolves entities, so an archive moves between instances configured "
-        "with different embedding models. Returns an operation_id; poll "
-        "GET /v1/default/banks/{bank_id}/operations/{operation_id}, then fetch the archive from the "
-        "download_url in its result_metadata. Pass document_id to export specific documents instead of the "
-        "whole bank (a document subset carries no bank-level sections).",
-        operation_id="export_bank_transfer",
-        tags=["Bank Transfer"],
-        responses=_BANK_NOT_FOUND_RESPONSES,
-    )
-    async def api_bank_transfer_export(
-        bank_id: str,
-        include_data: bool = Query(default=True, description="Carry the memories and everything backing them"),
-        include_bank_config: bool = Query(
-            default=True, description="Carry the bank's config overrides, directives and webhooks"
-        ),
-        include_history: bool = Query(default=False, description="Carry audit_log and llm_requests"),
-        document_id: list[str] | None = Query(default=None, description="Document id(s); omit for the whole bank"),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Submit an async bank export."""
-        try:
-            if not get_config().enable_document_export_api:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Bank export API is disabled. Set REMEMBER_API_ENABLE_DOCUMENT_EXPORT_API=true to enable.",
-                )
-            if not (include_data or include_bank_config or include_history):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nothing to export: set at least one of include_data, include_bank_config, include_history",
-                )
-            profile = await app.state.memory.get_bank_profile(bank_id, request_context=request_context)
-            if profile is None:
-                raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
-
-            from remember_api.engine.transfer import TransferScope
-
-            try:
-                if document_id:
-                    # A subset of documents is not a bank: the bank-level sections
-                    # describe the whole of it, and observations can span documents
-                    # outside the subset.
-                    if include_bank_config or include_history:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="include_bank_config and include_history are only supported for a whole-bank "
-                            "export (omit document_id)",
-                        )
-                    submission = await app.state.memory.submit_export_documents_async(
-                        bank_id,
-                        request_context,
-                        list(document_id),
-                    )
-                else:
-                    submission = await app.state.memory.submit_bank_export_async(
-                        bank_id,
-                        request_context,
-                        scope=TransferScope(
-                            data=include_data,
-                            bank_config=include_bank_config,
-                            history=include_history,
-                        ),
-                    )
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            return BankTransferSubmitResponse(operation_id=submission["operation_id"])
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/transfer/export")
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/transfer/import",
-        response_model=BankTransferSubmitResponse,
-        status_code=202,
-        summary="Import a bank (async)",
-        description="Submit a transfer archive (produced by the export endpoint) for import. Runs as a "
-        "background operation: facts are re-embedded with the target bank's embedding model and entities are "
-        "re-resolved — no LLM extraction, so the import costs no tokens and invents no new facts.\n\n"
-        "Two modes. `restore` (default) writes a whole bank into target_bank_id, which must NOT already exist "
-        "— it restores a bank rather than merging into one, and is how a bank is moved between instances or "
-        "copied under a new id. `merge` folds an archive's documents into this bank, with document_conflict "
-        "deciding what happens to ids that already exist (skip, replace, new-id).\n\n"
-        "The include flags narrow what is restored to a subset of what the archive holds; they cannot add "
-        "what the producer did not export. Returns an operation_id; poll "
-        "GET /v1/default/banks/{bank_id}/operations/{operation_id} for status and per-component counts. The "
-        "operation is recorded against {bank_id} even in restore mode, because the target bank does not exist "
-        "yet.",
-        operation_id="import_bank_transfer",
-        tags=["Bank Transfer"],
-    )
-    @audited("import_bank_transfer", request_param=None)
-    async def api_bank_transfer_import(
-        bank_id: str,
-        file: UploadFile = File(..., description="Transfer ZIP archive"),
-        mode: str = Query(default="restore", description="restore (into a fresh bank) | merge (into this bank)"),
-        target_bank_id: str | None = Query(
-            default=None, description="restore mode: the bank to create; defaults to the archive's source bank"
-        ),
-        document_conflict: str = Query(default="skip", description="merge mode: skip | replace | new-id"),
-        # Optional rather than defaulted, so "not passed" is distinguishable from
-        # "passed the default": merge mode takes documents only, and accepting a
-        # scope flag there would silently do nothing (rejected below instead).
-        include_data: bool | None = Query(
-            default=None, description="restore mode: carry the memories and everything backing them (default true)"
-        ),
-        include_bank_config: bool | None = Query(
-            default=None,
-            description="restore mode: restore the bank's config overrides, directives and webhooks (default true)",
-        ),
-        include_history: bool | None = Query(
-            default=None, description="restore mode: carry audit_log and llm_requests (default false)"
-        ),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Submit a transfer archive for async import."""
-        try:
-            if not get_config().enable_document_import_api:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Bank import API is disabled. Set REMEMBER_API_ENABLE_DOCUMENT_IMPORT_API=true to enable.",
-                )
-            if mode not in ("restore", "merge"):
-                raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}' (expected restore|merge)")
-            if document_conflict not in ("skip", "replace", "new-id"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid document_conflict '{document_conflict}' (expected skip|replace|new-id)",
-                )
-            # The upload's spooled file, not its bytes: the archive is read entry by entry.
-            archive = file.file
-
-            from remember_api.engine.transfer import TransferScope
-
-            try:
-                if mode == "merge":
-                    if target_bank_id:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="target_bank_id is only valid in restore mode; merge imports into {bank_id}",
-                        )
-                    # A merge takes the archive's documents and nothing else, so a
-                    # scope flag here would be accepted and then do nothing —
-                    # refuse it rather than quietly ignore a caller who asked for
-                    # the bank's config.
-                    if include_data is not None or include_bank_config is not None or include_history is not None:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="include_data / include_bank_config / include_history apply to mode=restore; "
-                            "a merge imports the archive's documents only",
-                        )
-                    submission = await app.state.memory.import_documents_async(
-                        bank_id, archive, request_context, document_conflict
-                    )
-                else:
-                    submission = await app.state.memory.submit_bank_import_async(
-                        bank_id,
-                        archive,
-                        request_context,
-                        target_bank_id=target_bank_id,
-                        scope=TransferScope(
-                            data=True if include_data is None else include_data,
-                            bank_config=True if include_bank_config is None else include_bank_config,
-                            history=False if include_history is None else include_history,
-                        ),
-                    )
-            except ValueError as e:
-                # Invalid archive, unsupported schema version, or a target bank
-                # that already exists — all caller errors.
-                raise HTTPException(status_code=400, detail=str(e))
-            return BankTransferSubmitResponse(operation_id=submission["operation_id"])
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/transfer/import")
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/clone",
-        response_model=BankTransferSubmitResponse,
-        status_code=202,
-        summary="Clone a bank (async)",
-        description="Copy this bank into a new one, in a single call. The clone starts with the source's "
-        "memories as they are at clone time and evolves independently from then on: later retains, "
-        "consolidation and edits on either bank leave the other alone.\n\n"
-        "This is the export and import above run back to back on this instance, so nothing is re-extracted "
-        "and no LLM is called — facts are re-embedded and entities re-resolved, exactly as a restore does. "
-        "The same three flags choose what the clone inherits: include_data (documents, facts, observations, "
-        "attachments, the curation archive, the operations log, and the mental models and pages "
-        "synthesized from them), include_bank_config (the bank's config overrides, directives and "
-        "**webhooks**) and include_history (audit_log, llm_requests).\n\n"
-        "Note the webhooks: they travel with the bank's configuration, so a clone made with the default "
-        "flags will call the source's webhook endpoints. Pass include_bank_config=false, or delete them on "
-        "the clone, when they point at a per-bank consumer.\n\n"
-        "target_bank_id must not already exist. Returns an operation_id, recorded against the source bank "
-        "(the target does not exist yet); poll GET /v1/default/banks/{bank_id}/operations/{operation_id} for "
-        "status and the per-component counts.",
-        operation_id="clone_bank",
-        tags=["Bank Transfer"],
-        responses=_BANK_NOT_FOUND_RESPONSES,
-    )
-    @audited("clone_bank", request_param=None)
-    async def api_clone_bank(
-        bank_id: str,
-        target_bank_id: str = Query(..., description="Bank to create; must not already exist"),
-        include_data: bool = Query(
-            default=True,
-            description="Copy the memories, what backs them, and the mental models and pages synthesized from them",
-        ),
-        include_bank_config: bool = Query(
-            default=True, description="Copy the bank's config overrides, directives and webhooks"
-        ),
-        include_history: bool = Query(default=False, description="Copy audit_log and llm_requests"),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Submit an async clone of a bank."""
-        try:
-            # A clone is an export and an import, so it is gated on both flags: with
-            # either half disabled the operator has turned off bulk bank copying.
-            config = get_config()
-            if not (config.enable_document_export_api and config.enable_document_import_api):
-                raise HTTPException(
-                    status_code=404,
-                    detail="Bank clone API is disabled. It requires both "
-                    "REMEMBER_API_ENABLE_DOCUMENT_EXPORT_API and REMEMBER_API_ENABLE_DOCUMENT_IMPORT_API.",
-                )
-            if not (include_data or include_bank_config or include_history):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Nothing to clone: set at least one of include_data, include_bank_config, include_history",
-                )
-            profile = await app.state.memory.get_bank_profile(bank_id, request_context=request_context)
-            if profile is None:
-                raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
-
-            from remember_api.engine.transfer import TransferScope
-
-            try:
-                submission = await app.state.memory.submit_bank_clone_async(
-                    bank_id,
-                    target_bank_id,
-                    request_context,
-                    scope=TransferScope(
-                        data=include_data,
-                        bank_config=include_bank_config,
-                        history=include_history,
-                    ),
-                )
-            except ValueError as e:
-                # Target already exists, an invalid bank id, or cloning onto itself.
-                raise HTTPException(status_code=400, detail=str(e))
-            return BankTransferSubmitResponse(operation_id=submission["operation_id"])
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/clone")
-
     @app.get(
         "/v1/default/banks/{bank_id}/attachments/{attachment_id}",
         summary="Fetch an attachment retained inline with a document",
@@ -8813,67 +7861,6 @@ def _register_routes(app: FastAPI):
             raise
         except Exception as e:
             raise _internal_error(e, f"GET /v1/default/banks/{bank_id}/attachments/{attachment_id}")
-
-    @app.get(
-        "/v1/default/files/download/{key:path}",
-        summary="Download a stored file (async export archive)",
-        description="Stream a file previously written to file storage — currently the transfer ZIP produced by "
-        "an async document export. The key comes from the export operation's result_metadata (storage_key / "
-        "download_url). Access is authorized against the bank the key belongs to.",
-        operation_id="download_file",
-        tags=["Document Transfer"],
-        response_class=Response,
-        responses={200: {"content": {"application/zip": _BINARY_SCHEMA}, "description": "Stored file"}},
-    )
-    async def api_download_file(
-        key: str,
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Download a bank-scoped stored file (export archive) by storage key."""
-
-        try:
-            if not get_config().enable_document_export_api:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Document export API is disabled. "
-                    "Set REMEMBER_API_ENABLE_DOCUMENT_EXPORT_API=true to enable.",
-                )
-            # Only bank-scoped keys are downloadable. Parse the bank id out of the
-            # "tenants/{schema}/banks/{bank_id}/..." key — or the "banks/{bank_id}/..."
-            # layout written before keys carried the tenant (request validation, so it
-            # belongs here); the engine method then authorizes the caller against that
-            # bank, in their own tenant, and retrieves the file, so a caller can't fetch
-            # another tenant's or bank's archive (IDOR guard). The unguessable uuid in
-            # the key is defence in depth, not the access control.
-            parts = key.split("/")
-            if ".." in parts:
-                raise HTTPException(status_code=404, detail="File not found")
-            if len(parts) > 4 and parts[0] == "tenants" and parts[2] == "banks" and parts[3]:
-                bank_id = unquote(parts[3])
-            elif len(parts) > 2 and parts[0] == "banks" and parts[1]:
-                bank_id = parts[1]
-            else:
-                raise HTTPException(status_code=404, detail="File not found")
-
-            file_info = await app.state.memory.retrieve_bank_file_stream(bank_id, key, request_context)
-            if file_info is None:
-                raise HTTPException(status_code=404, detail="File not found")
-
-            headers = {"Content-Disposition": f'attachment; filename="{bank_id}-documents.zip"'}
-            if file_info.size is not None:
-                headers["Content-Length"] = str(file_info.size)
-
-            return StreamingResponse(
-                file_info.stream,
-                media_type="application/zip",
-                headers=headers,
-            )
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"GET /v1/default/files/download/{key}")
 
     @app.get(
         "/v1/bank-template-schema",
@@ -9167,317 +8154,7 @@ def _register_routes(app: FastAPI):
             raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/consolidate")
 
     # =========================================================================
-    # Webhook Endpoints
     # =========================================================================
-
-    def _validate_webhook_destination(url: str | None) -> None:
-        """Reject webhook URLs that point at private/internal addresses (SSRF).
-
-        Registration-time, syntactic-only check (scheme + IP-literal hosts).
-        DNS-name hosts are resolved and pinned at delivery time by the guarded
-        transport; this just gives callers immediate 400 feedback for the
-        obvious cases. ``None`` (unchanged on PATCH) is a no-op.
-        """
-        if url is None:
-            return
-        from remember_api.webhooks.url_guard import WebhookURLError, parse_allowlist, validate_url_syntax
-
-        allowlist = parse_allowlist(get_config().webhook_allowed_hosts)
-        try:
-            validate_url_syntax(url, allowlist)
-        except WebhookURLError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-    def _parse_webhook_id(webhook_id: str) -> uuid.UUID:
-        """Parse a webhook path parameter without turning client input into a 500."""
-        try:
-            return uuid.UUID(webhook_id)
-        except ValueError:
-            raise HTTPException(status_code=422, detail="Invalid webhook ID") from None
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/webhooks",
-        response_model=WebhookResponse,
-        summary="Register webhook",
-        description="Register a webhook endpoint to receive event notifications for this bank.",
-        operation_id="create_webhook",
-        tags=["Webhooks"],
-        status_code=201,
-    )
-    @audited("create_webhook")
-    async def api_create_webhook(
-        bank_id: str,
-        request: CreateWebhookRequest,
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Register a webhook for a bank."""
-        try:
-            _validate_webhook_destination(request.url)
-            webhook_id = uuid.uuid4()
-            row = await app.state.memory.create_webhook(
-                bank_id,
-                webhook_id=webhook_id,
-                url=request.url,
-                secret=request.secret,
-                event_types=request.event_types,
-                enabled=request.enabled,
-                http_config_json=request.http_config.model_dump_json(),
-                request_context=request_context,
-            )
-
-            event_types_val = row["event_types"] if row else []
-            if isinstance(event_types_val, str):
-                event_types_val = json.loads(event_types_val)
-            http_config_val = row["http_config"] if row else None
-            if isinstance(http_config_val, dict):
-                http_config_val = json.dumps(http_config_val)
-
-            return WebhookResponse(
-                id=str(row["id"]),
-                bank_id=row["bank_id"],
-                url=row["url"],
-                secret=None,  # Never return secret in responses
-                event_types=list(event_types_val) if event_types_val else [],
-                enabled=bool(row["enabled"]),
-                http_config=WebhookHttpConfig.model_validate_json(http_config_val)
-                if http_config_val
-                else WebhookHttpConfig(),
-                created_at=row["created_at"].isoformat()
-                if hasattr(row["created_at"], "isoformat")
-                else str(row["created_at"]),
-                updated_at=row["updated_at"].isoformat()
-                if hasattr(row["updated_at"], "isoformat")
-                else str(row["updated_at"]),
-            )
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"POST /v1/default/banks/{bank_id}/webhooks")
-
-    @app.get(
-        "/v1/default/banks/{bank_id}/webhooks",
-        response_model=WebhookListResponse,
-        summary="List webhooks",
-        description="List the webhooks registered for a bank, oldest first. "
-        "Paged: `total` reports every webhook on the bank.",
-        operation_id="list_webhooks",
-        tags=["Webhooks"],
-        responses=_BANK_NOT_FOUND_RESPONSES,
-    )
-    async def api_list_webhooks(
-        bank_id: str,
-        limit: int = Query(default=100, ge=0, le=1000, description="Maximum number of webhooks to return"),
-        offset: int = Query(default=0, ge=0, description="Offset for pagination"),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """List webhooks for a bank."""
-        try:
-            data = await app.state.memory.list_webhooks(
-                bank_id,
-                limit=limit,
-                offset=offset,
-                request_context=request_context,
-            )
-
-            def _parse_webhook_row(row):
-                event_types_val = row["event_types"]
-                if isinstance(event_types_val, str):
-                    event_types_val = json.loads(event_types_val)
-                http_config_val = row["http_config"]
-                if isinstance(http_config_val, dict):
-                    http_config_val = json.dumps(http_config_val)
-                return WebhookResponse(
-                    id=str(row["id"]),
-                    bank_id=row["bank_id"],
-                    url=row["url"],
-                    secret=None,
-                    event_types=list(event_types_val) if event_types_val else [],
-                    enabled=bool(row["enabled"]),
-                    http_config=WebhookHttpConfig.model_validate_json(http_config_val)
-                    if http_config_val
-                    else WebhookHttpConfig(),
-                    created_at=row["created_at"].isoformat()
-                    if hasattr(row["created_at"], "isoformat")
-                    else str(row["created_at"]),
-                    updated_at=row["updated_at"].isoformat()
-                    if hasattr(row["updated_at"], "isoformat")
-                    else str(row["updated_at"]),
-                )
-
-            return WebhookListResponse(
-                items=[_parse_webhook_row(row) for row in data["items"]],
-                total=data["total"],
-                limit=data["limit"],
-                offset=data["offset"],
-            )
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"GET /v1/default/banks/{bank_id}/webhooks")
-
-    @app.delete(
-        "/v1/default/banks/{bank_id}/webhooks/{webhook_id}",
-        response_model=DeleteResponse,
-        summary="Delete webhook",
-        description="Remove a registered webhook.",
-        operation_id="delete_webhook",
-        tags=["Webhooks"],
-    )
-    @audited("delete_webhook", request_param=None)
-    async def api_delete_webhook(
-        bank_id: str,
-        webhook_id: str,
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Delete a webhook."""
-        try:
-            deleted = await app.state.memory.delete_webhook(
-                bank_id,
-                _parse_webhook_id(webhook_id),
-                request_context=request_context,
-            )
-            if not deleted:
-                raise HTTPException(status_code=404, detail="Webhook not found")
-            return DeleteResponse(success=True)
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"DELETE /v1/default/banks/{bank_id}/webhooks/{webhook_id}")
-
-    @app.patch(
-        "/v1/default/banks/{bank_id}/webhooks/{webhook_id}",
-        response_model=WebhookResponse,
-        summary="Update webhook",
-        description="Update one or more fields of a registered webhook. Only provided fields are changed.",
-        operation_id="update_webhook",
-        tags=["Webhooks"],
-    )
-    @audited("update_webhook")
-    async def api_update_webhook(
-        bank_id: str,
-        webhook_id: str,
-        request: UpdateWebhookRequest,
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """Update a webhook's fields (PATCH semantics — only sent fields are updated)."""
-        try:
-            set_clauses: list[str] = []
-            parsed_webhook_id = _parse_webhook_id(webhook_id)
-            params: list = [parsed_webhook_id, bank_id]
-
-            fields = request.model_fields_set
-            if "url" in fields:
-                _validate_webhook_destination(request.url)
-                params.append(request.url)
-                set_clauses.append(f"url = ${len(params)}")
-            if "secret" in fields:
-                params.append(request.secret)
-                set_clauses.append(f"secret = ${len(params)}")
-            if "event_types" in fields:
-                params.append(request.event_types)
-                set_clauses.append(f"event_types = ${len(params)}")
-            if "enabled" in fields:
-                params.append(request.enabled)
-                set_clauses.append(f"enabled = ${len(params)}")
-            if "http_config" in fields:
-                params.append(request.http_config.model_dump_json())
-                set_clauses.append(f"http_config = ${len(params)}::jsonb")
-
-            if not set_clauses:
-                raise HTTPException(status_code=422, detail="No fields provided to update")
-
-            row = await app.state.memory.update_webhook(
-                bank_id,
-                parsed_webhook_id,
-                set_clauses=set_clauses,
-                params=params,
-                request_context=request_context,
-            )
-            if not row:
-                raise HTTPException(status_code=404, detail="Webhook not found")
-
-            event_types_val = row["event_types"]
-            if isinstance(event_types_val, str):
-                event_types_val = json.loads(event_types_val)
-            http_config_val = row["http_config"]
-            if isinstance(http_config_val, dict):
-                http_config_val = json.dumps(http_config_val)
-
-            return WebhookResponse(
-                id=str(row["id"]),
-                bank_id=row["bank_id"],
-                url=row["url"],
-                secret=None,
-                event_types=list(event_types_val) if event_types_val else [],
-                enabled=bool(row["enabled"]),
-                http_config=WebhookHttpConfig.model_validate_json(http_config_val)
-                if http_config_val
-                else WebhookHttpConfig(),
-                created_at=row["created_at"].isoformat()
-                if hasattr(row["created_at"], "isoformat")
-                else str(row["created_at"]),
-                updated_at=row["updated_at"].isoformat()
-                if hasattr(row["updated_at"], "isoformat")
-                else str(row["updated_at"]),
-            )
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"PATCH /v1/default/banks/{bank_id}/webhooks/{webhook_id}")
-
-    @app.get(
-        "/v1/default/banks/{bank_id}/webhooks/{webhook_id}/deliveries",
-        response_model=WebhookDeliveryListResponse,
-        summary="List webhook deliveries",
-        description="Inspect delivery history for a webhook (useful for debugging).",
-        operation_id="list_webhook_deliveries",
-        tags=["Webhooks"],
-    )
-    async def api_list_webhook_deliveries(
-        bank_id: str,
-        webhook_id: str,
-        limit: int = Query(default=50, le=200, description="Maximum number of deliveries to return"),
-        cursor: str | None = Query(default=None, description="Pagination cursor (created_at of last item)"),
-        request_context: RequestContext = Depends(get_request_context),
-    ):
-        """List deliveries for a specific webhook, newest first. Use next_cursor for pagination."""
-        try:
-            try:
-                rows = await app.state.memory.list_webhook_deliveries(
-                    bank_id,
-                    _parse_webhook_id(webhook_id),
-                    limit=limit,
-                    cursor=cursor,
-                    request_context=request_context,
-                )
-            except LookupError:
-                raise HTTPException(status_code=404, detail="Webhook not found")
-
-            has_more = len(rows) > limit
-            page = rows[:limit]
-            next_cursor = page[-1]["created_at"] if has_more and page else None
-            expose_body = get_config().webhook_expose_response_body
-            return WebhookDeliveryListResponse(
-                items=[
-                    WebhookDeliveryResponse.from_async_operation_row(dict(row), expose_response_body=expose_body)
-                    for row in page
-                ],
-                next_cursor=next_cursor,
-            )
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"GET /v1/default/banks/{bank_id}/webhooks/{webhook_id}/deliveries")
 
     @app.post(
         "/v1/default/banks/{bank_id}/memories",
@@ -9510,8 +8187,7 @@ def _register_routes(app: FastAPI):
         request: RetainRequest,
         http_request: Request,
         request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.RETAIN)),
-        _admit: None = Depends(admit_for(PrecheckOperation.RETAIN)),
+        _admit: None = Depends(admit_for("retain")),
     ):
         """Retain memories with optional async processing."""
         metrics = get_metrics_collector()
@@ -9572,9 +8248,7 @@ def _register_routes(app: FastAPI):
                     attachments_by_document.setdefault(item_document_id, []).extend(canonical.attachments)
             # Short ids per document, for whatever this request actually wrote — what a
             # refusal below has to take back out, as opposed to what the document already had.
-            ingress_attachments = await app.state.memory.store_retain_attachments(
-                bank_id, attachments_by_document, request_context
-            )
+            await app.state.memory.store_retain_attachments(bank_id, attachments_by_document, request_context)
 
             # Group items by strategy
             strategy_groups: dict[str | None, list[dict]] = {}
@@ -9647,7 +8321,6 @@ def _register_routes(app: FastAPI):
                         strategy=group_strategy,
                         request_context=request_context,
                         operation_id=request.operation_id,
-                        ingress_attachments=ingress_attachments,
                     )
                     all_operation_ids.append(result["operation_id"])
                     total_items_count += result["items_count"]
@@ -9691,12 +8364,6 @@ def _register_routes(app: FastAPI):
                             strategy=group_strategy,
                             request_context=request_context,
                             return_usage=True,
-                            ingress_attachments=ingress_attachments,
-                            outbox_callback_factory=app.state.memory._build_retain_outbox_callback_factory(
-                                bank_id=bank_id,
-                                operation_id=None,
-                                schema=_current_schema.get(),
-                            ),
                         )
                         total_items_count += len(contents)
                         if usage:

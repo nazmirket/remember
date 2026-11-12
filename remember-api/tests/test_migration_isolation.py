@@ -64,22 +64,16 @@ def test_case_and_whitespace_are_tolerated(monkeypatch):
 
 
 def test_payload_travels_on_stdin_not_argv():
-    """A whole-fleet sweep names every tenant schema; argv would hit ARG_MAX.
-
-    ``run_migrations_for_schemas`` is called with all schemas at once, and the
-    entrypoint is documented at 20k of them — hundreds of KB of JSON, past ARG_MAX on
-    macOS. It also must not be captured: an hour-long sweep would show nothing until
-    it finished.
-    """
-    schemas = [f"tenant_{i:05d}" for i in range(20_000)]
+    """The child receives database settings on stdin, while output streams normally."""
+    payload = {"database_url": "postgresql://user:password@localhost/db", "schema": "local"}
     with patch.object(migrations.subprocess, "run") as run:
         run.return_value.returncode = 0
-        migrations._run_in_migration_child("run_migrations_for_schemas", {"schemas": schemas})
-
+        migrations._run_in_migration_child("run_local_migrations", payload)
     (argv,), kwargs = run.call_args
-    assert argv[1:] == ["-m", "remember_api.migrations"], "the payload must not be an argument"
-    assert json.loads(kwargs["input"])["kwargs"]["schemas"] == schemas
-    assert "capture_output" not in kwargs and "stdout" not in kwargs, "child output must stream"
+    assert argv[1:] == ["-m", "remember_api.migrations"]
+    assert "password" not in " ".join(argv)
+    assert json.loads(kwargs["input"])["kwargs"] == payload
+    assert "capture_output" not in kwargs and "stdout" not in kwargs
     assert kwargs["env"][migrations._CHILD_MARKER] == "1"
 
 
@@ -104,34 +98,3 @@ def test_main_rejects_an_unknown_target(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"target": "drop_everything", "kwargs": {}})))
     with pytest.raises(SystemExit, match="drop_everything"):
         migrations._main()
-
-
-async def test_extension_context_run_migration_goes_through_the_isolation_boundary():
-    """Runtime tenant provisioning must not open a sync engine in the server process.
-
-    ``ExtensionContext.run_migration`` is the seam cloud tenant provisioning uses to
-    create a schema for a new bank. It used to call ``run_migrations`` and then the
-    ``ensure_*`` helpers one by one -- and only the first of those isolates, so the
-    other three opened a sync engine in the API process regardless of the flag.
-    ``run_migrations_for_schemas`` is the entrypoint that covers all four behind one
-    isolation check.
-    """
-    from remember_api.extensions.context import DefaultExtensionContext
-
-    ctx = DefaultExtensionContext(database_url="postgresql://user:pass@host/db")
-    with (
-        patch.object(migrations, "run_migrations_for_schemas") as sweep,
-        patch.object(migrations, "run_migrations") as run_one,
-        patch.object(migrations, "ensure_embedding_dimension") as dim,
-        patch.object(migrations, "ensure_vector_extension") as vec,
-        patch.object(migrations, "ensure_text_search_extension") as text_search,
-    ):
-        await ctx.run_migration("tenant_acme")
-
-    for unisolated in (run_one, dim, vec, text_search):
-        unisolated.assert_not_called()
-    (url, schemas), kwargs = sweep.call_args
-    assert url == "postgresql://user:pass@host/db"
-    assert schemas == ["tenant_acme"]
-    # The post-migration extension steps must still happen -- inside the child.
-    assert kwargs["vector_extension"] and kwargs["text_search_extension"]

@@ -41,7 +41,6 @@ from remember_api.engine.retain.bank_utils import (
     _bank_index_name,
     _vector_index_clause,
 )
-from remember_api.engine.transfer import export_bank
 from remember_api.engine.vector_index_health import (
     CoverageTrigger,
     drop_orphaned_bank_indexes,
@@ -735,7 +734,7 @@ class TestRepairBankCommand:
                 pg0_db_url, base_schema=_TEST_SCHEMA, schema=_TEST_SCHEMA, bank_id=bank_id, dry_run=False
             )
 
-            assert sweep.skipped_schemas == []
+            assert sweep.skipped_schema is None
             assert len(sweep.banks) == 1
             result = sweep.banks[0]
             assert result.failed == 0, result.failed_indexes
@@ -785,7 +784,7 @@ class TestRepairBankCommand:
                 pg0_db_url, base_schema=_TEST_SCHEMA, schema=_TEST_SCHEMA, bank_id=bank_id, dry_run=False
             )
 
-            assert sweep.skipped_schemas == []
+            assert sweep.skipped_schema is None
             assert sweep.banks == []
             assert sweep.banks_scanned == 1
             assert sweep.orphan_observations == 1
@@ -793,116 +792,6 @@ class TestRepairBankCommand:
             async with acquire_with_retry(backend) as conn:
                 for name in await _expected_index_names(conn, bank_id):
                     assert not await _index_exists(conn, name), f"{name} must NOT be built for a no-op backend"
-        finally:
-            await memory.delete_bank(bank_id, request_context=request_context)
-
-
-class TestRestoredBankCoverage:
-    """The #2645 guarantee, re-established through the size policy.
-
-    #2645 was: a bank that arrives already populated — logical restore,
-    cross-version upgrade, backend switch — bypassed the fresh-INSERT gate that
-    created its indexes, because ``get_or_create_bank_profile`` took the SELECT
-    branch for a bank row that already existed. It was then left permanently
-    without coverage, silently falling back to a global index plus post-filter.
-
-    Both modes answer it, differently. With a threshold set, nothing creates
-    indexes at bank-creation time at all, so there is no gate left to bypass:
-    entitlement is recomputed from live row counts whenever a write queues a
-    reconcile, and how the rows got there is not something it can observe. With
-    the threshold off, the gate is back — so import has to build the indexes
-    itself, which is the original #2645 fix.
-    """
-
-    @pytest.mark.asyncio
-    async def test_import_builds_the_indexes_at_the_default(
-        self, memory: MemoryEngine, request_context: RequestContext
-    ):
-        """The original #2645 fix, still needed while the threshold is off.
-
-        ``import_bank`` restores the ``banks`` row directly, so
-        ``get_or_create_bank_profile`` never sees a fresh INSERT and never builds
-        anything. Without an explicit build here the restored bank would fall
-        back to a global index plus post-filter — slower, and under-returning —
-        with nothing else in this mode ever noticing.
-        """
-        bank_id = f"test-import-{uuid.uuid4().hex[:8]}"
-        backend = await memory._get_backend()
-        try:
-            await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
-            async with acquire_with_retry(backend) as conn:
-                archive = await export_bank(conn, bank_id)
-
-            await memory.delete_bank(bank_id, request_context=request_context)
-            result = await memory.import_bank_async(archive, request_context)
-            assert result.bank_id == bank_id
-
-            async with acquire_with_retry(backend) as conn:
-                for name in await _expected_index_names(conn, bank_id):
-                    assert await _index_is_partial_vector(conn, name), f"import should have built {name}"
-        finally:
-            await memory.delete_bank(bank_id, request_context=request_context)
-
-    @pytest.mark.asyncio
-    async def test_import_builds_no_indexes_inline(
-        self, memory: MemoryEngine, request_context: RequestContext, low_threshold
-    ):
-        """Import must issue no index DDL: it runs in a transaction on the shared table.
-
-        The bank is empty at the point the old code built its indexes (facts are
-        replayed afterwards), so the build was both useless and a ShareLock on
-        ``memory_units`` taken inside the import transaction.
-        """
-        bank_id = f"test-import-{uuid.uuid4().hex[:8]}"
-        backend = await memory._get_backend()
-        try:
-            await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
-            async with acquire_with_retry(backend) as conn:
-                archive = await export_bank(conn, bank_id)
-
-            await memory.delete_bank(bank_id, request_context=request_context)
-            result = await memory.import_bank_async(archive, request_context)
-            assert result.bank_id == bank_id
-
-            async with acquire_with_retry(backend) as conn:
-                for name in await _expected_index_names(conn, bank_id):
-                    assert not await _index_exists(conn, name), f"import must not build {name} inline"
-        finally:
-            await memory.delete_bank(bank_id, request_context=request_context)
-
-    @pytest.mark.asyncio
-    async def test_rows_arriving_after_bank_creation_still_get_coverage(
-        self, memory: MemoryEngine, request_context: RequestContext, low_threshold
-    ):
-        """The #2645 shape: the bank row exists first, the rows land afterwards.
-
-        Every populated-bank-without-coverage report reduces to this ordering.
-        The reconcile counts rows and cannot tell the difference, so a restored
-        bank, an upgraded one and an ordinarily-grown one all converge the same
-        way.
-        """
-        bank_id = f"test-restore-{uuid.uuid4().hex[:8]}"
-        backend = await memory._get_backend()
-        try:
-            # Bank row first — this is the SELECT branch that #2645 fell through.
-            await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
-            async with acquire_with_retry(backend) as conn:
-                for name in await _expected_index_names(conn, bank_id):
-                    assert not await _index_exists(conn, name)
-
-                # Rows afterwards, as a restore or an upgrade delivers them.
-                for ft in _BANK_INDEX_FACT_TYPES:
-                    for n in range(_BUILD_AT):
-                        await _insert_memory(conn, bank_id, ft, f"restored {ft} fact {n}")
-
-                reconciled = await _reconcile(conn, bank_id)
-
-                assert reconciled.failed == 0, reconciled.failed_indexes
-                assert reconciled.created == len(_BANK_INDEX_FACT_TYPES)
-                for name in await _expected_index_names(conn, bank_id):
-                    assert await _index_is_partial_vector(conn, name), (
-                        f"{name} should exist after the reconcile (restore coverage, #2645)"
-                    )
         finally:
             await memory.delete_bank(bank_id, request_context=request_context)
 

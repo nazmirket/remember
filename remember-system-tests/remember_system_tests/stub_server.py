@@ -33,7 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .lexical import EMBEDDING_DIMENSION
-from .rulebook import ChatRequest, EmbeddingCall, ReceivedWebhook, Stubs, TokenExchange
+from .rulebook import ChatRequest, EmbeddingCall, Stubs, TokenExchange
 from .validation import RequestRejected, validate_chat, validate_embeddings, validate_rerank, validate_systemone
 
 logger = logging.getLogger(__name__)
@@ -244,18 +244,6 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
             }
         )
 
-    @app.post("/webhook")
-    async def webhook(request: Request) -> JSONResponse:
-        """Stand in for a customer's webhook endpoint.
-
-        Records the headers as well as the body: the signature a receiver is
-        expected to verify travels in a header, and a delivery that arrives
-        unsigned is indistinguishable from one anybody could forge.
-        """
-        stubs.webhooks.append(
-            ReceivedWebhook(headers={k.lower(): v for k, v in request.headers.items()}, body=await request.json())
-        )
-        return JSONResponse({"received": True})
 
     @app.post("/v1/systemone")
     async def systemone(request: Request) -> JSONResponse:

@@ -9,7 +9,10 @@ from remember_api.engine.embeddings import _create_embeddings
 from remember_api.engine.llm_wrapper import LLMProvider
 
 
-@pytest.mark.parametrize("provider", ["gemini", "vertexai", "groq", "bedrock", "litellm", "cursor", "github-copilot"])
+@pytest.mark.parametrize(
+    "provider",
+    ["gemini", "vertexai", "groq", "bedrock", "litellm", "cursor", "github-copilot", "package:CustomProvider"],
+)
 def test_removed_builtin_llm_providers_are_rejected(provider):
     with pytest.raises(ValueError, match="Invalid LLM provider"):
         LLMProvider(provider=provider, api_key="test", base_url="http://127.0.0.1:1234/v1", model="test")
@@ -22,7 +25,9 @@ def test_openai_compatible_adapter_rejects_removed_provider():
         OpenAICompatibleLLM(provider="groq", api_key="test", base_url="", model="test")
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "ollama", "lmstudio", "mock"])
+@pytest.mark.parametrize(
+    "provider", ["openai", "anthropic", "openai-codex", "claude-code", "ollama", "lmstudio", "mock"]
+)
 def test_retained_llm_provider_is_constructible(provider):
     config = LLMProvider(provider=provider, api_key="test", base_url="http://127.0.0.1:1234/v1", model="test")
     assert config.provider == provider

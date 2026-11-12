@@ -271,16 +271,6 @@ class TestMarkOperationGracefulOnMissingRow:
             status = await conn.fetchval("SELECT status FROM async_operations WHERE operation_id = $1", op_id)
         assert status == "cancelled"
 
-    @pytest.mark.asyncio
-    async def test_mark_completed_and_fire_webhook_does_not_raise_when_row_missing(self, memory: MemoryEngine):
-        missing_id = str(uuid.uuid4())
-        await memory._mark_operation_completed_and_fire_webhook(
-            operation_id=missing_id,
-            bank_id="nonexistent-bank",
-            status="completed",
-            result=None,
-        )  # no exception
-
 
 # ---------------------------------------------------------------------------
 # Consolidation checkpoint

@@ -21,12 +21,6 @@ import pytest_asyncio
 
 from remember_api import RequestContext
 from remember_api.api import create_app
-from remember_api.extensions import (
-    BankReadContext,
-    BankReadOperation,
-    OperationValidatorExtension,
-    ValidationResult,
-)
 from remember_api.config import RememberConfig
 from remember_api.engine.prompt_preview import render_prompt_preview
 from remember_api.engine.retain.fact_extraction import build_chunk_prompt_parts
@@ -432,44 +426,6 @@ async def test_unknown_operation_is_rejected_by_the_schema(api_client, bank_id):
     resp = await api_client.post(f"/v1/default/banks/{bank_id}/prompts/preview", json={"operation": "teleport"})
 
     assert resp.status_code == 422, resp.text
-
-
-class _ConfigReadValidator(OperationValidatorExtension):
-    """Records bank reads and rejects GET_BANK_CONFIG, like a tenant extension that
-    denies a caller access to a bank's settings."""
-
-    def __init__(self) -> None:
-        super().__init__({})
-        self.read_ops: list[BankReadOperation] = []
-
-    async def validate_bank_read(self, ctx: BankReadContext) -> ValidationResult:
-        self.read_ops.append(ctx.operation)
-        if ctx.operation is BankReadOperation.GET_BANK_CONFIG:
-            return ValidationResult.reject("not your bank")
-        return ValidationResult.accept()
-
-    async def validate_retain(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_recall(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-    async def validate_reflect(self, ctx) -> ValidationResult:
-        return ValidationResult.accept()
-
-
-@pytest.mark.asyncio
-async def test_preview_is_refused_when_config_reads_are(api_client, bank_id, memory, monkeypatch):
-    """The preview renders the bank's settings as prompt text — the same disclosure
-    GET /config makes, so it must be behind the same gate. Reading the config
-    directly from the resolver would have walked straight past the extension."""
-    validator = _ConfigReadValidator()
-    monkeypatch.setattr(memory, "_operation_validator", validator)
-
-    resp = await api_client.post(f"/v1/default/banks/{bank_id}/prompts/preview", json={"operation": "retain"})
-
-    assert resp.status_code >= 400, resp.text
-    assert BankReadOperation.GET_BANK_CONFIG in validator.read_ops
 
 
 @pytest.mark.asyncio

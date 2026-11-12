@@ -20,7 +20,7 @@ import pytest
 
 from remember_api import RequestContext
 from remember_api.engine.bank_stats_cache import BankStatsCache
-from remember_api.engine.memories import FactRecord, get_memories
+from remember_api.engine.memories import get_memories
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.schema import fq_table
 
@@ -75,43 +75,20 @@ async def _insert_memory(
 async def _insert_observation(
     memory: MemoryEngine, conn, bank_id: str, text: str, source_memory_ids: list[uuid.UUID]
 ) -> uuid.UUID:
-    """Seed one observation, wherever the configured store keeps observations.
-
-    Gated because the two stores split this differently: the SQL store's ``upsert_observation``
-    is a no-op (the consolidator writes that row inline), so SQL is seeded with the insert it
-    would have written; a store that owns its observations is seeded through the store.
-    """
-    store = get_memories()
+    """Seed an observation as the consolidator would write it."""
     obs_id = uuid.uuid4()
-    if not store.store_owned:
-        await conn.execute(
-            """
-            INSERT INTO memory_units (
-                id, bank_id, text, fact_type, event_date, source_memory_ids, proof_count, created_at, updated_at
-            ) VALUES ($1, $2, $3, 'observation', NOW(), $4, $5, NOW(), NOW())
-            """,
-            obs_id,
-            bank_id,
-            text,
-            source_memory_ids,
-            len(source_memory_ids),
-        )
-    else:
-        now = datetime.now(timezone.utc)
-        await store.upsert_observation(
-            conn=conn,
-            bank_id=bank_id,
-            record=FactRecord(
-                unit_id=str(obs_id),
-                text=text,
-                embedding=(await memory.embeddings.encode([text]))[0],
-                fact_type="observation",
-                proof_count=len(source_memory_ids),
-                source_memory_ids=[str(s) for s in source_memory_ids],
-                event_date=now,
-                created_at=now,
-            ),
-        )
+    await conn.execute(
+        """
+        INSERT INTO memory_units (
+            id, bank_id, text, fact_type, event_date, source_memory_ids, proof_count, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'observation', NOW(), $4, $5, NOW(), NOW())
+        """,
+        obs_id,
+        bank_id,
+        text,
+        source_memory_ids,
+        len(source_memory_ids),
+    )
     return obs_id
 
 

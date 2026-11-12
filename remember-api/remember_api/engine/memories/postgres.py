@@ -1,32 +1,12 @@
-"""The default memories store: Postgres holds every store-owned table.
-
-This is the behaviour Remember has always had, stated as an implementation of
-:class:`~remember_api.engine.memories.base.MemoriesExtension` rather than as the
-absence of one. Memories go in `memory_units`, the joins around it are `memory_links`
-and `unit_entities`, documents, chunks and the entity registry are their own tables,
-and every read is SQL — writing a row *is* indexing it, so :meth:`index_facts` has
-nothing left to do. This class and :mod:`.pg` are the only code that names those
-tables (through ``fq_store_table``; ``fq_table`` refuses them).
-
-The class is deliberately thin. Each method delegates to a plain function in
-:mod:`remember_api.engine.memories.pg`, split by what calls it — reads, writes,
-counts, curation, engine_curation, graph, documents, retain, banks, consolidation,
-expand, transfer, admin, the retain-time links and entity_resolver, and the recall
-arms in recall / link_expansion — so a change to one area is a change to one file,
-and the SQL is grouped by concern rather than piled behind a class.
-
-Keeping this as an explicit store (rather than an ``if store is None`` branch at
-each call site) means the default path is the one the whole test suite exercises,
-and a second implementation cannot change it by accident.
-"""
+"""Local PostgreSQL memory operations, grouped by domain in the pg package."""
 
 from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..db.ops_postgresql import PostgreSQLOps
 from ..retain.types import EmbeddingLike, EntityResolutionResult
@@ -36,7 +16,6 @@ from .base import (
     AttachmentRef,
     BankContentCounts,
     DeletedDocument,
-    DeletePredicate,
     DocumentBase,
     DocumentChunkState,
     DocumentSourceUnits,
@@ -44,9 +23,7 @@ from .base import (
     EntityPrunePassResult,
     EntityResolverHandle,
     ExistingChunk,
-    MemoriesExtension,
     MemoryLocation,
-    MemoryPatch,
     MemoryScopeWatermark,
     ObservationChunkIds,
     RecallArms,
@@ -57,6 +34,7 @@ from .base import (
     SemanticBm25Result,
     StoredMemory,
     TypedMemoryScope,
+    watermark_may_postdate,
 )
 from .pg import admin as pg_admin
 from .pg import banks as pg_banks
@@ -65,26 +43,103 @@ from .pg import counts, curation, documents, engine_curation, graph, reads, writ
 from .pg import expand as pg_expand
 from .pg import links as pg_links
 from .pg import retain as pg_retain
-from .pg import transfer as pg_transfer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..consolidation.consolidator import _TemporalBounds
     from ..embeddings import Embeddings
     from ..response_models import MemoryFact
-    from ..retain.types import CausalRelation, ProcessedFact
+    from ..retain.types import CausalRelation
     from ..search.graph_retrieval import GraphRetriever
-    from ..transfer.export import _LoadedExport, _UnitLocation
-    from ..transfer.importer import FactLifecycle, _ObservationOutcome
-    from ..transfer.schema import TransferObservation
     from .pg.entity_resolver import EntityResolver
 
 logger = logging.getLogger(__name__)
 
 
-class PostgresMemories(MemoriesExtension):
+class PostgresMemories:
     """Memories in `memory_units`, links in `memory_links` / `unit_entities`."""
 
     name = "postgres"
+
+    async def mental_model_is_stale(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        scope: MemoryScopeWatermark,
+        cited_ids: list[str],
+    ) -> bool:
+        """Whether a memory in ``scope`` was written after ``scope.since``, or any of ``cited_ids`` is gone.
+
+        The watermark, scoped changes and cited-memory liveness are checked on the
+        same PostgreSQL connection.
+        """
+        watermark = await self.latest_memory_write_at(conn=conn, fq_table=fq_table, bank_id=bank_id)
+        if watermark_may_postdate(scope.since, watermark) and await self.any_memory_updated_since(
+            conn=conn,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            since=scope.since,
+            fact_types=scope.fact_types,
+            tags=scope.tags,
+            tags_match=scope.tags_match,
+            tag_groups=scope.tag_groups,
+        ):
+            return True
+        if not cited_ids:
+            return False
+        live = await self.live_memory_ids(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=cited_ids)
+        return len(live) < len(cited_ids)
+
+    async def graph_view(
+        self,
+        *,
+        conn,
+        fq_table,
+        bank_id: str,
+        fact_type: "str | list[str] | None" = None,
+        search_query: str | None = None,
+        document_id: str | None = None,
+        chunk_id: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: TagsMatch = "all_strict",
+        tag_groups: "list[TagGroup] | None" = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Everything one graph render reads, in one pass:
+        ``{"units", "total", "links", "entity_rows"}``.
+
+        ``entity_rows`` covers the units AND their source memories, because an observation borrows
+        its sources' entities for the render.
+        """
+        page = await self.graph_units(
+            conn=conn,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            fact_type=cast("str | None", fact_type),
+            search_query=search_query,
+            document_id=document_id,
+            chunk_id=chunk_id,
+            tags=tags,
+            tags_match=tags_match,
+            tag_groups=tag_groups,
+            limit=limit,
+        )
+        units = page["units"]
+        ids = [str(row["id"]) for row in units]
+        sources = sorted({str(s) for row in units for s in (row["source_memory_ids"] or [])})
+        links, entity_rows = await self.graph_links_and_entities(
+            conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=ids + sources
+        )
+        return {"units": units, "total": page["total"], "links": links, "entity_rows": entity_rows}
+
+    async def graph_links_and_entities(
+        self, *, conn, fq_table, bank_id: str, unit_ids: list[str]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """``(direct_links, entity_rows)`` for the same ``unit_ids``, in one pass."""
+        links = await self.graph_direct_links(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
+        entities = await self.graph_entity_rows(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids)
+        return links, entities
 
     # ------------------------------------------------------------------ writes
 
@@ -96,30 +151,14 @@ class PostgresMemories(MemoriesExtension):
         bank_id: str,
         facts: list,
         document_id: str | None = None,
-        defer_index: bool = False,
     ) -> list[str]:
-        # `defer_index` is meaningless here: the INSERT that returns the ids is
-        # also what indexes the facts, so there is nothing to defer.
         return await writes.insert_facts(conn=conn, ops=ops, bank_id=bank_id, facts=facts, document_id=document_id)
-
-    async def delete_facts(self, bank_id: str, unit_ids: list[str]) -> None:
-        """No-op: the caller's `memory_units` DELETE (or its FK cascade) removed them."""
-
-    async def delete_where(self, bank_id: str, predicate: DeletePredicate) -> int:
-        """No-op: predicate deletes are issued as SQL by the caller that owns the transaction."""
-        return 0
 
     async def delete_document(self, *, conn, fq_table, bank_id: str, document_id: str) -> None:
         await writes.delete_document(conn=conn, fq_table=fq_store_table, bank_id=bank_id, document_id=document_id)
 
-    async def drop_bank_storage(self, bank_id: str) -> None:
-        """No-op: deleting the bank cascades to its memories."""
-
     async def delete_observations(self, *, conn, fq_table, bank_id: str) -> None:
         await writes.delete_observations(conn=conn, fq_table=fq_store_table, bank_id=bank_id)
-
-    async def update_memories(self, bank_id: str, patches: list[MemoryPatch]) -> None:
-        """No-op: the caller's UPDATE already wrote the row it holds open."""
 
     # ------------------------------------------------------------------ recall
 
@@ -604,9 +643,6 @@ class PostgresMemories(MemoriesExtension):
 
     # ------------------------------------------------------------------ observations
 
-    async def upsert_observation(self, *, conn, bank_id: str, record) -> None:
-        """No-op: the observation was written as a `memory_units` row by the caller."""
-
     async def observations_for_sources(
         self, *, conn, ops, fq_table, bank_id: str, unit_ids: list[str]
     ) -> list[StoredMemory]:
@@ -878,27 +914,6 @@ class PostgresMemories(MemoriesExtension):
         )
 
     # ------------------------------------------------------------------ documents and chunks
-
-    async def record_document_file(
-        self,
-        *,
-        backend,
-        fq_table,
-        bank_id: str,
-        document_id: str,
-        storage_key: str,
-        original_name: str,
-        content_type: str,
-    ) -> bool:
-        return await documents.record_document_file(
-            backend=backend,
-            fq_table=fq_store_table,
-            bank_id=bank_id,
-            document_id=document_id,
-            storage_key=storage_key,
-            original_name=original_name,
-            content_type=content_type,
-        )
 
     async def memory_attachment_refs(
         self, *, conn, fq_table, bank_id: str, unit_ids: list[str]
@@ -1650,123 +1665,10 @@ class PostgresMemories(MemoriesExtension):
             conn=conn, fq_table=fq_store_table, bank_id=bank_id, document_ids=document_ids
         )
 
-    # ------------------------------------------------------------------ transfer, gauges and vector indexes
+    # ------------------------------------------------------------------ gauges and vector indexes
 
-    async def iter_transfer_documents(
-        self,
-        *,
-        backend,
-        fq_table,
-        bank_id: str,
-        document_ids: list[str] | None,
-        include_lifecycle: bool,
-        batch_size: int,
-    ) -> AsyncIterator[_LoadedExport]:
-        async for loaded in pg_transfer.iter_documents(
-            backend=backend,
-            fq_table=fq_store_table,
-            bank_id=bank_id,
-            document_ids=document_ids,
-            include_lifecycle=include_lifecycle,
-            batch_size=batch_size,
-        ):
-            yield loaded
-
-    async def load_transfer_documents(
-        self, *, conn, fq_table, bank_id: str, document_ids: list[str] | None, include_lifecycle: bool
-    ) -> _LoadedExport:
-        return await pg_transfer.load_documents(
-            conn=conn,
-            fq_table=fq_store_table,
-            bank_id=bank_id,
-            document_ids=document_ids,
-            include_lifecycle=include_lifecycle,
-        )
-
-    async def load_transfer_observations(
-        self, *, conn, fq_table, bank_id: str, unit_index: dict[Any, _UnitLocation]
-    ) -> list[TransferObservation]:
-        return await pg_transfer.load_observations(
-            conn=conn, fq_table=fq_store_table, bank_id=bank_id, unit_index=unit_index
-        )
-
-    async def iter_entity_maintenance_queue(
-        self, *, backend, fq_table, bank_id: str, page_size: int
-    ) -> AsyncIterator[list[dict]]:
-        async for page in pg_transfer.iter_entity_maintenance_queue(
-            backend=backend, fq_table=fq_store_table, bank_id=bank_id, page_size=page_size
-        ):
-            yield page
-
-    async def iter_archived_memories(
-        self, *, backend, fq_table, bank_id: str, page_size: int
-    ) -> AsyncIterator[list[dict]]:
-        async for page in pg_transfer.iter_archived_memories(
-            backend=backend, fq_table=fq_store_table, bank_id=bank_id, page_size=page_size
-        ):
-            yield page
-
-    async def restore_archived_memories(
-        self,
-        *,
-        conn,
-        fq_table,
-        bank_id: str,
-        rows: list[dict],
-        unit_id_map: dict[str, str],
-        document_id_map: dict[str, str],
-        bank_rows_json_encoding: str,
-    ) -> int:
-        return await pg_transfer.restore_archived_memories(
-            conn=conn,
-            fq_table=fq_store_table,
-            bank_id=bank_id,
-            rows=rows,
-            unit_id_map=unit_id_map,
-            document_id_map=document_id_map,
-            bank_rows_json_encoding=bank_rows_json_encoding,  # ty: ignore[invalid-argument-type]
-        )
-
-    async def resolve_entity_ids_by_name(self, *, conn, fq_table, bank_id: str, names: set[str]) -> dict[str, Any]:
-        return await pg_transfer.resolve_entity_ids_by_name(
-            conn=conn, fq_table=fq_store_table, bank_id=bank_id, names=names
-        )
-
-    async def transfer_document_exists(self, *, backend, fq_table, bank_id: str, document_id: str) -> bool:
-        return await pg_transfer.document_exists(
-            backend=backend, fq_table=fq_store_table, bank_id=bank_id, document_id=document_id
-        )
-
-    async def restore_document_created_at(
-        self, *, conn, fq_table, bank_id: str, document_id: str, created_at: datetime
-    ) -> None:
-        await pg_transfer.restore_document_created_at(
-            conn=conn, fq_table=fq_store_table, bank_id=bank_id, document_id=document_id, created_at=created_at
-        )
-
-    async def restore_fact_lifecycle(self, *, conn, fq_table, bank_id: str, rows: list[FactLifecycle]) -> None:
-        await pg_transfer.restore_fact_lifecycle(conn=conn, fq_table=fq_store_table, bank_id=bank_id, rows=rows)
-
-    async def import_transfer_observations(
-        self,
-        *,
-        backend,
-        ops,
-        fq_table,
-        bank_id: str,
-        resolved: list[tuple[TransferObservation, list[str]]],
-        processed: list[ProcessedFact],
-        outcome: _ObservationOutcome,
-    ) -> _ObservationOutcome:
-        return await pg_transfer.import_observations(
-            backend=backend,
-            ops=ops,
-            fq_table=fq_store_table,
-            bank_id=bank_id,
-            resolved=resolved,
-            processed=processed,
-            outcome=outcome,
-        )
+    async def banks_needing_consolidation(self, *, conn, schema: str) -> list:
+        return await pg_admin.banks_needing_consolidation(conn=conn, schema=schema)
 
     async def count_consolidation_backlog(
         self, *, conn, schema: str, per_bank: bool, bank_ids: Callable[[], Awaitable[list[str]]]

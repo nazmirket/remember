@@ -30,7 +30,6 @@ from .banner import print_banner
 from .config import (
     DEFAULT_ACCESS_LOG,
     DEFAULT_HOST,
-    DEFAULT_WORKERS,
     ENV_ACCESS_LOG,
     ENV_WORKERS,
     RememberConfig,
@@ -43,26 +42,10 @@ from .daemon import (
     daemonize,
 )
 
-# `create_app`, `MemoryEngine` and the extension machinery are NOT imported at module level, and
-# that is load-bearing rather than tidiness. uvicorn's multiprocess supervisor uses spawn, so every
-# worker rebuilds `__main__` by re-running `sys.argv[0]` — pip's console-script wrapper — whose top
-# line is `from remember_api.main import main`. Anything this module pulls in at import time is
-# therefore paid by EVERY spawned worker before uvicorn's child bootstrap begins; a worker still
-# importing when the supervisor's 5 s healthcheck arrives is SIGKILLed and respawned, forever, with
-# no traceback. Measured: `.api` alone is ~6.2 s to import and `.extensions` ~2.6 s, and the whole
-# line the console script runs went 6578 ms -> 312 ms by moving them here.
-#
-# They resolve through the module `__getattr__` below on first USE, which keeps them ordinary
-# module attributes: `main()` refers to them as plain globals, and `patch("remember_api.main.
-# MemoryEngine")` still finds and replaces them. Importing them inside `main()` instead would do
-# neither — the name would be invisible to `patch`, and a local import would shadow any patch that
-# did land. See docs/plans/recall-latency.md.
+# Keep CLI argument parsing and diagnostics lightweight until startup needs the engine.
 _LAZY_IMPORTS: "dict[str, tuple[str, str]]" = {
     "MemoryEngine": (".", "MemoryEngine"),
     "create_app": (".api", "create_app"),
-    "OperationValidatorExtension": (".extensions", "OperationValidatorExtension"),
-    "TenantExtension": (".extensions", "TenantExtension"),
-    "load_extension": (".extensions", "load_extension"),
 }
 
 
@@ -110,33 +93,6 @@ def _signal_handler(signum, frame):
     sys.exit(0)
 
 
-@dataclasses.dataclass(frozen=True)
-class ResolvedDaemonHostPort:
-    host: str
-    port: int
-
-
-def resolve_daemon_host_port(
-    *,
-    args_host: str,
-    args_port: int,
-    explicit_host: bool,
-    explicit_port: bool,
-    configured_host: bool = False,
-) -> ResolvedDaemonHostPort:
-    """Resolve host/port for daemon mode.
-
-    Defaults to 127.0.0.1 for security, but honors explicit user overrides via the
-    --host flag (``explicit_host``) or REMEMBER_API_HOST (``configured_host``, which
-    the caller reads off the config rather than the environment). Uses
-    DEFAULT_DAEMON_PORT unless the user specified a custom port.
-    """
-    port = args_port if explicit_port else DEFAULT_DAEMON_PORT
-    # Only force localhost if the user didn't explicitly set a host
-    host = args_host if (explicit_host or configured_host) else "127.0.0.1"
-    return ResolvedDaemonHostPort(host=host, port=port)
-
-
 def _port_bind_error(host: str, port: int) -> OSError | None:
     """Return the error uvicorn's bind would raise for host:port, or None if it would succeed.
 
@@ -182,7 +138,6 @@ def _wait_for_port(host: str, port: int) -> OSError | None:
 @dataclasses.dataclass(frozen=True)
 class ParsedCliArgs:
     args: argparse.Namespace
-    explicit_host: bool
     explicit_port: bool
 
 
@@ -195,10 +150,9 @@ def _parse_cli_args(argv: list[str], config: RememberConfig) -> ParsedCliArgs:
     # Server options
     parser.add_argument(
         "--host",
-        default=argparse.SUPPRESS,
-        # config.host is None when nothing configured one; show the address that will
-        # actually be bound, not the sentinel that stands for "operator said nothing".
-        help=f"Host to bind to (default: {config.host or DEFAULT_HOST}, env: REMEMBER_API_HOST)",
+        default=config.host or DEFAULT_HOST,
+        choices=["127.0.0.1", "::1", "localhost"],
+        help="Loopback host to bind to (default: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
@@ -211,15 +165,6 @@ def _parse_cli_args(argv: list[str], config: RememberConfig) -> ParsedCliArgs:
         default=config.log_level,
         choices=["critical", "error", "warning", "info", "debug", "trace"],
         help=f"Log level (default: {config.log_level}, env: REMEMBER_API_LOG_LEVEL)",
-    )
-
-    # Development options
-    parser.add_argument("--reload", action="store_true", help="Enable auto-reload on code changes (development only)")
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=config.workers,
-        help=f"Number of worker processes (env: {ENV_WORKERS}, default: {DEFAULT_WORKERS})",
     )
 
     # Access log options
@@ -236,18 +181,6 @@ def _parse_cli_args(argv: list[str], config: RememberConfig) -> ParsedCliArgs:
         help="Disable access log (overrides env and default)",
     )
 
-    # Proxy options
-    parser.add_argument(
-        "--proxy-headers", action="store_true", help="Enable X-Forwarded-Proto, X-Forwarded-For headers"
-    )
-    parser.add_argument(
-        "--forwarded-allow-ips", default=None, help="Comma separated list of IPs to trust with proxy headers"
-    )
-
-    # SSL options
-    parser.add_argument("--ssl-keyfile", default=None, help="SSL key file")
-    parser.add_argument("--ssl-certfile", default=None, help="SSL certificate file")
-
     # Daemon mode options
     parser.add_argument(
         "--daemon",
@@ -256,15 +189,14 @@ def _parse_cli_args(argv: list[str], config: RememberConfig) -> ParsedCliArgs:
     )
 
     args = parser.parse_args(argv)
+    if args.host not in {"127.0.0.1", "::1", "localhost"}:
+        parser.error(f"local daemon requires a loopback host, got {args.host!r}")
 
-    explicit_host = hasattr(args, "host")
     explicit_port = hasattr(args, "port")
-    if not explicit_host:
-        args.host = config.host or DEFAULT_HOST
     if not explicit_port:
         args.port = config.port
 
-    return ParsedCliArgs(args=args, explicit_host=explicit_host, explicit_port=explicit_port)
+    return ParsedCliArgs(args=args, explicit_port=explicit_port)
 
 
 def main():
@@ -280,7 +212,8 @@ def main():
 
     _install_profiling()
 
-    # Load configuration from environment (for CLI args defaults)
+    # One local process owns the daemon and its concurrency limits.
+    os.environ[ENV_WORKERS] = "1"
     config = _get_raw_config()
 
     parsed_cli_args = _parse_cli_args(sys.argv[1:], config)
@@ -294,22 +227,20 @@ def main():
     is_daemon_child = os.environ.get(ENV_DAEMON_CHILD) == "1"
     is_daemon = args.daemon or is_daemon_child
 
-    if is_daemon:
-        resolved_daemon_host_port = resolve_daemon_host_port(
-            args_host=args.host,
-            args_port=args.port,
-            explicit_host=parsed_cli_args.explicit_host,
-            explicit_port=parsed_cli_args.explicit_port,
-            configured_host=config.host is not None,
-        )
-        args.host = resolved_daemon_host_port.host
-        args.port = resolved_daemon_host_port.port
+    if is_daemon and not parsed_cli_args.explicit_port:
+        args.port = DEFAULT_DAEMON_PORT
 
     # Fail before any expensive initialization if the port cannot be bound. For --daemon this
     # runs in the foreground parent too, so the error reaches the terminal instead of the log.
     bind_error = _wait_for_port(args.host, args.port)
     if bind_error is not None:
         print(f"Error: cannot bind {args.host}:{args.port}: {bind_error}", file=sys.stderr)
+        sys.exit(1)
+
+    from .pg0 import parse_pg0_url
+
+    if not parse_pg0_url(config.database_url).is_pg0 or config.read_database_url or config.migration_database_url:
+        print("Error: the local daemon requires its embedded pg0 database", file=sys.stderr)
         sys.exit(1)
 
     if is_daemon:
@@ -344,59 +275,8 @@ def main():
     _this = sys.modules[__name__]
     MemoryEngine = _this.MemoryEngine
     create_app = _this.create_app
-    load_extension = _this.load_extension
-    OperationValidatorExtension = _this.OperationValidatorExtension
-    TenantExtension = _this.TenantExtension
-
-    # Load operation validator extension if configured
-    operation_validator = load_extension("OPERATION_VALIDATOR", OperationValidatorExtension)
-    if operation_validator:
-        import logging
-
-        logging.info(f"Loaded operation validator: {operation_validator.__class__.__name__}")
-
-    # Load tenant extension if configured
-    tenant_extension = load_extension("TENANT", TenantExtension)
-    if tenant_extension:
-        import logging
-
-        logging.info(f"Loaded tenant extension: {tenant_extension.__class__.__name__}")
-
-    # When using workers or reload, we must use import string so each worker can import the app
-    use_import_string = args.workers > 1 or args.reload
-
-    # ...and in THAT mode the parent does not need to build the application at all: it hands
-    # uvicorn an import string, and every worker imports `remember_api.server:app` for itself, so
-    # the object built here was constructed and then thrown away — about ten seconds of work, a
-    # MemoryEngine and a whole FastAPI app, for nothing.
-    #
-    # This is a cleanup, NOT a fix for the worker respawn loop. It was first committed as that fix,
-    # on the theory that children inherited the parent's pools and locks across fork; uvicorn's
-    # multiprocess uses spawn, not fork, so nothing is inherited, and deploying this to dev left
-    # the loop exactly as it was. The real cause is that a spawn child rebuilds `__main__` by
-    # re-running `sys.argv[0]` — pip's console-script wrapper — whose top-level
-    # `from remember_api.main import main` pulls this package's `__init__` and the entire engine
-    # with it, before uvicorn's child bootstrap even starts. See docs/plans/recall-latency.md.
-    _memory = None
-    app = None
-
-    if not use_import_string:
-        # Create MemoryEngine (reads configuration from environment)
-        _memory = MemoryEngine(
-            operation_validator=operation_validator,
-            tenant_extension=tenant_extension,
-            run_migrations=config.run_migrations_on_startup,
-        )
-
-        # The extension context is set by MemoryEngine.__init__ on every extension it owns
-        # (tenant extension, operation validator), from the same context it gives the memory
-        # defense extension -- there is one per process, not one per construction site.
-
-        # Create FastAPI app
-        app = create_app(
-            memory=_memory,
-            initialize_memory=True,
-        )
+    _memory = MemoryEngine(run_migrations=config.run_migrations_on_startup)
+    app = create_app(memory=_memory, initialize_memory=True)
 
     # Check for uvloop/winloop availability
     loop_impl = "asyncio"
@@ -425,33 +305,17 @@ def main():
     # parameter, none of them a real defect. The types that matter here are argparse's, and
     # they are checked where the args are declared.
     uvicorn_config: dict[str, Any] = {
-        "app": "remember_api.server:app" if use_import_string else app,
+        "app": app,
         "host": args.host,
         "port": args.port,
         "log_level": args.log_level,
         "access_log": args.access_log,
-        "proxy_headers": args.proxy_headers,
+        "proxy_headers": False,
         "ws": "wsproto",  # Use wsproto instead of websockets to avoid deprecation warnings
         "loop": loop_impl,  # Explicitly set event loop implementation
         "timeout_keep_alive": 30,  # Exceed aiohttp's 15s client timeout so the client always closes first
         "timeout_graceful_shutdown": 5,  # Cap graceful shutdown at 5s; also enables force-kill on second Ctrl+C
     }
-
-    # Add optional parameters if provided
-    if args.reload:
-        uvicorn_config["reload"] = True
-    if args.workers > 1:
-        uvicorn_config["workers"] = args.workers
-    # Export the worker count so each child process can size its share of the CPU
-    # budget (admission limits are per worker). uvicorn spawns children that
-    # re-import the app, so the environment is the only channel that reaches them.
-    os.environ[ENV_WORKERS] = str(args.workers)
-    if args.forwarded_allow_ips:
-        uvicorn_config["forwarded_allow_ips"] = args.forwarded_allow_ips
-    if args.ssl_keyfile:
-        uvicorn_config["ssl_keyfile"] = args.ssl_keyfile
-    if args.ssl_certfile:
-        uvicorn_config["ssl_certfile"] = args.ssl_certfile
 
     # Print startup info (not in daemon mode)
     if not is_daemon:

@@ -6,7 +6,7 @@ for the most common operations (retain, recall, reflect, banks, mental models,
 directives).
 
 For operations not available as convenience methods — such as documents,
-entities, async operations, webhooks, and monitoring — use the low-level API
+entities, async operations, and monitoring — use the low-level API
 clients exposed as properties on the ``Remember`` instance (e.g.
 ``client.documents``, ``client.entities``, ``client.operations``).
 All low-level methods are async.

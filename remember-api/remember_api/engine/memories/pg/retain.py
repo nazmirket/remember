@@ -1,15 +1,4 @@
-"""The retain path's statements on `documents`, `chunks` and `memory_units`.
-
-The retain orchestrator used to issue these inline, each behind an
-``if store_owned … else <SQL>`` branch or on a Postgres-only path. They moved here
-verbatim: same statements, same order, same parameters, on the connection the caller
-already holds, so the transaction boundaries and round trips of a retain are unchanged.
-
-Four functions take the *pool* rather than a connection (``document_updated_at``,
-``recovery_chunk_hashes``, ``load_document_chunks``, ``current_document_hash``): their
-caller used to acquire a connection only for them, and a store that owns its memories must
-not acquire one at all.
-"""
+"""PostgreSQL statements used by the retain path."""
 
 from __future__ import annotations
 

@@ -2,63 +2,17 @@ from pathlib import Path
 
 from remember_api import _vector_index
 from remember_api._vector_index import (
-    SCANN_MIN_ROWS_FOR_AUTO_INDEX,
     ann_search_tuning_settings,
     bootstrap_extension,
     configured_vector_extension,
-    index_type_keyword,
     index_using_clause,
-    pg_extension_name,
-    should_defer_index_creation,
-    uses_per_bank_vector_indexes,
     validate_extension,
 )
-from remember_api.engine.retain import bank_utils
-from remember_api.migrations import _bootstrap_vector_extension_for_migrations
 from tests.pg_extension_fakes import FakePgConnection
-
-
-def test_validate_extension_accepts_scann():
-    assert validate_extension("scann") == "scann"
-    assert validate_extension("ScaNN") == "scann"
-
-
-def test_pg_extension_name_maps_scann_to_alloydb_extension():
-    assert pg_extension_name("scann") == "alloydb_scann"
-
-
-def test_index_using_clause_scann_uses_cosine_auto_mode():
-    clause = index_using_clause("scann")
-
-    assert "USING scann (embedding cosine)" in clause
-    assert "mode = 'AUTO'" in clause
 
 
 def test_index_using_clause_pgvector_matches_existing_clause():
     assert index_using_clause("pgvector") == "USING hnsw (embedding vector_cosine_ops)"
-
-
-def test_index_using_clause_vchord_uses_cosine_ops():
-    # vchordrq opclasses are bound 1:1 to operators in PostgreSQL; the engine
-    # uses `<=>` (cosine distance) everywhere, so the index must be declared
-    # with vector_cosine_ops or the planner falls back to a sequential scan.
-    assert index_using_clause("vchord") == "USING vchordrq (embedding vector_cosine_ops)"
-
-
-def test_index_type_keyword_scann_round_trips_pg_indexes_indexdef():
-    keyword = index_type_keyword("scann")
-    indexdef = "CREATE INDEX idx ON memory_units USING scann (embedding cosine) WITH (mode='AUTO')"
-
-    assert keyword == "scann"
-    assert keyword in indexdef.lower()
-
-
-def test_bootstrap_extension_scann_installs_vector_before_alloydb_scann():
-    conn = FakePgConnection()
-
-    bootstrap_extension(conn, "scann")
-
-    assert conn.created_extensions() == ["vector", "alloydb_scann"]
 
 
 def test_bootstrap_extension_skips_ddl_when_installed():
@@ -83,29 +37,6 @@ def test_bootstrap_extension_still_installs_when_missing():
     assert conn.created_extensions() == ["vector"]
 
 
-def test_migration_bootstrap_vchord_skips_pgvector_preflight():
-    conn = FakePgConnection()
-
-    _bootstrap_vector_extension_for_migrations(conn, "vchord")
-
-    assert conn.created_extensions() == ["vchord"]
-
-
-def test_migration_bootstrap_scann_uses_dispatcher_without_legacy_pgvector_check():
-    conn = FakePgConnection()
-
-    _bootstrap_vector_extension_for_migrations(conn, "scann")
-
-    assert conn.created_extensions() == ["vector", "alloydb_scann"]
-
-
-def test_scann_index_creation_defers_until_table_is_large_enough():
-    assert should_defer_index_creation("scann", 0)
-    assert should_defer_index_creation("scann", SCANN_MIN_ROWS_FOR_AUTO_INDEX - 1)
-    assert not should_defer_index_creation("scann", SCANN_MIN_ROWS_FOR_AUTO_INDEX)
-    assert not should_defer_index_creation("pgvector", 0)
-
-
 def test_ann_search_tuning_settings_pgvector_dispatches_hnsw_ef_search():
     # Looked up rather than compared as a whole tuple: the profiles also carry the
     # iterative-scan settings, which test_ann_iterative_scan.py covers. Pinning the
@@ -115,29 +46,14 @@ def test_ann_search_tuning_settings_pgvector_dispatches_hnsw_ef_search():
     assert dict(ann_search_tuning_settings("pgvector", kind="high_recall"))["hnsw.ef_search"] == "200"
 
 
-def test_ann_search_tuning_settings_vchord_leaves_probes_to_index_defaults():
-    # vchordrq.probes must match the index's build.internal.lists shape.
-    # VectorChord 1.1 supports per-index fallback parameters for this; a
-    # session GUC would override every index and can be invalid for listless or
-    # mixed-layout indexes.
-    assert ann_search_tuning_settings("vchord", kind="low_latency") == ()
-    assert ann_search_tuning_settings("vchord", kind="high_recall") == ()
-
-
-def test_ann_search_tuning_settings_returns_empty_for_backends_without_knob():
-    for ext in ("vchord", "pgvectorscale", "pg_diskann", "scann"):
-        assert ann_search_tuning_settings(ext, kind="low_latency") == ()
-        assert ann_search_tuning_settings(ext, kind="high_recall") == ()
-
-
 def test_configured_vector_extension_defaults_to_pgvector(monkeypatch):
     monkeypatch.delenv("REMEMBER_API_VECTOR_EXTENSION", raising=False)
     assert configured_vector_extension() == "pgvector"
 
 
 def test_configured_vector_extension_reads_env_and_lowercases(monkeypatch):
-    monkeypatch.setenv("REMEMBER_API_VECTOR_EXTENSION", "VChord")
-    assert configured_vector_extension() == "vchord"
+    monkeypatch.setenv("REMEMBER_API_VECTOR_EXTENSION", "PGVECTOR")
+    assert configured_vector_extension() == "pgvector"
 
 
 def test_configured_vector_extension_rejects_unknown_value(monkeypatch):
@@ -146,13 +62,6 @@ def test_configured_vector_extension_rejects_unknown_value(monkeypatch):
     monkeypatch.setenv("REMEMBER_API_VECTOR_EXTENSION", "bogus")
     with pytest.raises(ValueError):
         configured_vector_extension()
-
-
-def test_scann_does_not_use_per_bank_partial_indexes():
-    assert not uses_per_bank_vector_indexes("scann")
-    assert uses_per_bank_vector_indexes("pgvector")
-    assert uses_per_bank_vector_indexes("pgvectorscale")
-    assert uses_per_bank_vector_indexes("vchord")
 
 
 def test_alembic_vector_migrations_freeze_vector_sql_locally():
@@ -173,17 +82,6 @@ def test_alembic_vector_migrations_freeze_vector_sql_locally():
     for migration in frozen_migrations:
         text = (migration_dir / migration).read_text()
         assert "remember_api._vector_index" not in text
-
-
-class ScannConfig:
-    vector_extension = "scann"
-
-
-def test_vector_index_clause_is_none_for_scann(monkeypatch):
-    """ScaNN has no per-bank index layout, so callers get no USING clause to build with."""
-    monkeypatch.setattr(bank_utils, "get_config", lambda: ScannConfig())
-
-    assert bank_utils._vector_index_clause() is None
 
 
 class _ThresholdConfig:
@@ -247,3 +145,11 @@ def test_the_hysteresis_band_is_non_empty(monkeypatch):
 
     assert keep < build
     assert build - keep > 1, "no row count sits strictly inside the band"
+
+
+def test_other_vector_extensions_are_rejected():
+    import pytest
+
+    for extension in ("vchord", "pgvectorscale", "pg_diskann", "scann"):
+        with pytest.raises(ValueError):
+            validate_extension(extension)

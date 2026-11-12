@@ -5,7 +5,6 @@ Coordinates all retain pipeline modules to store memories efficiently.
 """
 
 import asyncio
-import dataclasses
 import hashlib
 import json
 import logging
@@ -24,15 +23,9 @@ from ...extensions.memory_defense import (
     apply_redaction,
     parse_policy,
 )
-from ...extensions.operation_validator import (
-    RetainFactsContext,
-    ReviewedFact,
-    resolve_reviews,
-)
 from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
 from ..bank_life import assert_job_bank_alive_on_pool
-from ..chunk_ids import build_chunk_id
 from ..db_utils import acquire_with_retry, retry_with_backoff
 from ..document_history import (
     DocumentEvent,
@@ -46,8 +39,7 @@ from ..memory_engine import count_tokens
 from ..schema import fq_table
 
 if TYPE_CHECKING:
-    from ...extensions.operation_validator import OperationValidatorExtension
-    from ...models import RequestContext
+    from ..llm_wrapper import LLMConfig
     from ..memories.base import EntityResolverHandle
     from .attachment_store import RetainAttachmentLoader
 
@@ -301,78 +293,6 @@ def _is_strict_append_of_stored_document(
     return len(sanitized_body) > len(stored_original_text) and sanitized_body.startswith(stored_original_text)
 
 
-async def _fire_memory_defense_webhook(
-    webhook_manager: Any,
-    *,
-    conn: Any,
-    schema: str | None,
-    bank_id: str,
-    operation_id: str | None,
-    document_id: str | None,
-    decision: DefenseDecision,
-) -> None:
-    """Fire a memory_defense.triggered webhook for a non-allow decision.
-
-    No-op when no webhook manager is wired or none is subscribed. Delivery
-    failures are swallowed so screening never blocks a retain.
-    """
-    if webhook_manager is None:
-        return
-    try:
-        from ...webhooks import (
-            MemoryDefenseEventData,
-            MemoryDefenseHit,
-            WebhookEvent,
-            WebhookEventType,
-        )
-
-        # Translate per-match raw dicts on the decision into MemoryDefenseHit
-        # entries on the wire. The decision's hits list is already fingerprinted
-        # by apply_redaction (the raw value never lands in hits, by contract),
-        # so this is purely a shape conversion. None when no per-hit data is
-        # available so receivers can distinguish "no preview info" from
-        # "scanned, nothing matched" (the latter wouldn't be a webhook delivery
-        # in the first place).
-        decision_hits = getattr(decision, "hits", None) or []
-        hits: list[MemoryDefenseHit] | None = [
-            MemoryDefenseHit(
-                detector=str(h.get("detector") or ""),
-                preview=str(h.get("preview") or ""),
-            )
-            for h in decision_hits
-            if h.get("detector") and h.get("preview")
-        ] or None
-
-        event = WebhookEvent(
-            event=WebhookEventType.MEMORY_DEFENSE_TRIGGERED,
-            bank_id=bank_id,
-            operation_id=operation_id or "",
-            status=decision.action.value,
-            timestamp=utcnow(),
-            data=MemoryDefenseEventData(
-                action=decision.action.value,
-                detector=decision.detector,
-                document_id=document_id,
-                matched_types=decision.matched_types or None,
-                message=decision.message or None,
-                hits=hits,
-                # Optional SIEM-enrichment fields populated by downstream
-                # extensions (e.g. remember-cloud's _CloudDefenseDecision
-                # subclass). Read via getattr so OSS doesn't need to know
-                # about extension subclasses. Combined with the manager's
-                # exclude_none serialization, missing values stay absent
-                # from the wire entirely rather than appearing as null.
-                severity=getattr(decision, "severity", None),
-                api_key_name=getattr(decision, "api_key_name", None),
-                memory_unit_id=getattr(decision, "memory_unit_id", None),
-                receipt_uri=getattr(decision, "receipt_uri", None),
-            ),
-        )
-        await webhook_manager.fire_event_with_conn(event, conn, schema=schema)
-    except Exception:
-        logger.warning("memory_defense webhook delivery failed", exc_info=True)
-
-
 async def _audit_memory_defense(
     audit_logger: Any,
     *,
@@ -458,9 +378,6 @@ def parse_datetime_flexible(value: Any, default_tz: tzinfo = UTC) -> datetime:
     raise TypeError(f"Expected datetime or string, got {type(value).__name__}")
 
 
-import asyncpg
-
-from ... import config as config_module
 from ..response_models import TokenUsage
 from ..stored_dates import is_placeholder_date
 from . import (
@@ -498,19 +415,6 @@ logger = logging.getLogger(__name__)
 # from None (not an append) and from any real content_hash, so the write gate
 # can tell "nobody had written this document yet" apart from "we didn't look".
 _APPEND_BASE_ABSENT = "__absent__"
-
-
-def _append_expectation(append_base_hash: str | None) -> str | None:
-    """The content hash an append's first store write must still find stored, for a store that
-    owns its documents: the hash the base read saw, ``""`` when that read found no document, and
-    ``None`` (unconditional) when this is not an append."""
-    if append_base_hash is None:
-        return None
-    return "" if append_base_hash == _APPEND_BASE_ABSENT else append_base_hash
-
-
-RetainOutboxCallback = Callable[[asyncpg.Connection], Awaitable[None]]
-RetainOutboxCallbackFactory = Callable[[list[RetainContentDict]], RetainOutboxCallback | None]
 
 
 @dataclass
@@ -657,7 +561,6 @@ async def _pre_resolve_phase1(
     config,
     log_buffer: list[str],
     skip_semantic_ann: bool = False,
-    skip_entity_resolution: bool = False,
 ) -> Phase1Result:
     """
     Phase 1: Run expensive read-heavy operations on a separate connection
@@ -669,19 +572,8 @@ async def _pre_resolve_phase1(
     Running these outside the transaction avoids holding row locks during
     slow reads, eliminating TimeoutErrors under concurrent load.
 
-    ``skip_entity_resolution`` is set for a store that resolves/mints entities itself
-    (``store_owned``): the store owns its own entity registry and resolves raw names
-    server-side inside its atomic retain, so the Postgres trigram scan + entity INSERTs here
-    are pure waste (and the whole point of the PG-free path is to not touch Postgres). We return an
-    empty entity result; the store-owned write path reconstructs raw names straight from the facts.
     """
     set_stage("retain.phase1.resolve")
-
-    if skip_entity_resolution:
-        # No Postgres. Semantic ANN is already deferred in streaming, so there is nothing read-heavy
-        # left to do — the store-owned write path carries entity NAMES to the server itself.
-        empty = EntityResolutionResult(resolved_entities=[], entity_to_unit=[], unit_to_entity_ids={})
-        return Phase1Result(entities=empty, semantic_ann_links=[])
 
     user_entities_per_content = {
         idx: UserEntities(entities=content.entities, resolve=content.resolve_entities)
@@ -843,7 +735,6 @@ async def _insert_facts_and_links(
     unit_to_entity_ids: dict[str, list[str]],
     semantic_ann_links: list[tuple],
     skip_semantic_links: bool = False,
-    outbox_callback=None,
     ops=None,
 ) -> list[list[str]]:
     """
@@ -929,453 +820,7 @@ async def _insert_facts_and_links(
     # an IndexError (see issue #1037).
     result_unit_ids = _map_results_to_contents(contents, processed_facts, unit_ids if unit_ids else [])
 
-    if outbox_callback is not None:
-        await outbox_callback(conn)
-
     return result_unit_ids
-
-
-def attempts_delta_retain(provider, bank_id: str, is_first_batch: bool) -> bool:
-    """Whether this bank may take the delta path (rewrite only the chunks that changed).
-
-    Delta runs only on the FIRST sub-batch; see the call site for why widening that breaks the
-    caller's per-slice bookkeeping. Otherwise every bank deltas, store-owned or not — a store-owned
-    delta is one `retain` whose replace names the chunks that moved.
-    """
-    return is_first_batch
-
-
-async def _streaming_session_retain(
-    *,
-    session,
-    bank_id: str,
-    batch_contents: list,
-    batch_extracted: list,
-    batch_processed: list,
-    batch_chunk_meta: list,
-    chunk_index_offset: int,
-    effective_doc_id: str,
-    combined_content: str,
-    content_hash: str | None,
-    merged_tags: list[str] | None,
-    retain_params: dict | None,
-    is_first_batch: bool,
-    doc_tracking_done: list[bool],
-    doc_replace_done: list[bool],
-    entity_resolver,
-    log_buffer: list[str],
-    attachment_filenames: dict[str, str] | None = None,
-) -> list[list[str]]:
-    """Hand one consumer batch to the store's retain session.
-
-    This is the whole of the engine's persistence work for a store that owns it: mint the unit ids,
-    label the facts, and pass the part along. What used to follow — a document write, a retain
-    write, and the round trips each costs — is the store's business now.
-
-    The unit ids are minted WITHOUT writing (`defer_index`), exactly as the previous path did, so
-    the caller still gets ids to map back to its inputs whether or not the session has committed
-    yet. That is deliberate: the ids are the engine's, and a retain that is still buffering has to
-    be able to answer with them.
-    """
-    from ..memories.base import RetainDocumentPart, build_fact_records, document_record_metadata
-    from . import entity_processing, fact_storage
-    from .entity_processing import UserEntities
-
-    chunk_id_by_index = {}
-    if batch_chunk_meta:
-        chunk_id_by_index = {
-            cm.chunk_index: build_chunk_id(bank_id, effective_doc_id, cm.chunk_index) for cm in batch_chunk_meta
-        }
-    for fact, processed_fact in zip(batch_extracted, batch_processed, strict=True):
-        processed_fact.document_id = effective_doc_id
-        if batch_chunk_meta and fact.chunk_index is not None:
-            cid = chunk_id_by_index.get(fact.chunk_index)
-            if cid:
-                processed_fact.chunk_id = cid
-
-    unit_ids = await fact_storage.insert_facts_batch(None, bank_id, batch_processed, ops=None, defer_index=True)
-    batch_result_ids = _map_results_to_contents(batch_contents, batch_processed, unit_ids or [])
-
-    records = list(build_fact_records(unit_ids or [], batch_processed, effective_doc_id))
-
-    # Entity NAMES, unresolved — the store resolves and mints. Built exactly as the path this
-    # replaces builds them, and it must be: `UserEntities` (not a bare list), because the merge
-    # reads `.entities` and `.resolve` off it, and `resolve` is what distinguishes a caller
-    # correcting a name from the extractor guessing one. The user-supplied entities on the content
-    # item are merged with whatever extraction found.
-    user_entities_per_content = {
-        idx: UserEntities(entities=content.entities, resolve=getattr(content, "resolve_entities", True))
-        for idx, content in enumerate(batch_contents)
-        if getattr(content, "entities", None)
-    }
-    prepared = entity_processing._prepare_facts_for_entity_processing(batch_processed, user_entities_per_content)
-    names = entity_processing.names_per_unit(unit_ids or [], prepared.entities_per_fact)
-    exact_names = entity_processing.names_per_unit(unit_ids or [], prepared.entities_per_fact, exact_only=True)
-
-    # Only the FIRST batch of a document may replace: a later one would tombstone the siblings this
-    # same retain just wrote. Latched here, where the replace is actually handed over.
-    replace_chunk_ids = None
-    if is_first_batch and not doc_replace_done[0]:
-        replace_chunk_ids = []  # empty list == replace the whole document
-        doc_replace_done[0] = True
-
-    await session.add(
-        RetainDocumentPart(
-            document_id=effective_doc_id,
-            document_body=combined_content,
-            content_hash=content_hash or "",
-            chunk_offset=chunk_index_offset,
-            # Facts only: the texts were handed over where they were still resident.
-            chunk_texts=[],
-            facts=records,
-            tags=list(merged_tags or []),
-            # Whichever part of a document reaches the session first supplies its record metadata,
-            # so this must be the WHOLE document's map, never just this batch's items' names.
-            metadata=document_record_metadata(retain_params, attachment_filenames),
-            entity_names=names,
-            exact_entity_names=exact_names,
-            replace_chunk_ids=replace_chunk_ids,
-        )
-    )
-    # Tracking is complete once the part is handed over, and NOT latching it is data loss rather
-    # than waste: the post-loop finalizer runs `store.delete_document`, which tombstones by
-    # document_id at a LATER seq than the session's entry — the same-entry sparing protects only a
-    # replace INSIDE the atomic write, not a separate tombstone after it. So the finalizer would
-    # delete the very memories this retain just wrote. Set even when a batch produced 0 units: the
-    # document is tracked regardless of what extraction found.
-    doc_tracking_done[0] = True
-
-    log_buffer.append(
-        f"[streaming] session facts doc={effective_doc_id} offset={chunk_index_offset} facts={len(records)}"
-    )
-    return batch_result_ids
-
-
-async def _streaming_store_owned_retain(
-    *,
-    provider,
-    pool,
-    bank_id: str,
-    batch_contents: list,
-    batch_extracted: list,
-    batch_processed: list,
-    batch_chunk_meta: list,
-    effective_doc_id: str,
-    config,
-    log_buffer: list[str],
-    is_first_batch: bool,
-    append_base_hash,
-    doc_tracking_done: list[bool],
-    doc_replace_done: list[bool],
-    p2_start: float,
-) -> list[list[str]]:
-    """The PG-free retain write for a store that owns entity resolution + atomicity.
-
-    ONE server-side retain does everything the old two-phase path split across an object-store
-    write and a Postgres connection phase:
-
-    * resolves each fact's raw entity NAMES (reconstructed here with no Postgres, exactly the merge
-      the PG resolver used to do) against the store's own entity registry, minting deterministic ids
-      for new names;
-    * writes the memories with their entity ids attached;
-    * on the document's first batch, tombstones the prior version of the document in the SAME atomic
-      entry (a re-retain replaces; the same-entry upserts are spared).
-
-    No connection is acquired and no ``documents``/``chunks``/``entities`` rows are written — the
-    store's single write is already atomic, so there is nothing for a second store to be atomic
-    *with*. Document/chunk BODIES were already sent to the store's document store by
-    ``_store_document_bodies`` (``store_owned``).
-
-    Known gaps, tracked for the follow-on phases:
-    * Concurrent same-document ownership/takeover is not serialized by a Postgres row lock; the
-      store's atomic replace gives last-writer-wins. The store-side content-hash compare-and-set
-      that guards an append rides the retain SESSION (``RetainDocumentPart.expect_content_hash``),
-      which this sessionless path does not use — so an append here does not verify its base, it
-      just does not replace.
-    * The transactional-outbox (webhook delivery) is not emitted here; the intended design is
-      at-least-once emission from the store, which replaces the Postgres outbox row.
-    """
-    # Tag each fact with its document + deterministic chunk id (mirrors
-    # chunk_storage.store_chunks_batch, so a fact's chunk_id matches its chunk metadata).
-    chunk_id_by_index = {}
-    if batch_chunk_meta:
-        chunk_id_by_index = {
-            cm.chunk_index: build_chunk_id(bank_id, effective_doc_id, cm.chunk_index) for cm in batch_chunk_meta
-        }
-    for fact, processed_fact in zip(batch_extracted, batch_processed):
-        processed_fact.document_id = effective_doc_id
-        if batch_chunk_meta and fact.chunk_index is not None:
-            cid = chunk_id_by_index.get(fact.chunk_index)
-            if cid:
-                processed_fact.chunk_id = cid
-
-    # Mint the unit ids WITHOUT writing (defer_index) — connection-free and Postgres-free; the
-    # single server-side retain below is the only write.
-    unit_ids = await fact_storage.insert_facts_batch(None, bank_id, batch_processed, ops=pool.ops, defer_index=True)
-    batch_result_ids = _map_results_to_contents(batch_contents, batch_processed, unit_ids if unit_ids else [])
-
-    if unit_ids:
-        # Reconstruct each fact's raw entity NAMES (LLM-extracted ∪ user-supplied), the exact merge
-        # the Postgres resolver did — but without touching Postgres. The server resolves/mints.
-        # Same shape the Postgres resolver builds (`UserEntities`, not a bare list): the entity
-        # merge reads `.entities` and `.resolve` off it, and `resolve` is what distinguishes a
-        # caller correcting a name from the extractor guessing one (#3479). Passing the raw list
-        # here made every store-owned retain that carried user entities fail on `.entities`.
-        user_entities_per_content = {
-            idx: UserEntities(entities=content.entities, resolve=getattr(content, "resolve_entities", True))
-            for idx, content in enumerate(batch_contents)
-            if getattr(content, "entities", None)
-        }
-        prepared = entity_processing._prepare_facts_for_entity_processing(batch_processed, user_entities_per_content)
-        unit_entity_names = entity_processing.names_per_unit(unit_ids, prepared.entities_per_fact)
-        exact_names = entity_processing.names_per_unit(unit_ids, prepared.entities_per_fact, exact_only=True)
-        # Replace the document's prior version only on its FIRST batch — later batches append to
-        # what batch 1 just wrote, and replacing again would tombstone those siblings.
-        #
-        # An append replaces too, and must. `retain_batch` prepends the stored body to this same
-        # first batch, so what is being written already covers the old content: leaving the prior
-        # version in place keeps a SECOND copy of every earlier fact, carrying the metadata of the
-        # retain that created it. That is what `update_mode="append"` then looked like — the old
-        # units surviving with stale metadata beside the new ones, where Postgres reprocesses the
-        # whole document and ends with one set. The exception here was load-bearing only while the
-        # prepend was broken (the base text was read from a SQL column a store-owned bank leaves
-        # NULL, so an append's first batch carried the NEW content alone and replacing would have
-        # dropped every earlier turn). With the base read from the store that holds it, the first
-        # batch is the whole document again and replace is the correct — and the only safe — move.
-        # `is_first_batch` is a parameter of the whole `retain_batch` call and stays True for every
-        # consumer batch a streaming retain produces, so it cannot express "the first batch of this
-        # document" on its own. `doc_tracking_done` is the latch that can — it is set below, after
-        # the first batch writes. Without it every batch replaced, tombstoning the siblings the
-        # comment above says must survive: measured on a ten-batch document, the retain returned 100
-        # unit ids and the bank held 10, the last batch's.
-        replace_id = effective_doc_id if (is_first_batch and not doc_replace_done[0]) else ""
-        # 0.0 → the server's default trigram-Jaccard threshold; a configured value overrides it.
-        threshold = float(getattr(config, "entity_similarity_threshold", 0.0) or 0.0)
-        resp = await provider.retain(
-            bank_id,
-            unit_ids,
-            batch_processed,
-            document_id=effective_doc_id,
-            unit_entity_names=unit_entity_names,
-            # Only when present, so a store that predates the argument keeps working for every
-            # retain that does not opt out — and fails loudly, not silently, for one that does.
-            **({"unit_exact_entity_names": exact_names} if exact_names else {}),
-            replace_document_id=replace_id,
-            resolve_threshold=threshold,
-            # The bank's recall toggles, on the WRITE path: a store that owns its index has no
-            # reason to build one for an arm this bank has switched off. Read from the resolved
-            # config on every retain, so a bank that changes either one is followed by the store
-            # rather than needing an out-of-band call.
-            enable_text_search=bool(getattr(config, "enable_text_search", True)),
-            enable_graph_retrieval=bool(getattr(config, "enable_graph_retrieval", True)),
-        )
-        # Latched HERE, where the replace was actually issued — not after the write, which also runs
-        # when this batch produced no units and therefore replaced nothing.
-        if replace_id:
-            doc_replace_done[0] = True
-        log_buffer.append(
-            f"[streaming] pg-free retain doc={effective_doc_id} units={len(unit_ids)} "
-            f"seq={resp.get('seq')} new_entities={resp.get('new_entities', 0)}"
-        )
-    # Mark the document tracked so the post-loop "no facts / not-yet-tracked" finalizer does NOT
-    # fire. That finalizer (a) writes a Postgres documents row and (b) runs handle_document_tracking,
-    # whose store.delete_document tombstones by document_id — which, landing at a LATER seq than this
-    # retain, would delete the very memories we just wrote (the same-entry sparing only protects the
-    # replace inside the store's atomic retain, not a later separate tombstone). The atomic retain
-    # above is the whole write, so tracking is complete here. Set it even when there were 0 units:
-    # the document is tracked regardless of what extraction produced.
-    doc_tracking_done[0] = True
-    logger.info(f"[streaming] Phase 2 (pg-free retain): {time.perf_counter() - p2_start:.3f}s")
-    return batch_result_ids
-
-
-async def _delta_store_owned_write(
-    *,
-    provider,
-    pool,
-    bank_id: str,
-    effective_doc_id: str,
-    config,
-    log_buffer: list,
-    entity_resolver,
-    contents_dicts: list,
-    delta_contents: list,
-    document_tags,
-    full_document_body,
-    extracted_facts: list,
-    processed_facts: list,
-    new_chunk_metadata,
-    delta_chunk_map: dict,
-    new_chunks_with_contents: dict,
-    existing_by_index: dict,
-    changed_indices: list,
-    removed_indices: list,
-    doc_hash_at_load: str | None,
-    doc_tags_at_load: list[str] | None = None,
-) -> "tuple[bool, list]":
-    """A store-owned bank's delta write: ONE `retain`, scoped to the chunks that moved.
-
-    Separate from `_try_delta_retain` so the contract can be tested directly: what matters here is
-    not only the result but that NO Postgres connection is held across it. The store write and the retain are both slow and both
-    connection-free; a delta that quietly took a connection would serialise every concurrent retain
-    on the pool.
-
-    Returns `(committed, result_unit_ids)`. `False` means the caller falls back to the streaming
-    retain — the document moved under this write, and the diff it planned is stale.
-    """
-    if full_document_body is not None:
-        combined_content = full_document_body
-    else:
-        combined_content = "\n".join([c.get("content", "") for c in contents_dicts])
-    retain_params, merged_tags = _build_retain_params(contents_dicts, document_tags)
-
-    # The fence, and it must be this batch's FIRST store write: a compare-and-set on the content
-    # hash this delta was planned against, so the fact write below only happens on top of the
-    # document it was diffed from. Postgres does not need this here because it locks the
-    # `documents` row in PHASE 2; a store-owned bank has no such row, which is why parallel appends
-    # would otherwise plan against the same base and overwrite each other with every call
-    # returning success.
-    try:
-        await _store_document_bodies(
-            bank_id=bank_id,
-            document_id=effective_doc_id,
-            combined_content=combined_content,
-            chunk_texts=[new_chunks_with_contents[i] for i in sorted(new_chunks_with_contents)],
-            merged_tags=merged_tags,
-            config=config,
-            retain_params=retain_params,
-            expect_content_hash=doc_hash_at_load,
-        )
-    except ConcurrentAppendConflict:
-        # `_store_document_bodies` already translates the store's StoreWriteConflict into
-        # this; catching the store exception instead lets it escape to the caller and turns
-        # a losable race into a failed request.
-        log_buffer.append(
-            f"[delta] Document {effective_doc_id} moved under this delta write — "
-            f"falling back to the full streaming retain"
-        )
-        logger.info("\n" + "\n".join(log_buffer) + "\n")
-        return False, []
-
-    # Deterministic chunk ids for the new/changed chunks, keyed by DOCUMENT position so a fact's
-    # chunk_id matches the chunk that carries it. `cm.chunk_index` is the position inside the delta;
-    # keyed by that, any changed chunk but the first wrote its facts with no chunk id, which the
-    # next re-send could not replace (#5919).
-    chunk_id_by_index = {
-        (idx := delta_chunk_map.get(cm.chunk_index, cm.chunk_index)): build_chunk_id(bank_id, effective_doc_id, idx)
-        for cm in (new_chunk_metadata or [])
-    }
-    for ef, pf in zip(extracted_facts, processed_facts):
-        pf.document_id = effective_doc_id
-        if ef.chunk_index is not None:
-            original_idx = delta_chunk_map.get(ef.chunk_index, ef.chunk_index)
-            cid = chunk_id_by_index.get(original_idx)
-            if cid:
-                pf.chunk_id = cid
-
-    # The chunks whose prior facts must go: the ones that CHANGED and the ones REMOVED. A
-    # removed chunk has no replacement upsert to supersede it, so naming it is the only
-    # thing that takes it out — the case a "replace only what I re-sent" scope would miss.
-    replace_chunk_ids = [
-        existing_by_index[idx].chunk_id
-        for idx in list(changed_indices) + list(removed_indices)
-        if idx in existing_by_index
-    ]
-
-    # The observations standing on the facts we are about to retire have to go with them, and
-    # BEFORE the replace: consolidation batches are built from facts, so once the sources are gone
-    # an observation derived from them is never selected again and stays recallable as stale
-    # knowledge from the previous version of the document (issue #3294). The SQL delta gets this
-    # from its own cascade in `chunk_storage`; a store-owned delta retires its facts through the
-    # replace below instead, so this is the only place that can catch them.
-    if replace_chunk_ids:
-        outgoing = await chunk_storage.memory_ids_for_chunks(None, bank_id, replace_chunk_ids, store=provider)
-        if outgoing:
-            swept = await fact_storage.delete_stale_observations_for_memories(None, bank_id, outgoing, ops=pool.ops)
-            if swept:
-                log_buffer.append(f"[delta] swept {swept} observation(s) whose sources are being replaced")
-
-    # Mint the ids without writing; the retain below is the only fact write.
-    unit_ids = await fact_storage.insert_facts_batch(None, bank_id, processed_facts, ops=pool.ops, defer_index=True)
-    result_unit_ids = _map_results_to_contents(delta_contents, processed_facts, unit_ids if unit_ids else [])
-
-    if unit_ids or replace_chunk_ids:
-        unit_entity_names: dict[str, list[str]] = {}
-        exact_names: dict[str, list[str]] = {}
-        if unit_ids:
-            # Raw entity NAMES, the same merge the Postgres resolver performs — the server
-            # resolves and mints them, which is what owning the retain means.
-            user_entities_per_content = {
-                idx: UserEntities(
-                    entities=content.entities,
-                    resolve=getattr(content, "resolve_entities", True),
-                )
-                for idx, content in enumerate(delta_contents)
-                if getattr(content, "entities", None)
-            }
-            prepared = entity_processing._prepare_facts_for_entity_processing(
-                processed_facts, user_entities_per_content
-            )
-            unit_entity_names = entity_processing.names_per_unit(unit_ids, prepared.entities_per_fact)
-            exact_names = entity_processing.names_per_unit(unit_ids, prepared.entities_per_fact, exact_only=True)
-
-        threshold = float(getattr(config, "entity_similarity_threshold", 0.0) or 0.0)
-        resp = await provider.retain(
-            bank_id,
-            unit_ids or [],
-            processed_facts if unit_ids else [],
-            document_id=effective_doc_id,
-            unit_entity_names=unit_entity_names,
-            # Only when present — see the streaming path above.
-            **({"unit_exact_entity_names": exact_names} if exact_names else {}),
-            # Scoped: only the chunks named above are superseded. Empty `replace_chunk_ids`
-            # would be a scope of NOTHING rather than of everything, so when nothing changed
-            # this is a plain append and names no document to replace.
-            replace_document_id=effective_doc_id if replace_chunk_ids else "",
-            replace_chunk_ids=replace_chunk_ids or None,
-            resolve_threshold=threshold,
-            # The bank's current recall toggles, same as the streaming path above: a delta retain
-            # is still a write, and a store that owns its index should not build one for an arm
-            # this bank has switched off.
-            enable_text_search=bool(getattr(config, "enable_text_search", True)),
-            enable_graph_retrieval=bool(getattr(config, "enable_graph_retrieval", True)),
-        )
-        log_buffer.append(
-            f"[delta] store-owned retain doc={effective_doc_id} units={len(unit_ids or [])} "
-            f"replaced_chunks={len(replace_chunk_ids)} seq={resp.get('seq')} "
-            f"new_entities={resp.get('new_entities', 0)}"
-        )
-
-    # The facts on UNCHANGED chunks were not re-written above, so they still carry the previous
-    # retain's tags, metadata and observation scoping. The SQL delta syncs them with this same call
-    # inside its transaction; without it a store-owned bank ended a partial re-retain with a
-    # document whose units disagreed on their labels by whether their chunk happened to change.
-    # After the retain, not before: the units it is about to replace would only be patched to be
-    # thrown away. Skipped when no chunk survived, since then every unit was just written with the
-    # current labels and the relabel's scan of the document would find nothing to patch.
-    if set(existing_by_index) - set(changed_indices) - set(removed_indices):
-        async with acquire_with_retry(pool) as conn:
-            async with conn.transaction():
-                await fact_storage.update_memory_units_metadata_and_tags(
-                    conn,
-                    bank_id,
-                    effective_doc_id,
-                    merged_tags,
-                    retain_params.get("metadata", {}),
-                    observation_scopes=retain_params.get("observation_scopes"),
-                    label_tag_keys=label_tag_keys(getattr(config, "entity_labels", None)),
-                    previous_document_tags=doc_tags_at_load,
-                    ops=pool.ops,
-                )
-
-    log_buffer.append(f"DELTA RETAIN COMPLETE (store-owned): {len(processed_facts)} new units")
-    logger.info("\n" + "\n".join(log_buffer) + "\n")
-    try:
-        async with _timing.timed("entity.stats"):
-            await entity_resolver.flush_pending_stats()
-    except Exception:
-        logger.warning("Entity stats flush failed — retrieval unaffected", exc_info=True)
-    return True, result_unit_ids
 
 
 async def _extract_and_embed(
@@ -1390,7 +835,6 @@ async def _extract_and_embed(
     operation_id: str | None = None,
     schema: str | None = None,
     attachment_loader: "RetainAttachmentLoader | None" = None,
-    fact_filter: "RetainFactFilter | None" = None,
     vlm_config: "LLMConfig | None" = None,
     document_id: str | None = None,
 ) -> _EmbeddedExtraction:
@@ -1428,13 +872,6 @@ async def _extract_and_embed(
         for fact in extracted_facts:
             fact.fact_type = fact_type_override
 
-    # Reviewed before embedding, so a dropped memory costs no embedding and every later step
-    # (entities, links, observations) sees only what the extension kept.
-    if fact_filter is not None:
-        extracted_facts = await fact_filter.review(extracted_facts, document_id)
-        if not extracted_facts:
-            return _EmbeddedExtraction(extracted_facts, [], chunks, usage)
-
     step_start = time.perf_counter()
     augmented_texts = embedding_processing.augment_texts_with_dates(extracted_facts, format_date_fn)
     async with _timing.timed("embed"):
@@ -1444,48 +881,6 @@ async def _extract_and_embed(
     fact_batch = _process_extracted_facts(extracted_facts, embeddings)
 
     return _EmbeddedExtraction(fact_batch.extracted_facts, fact_batch.processed_facts, chunks, usage)
-
-
-@dataclass(frozen=True)
-class RetainFactFilter:
-    """The extension that reviews this retain's extracted memories (``filter_retain_facts``)."""
-
-    validator: "OperationValidatorExtension"
-    bank_id: str
-    request_context: "RequestContext"
-
-    async def review(self, facts: list[ExtractedFact], document_id: str | None) -> list[ExtractedFact]:
-        """The facts the extension keeps, with the tags it gave them."""
-        ctx = RetainFactsContext(
-            bank_id=self.bank_id,
-            document_id=document_id,
-            request_context=self.request_context,
-            facts=[
-                ReviewedFact(text=f.fact_text, fact_type=f.fact_type, tags=list(f.tags), entities=list(f.entities))
-                for f in facts
-            ],
-        )
-        reviews = resolve_reviews(await self.validator.filter_retain_facts(ctx), len(facts), "filter_retain_facts")
-        kept: list[ExtractedFact] = []
-        retained_index_by_original: list[int | None] = []
-        for fact, review in zip(facts, reviews, strict=True):
-            if not review.keep:
-                retained_index_by_original.append(None)
-                continue
-            if review.tags is not None:
-                fact.tags = list(review.tags)
-            retained_index_by_original.append(len(kept))
-            kept.append(fact)
-        if len(kept) < len(facts):
-            # Causal relations point at fact ordinals: drop the ones into a dropped fact and
-            # renumber the rest, as _process_extracted_facts does for degenerate facts.
-            for fact, relations in zip(
-                kept,
-                _remap_causal_relations([f.causal_relations for f in facts], retained_index_by_original),
-                strict=True,
-            ):
-                fact.causal_relations = relations
-        return kept
 
 
 def _remap_causal_relations(
@@ -1584,21 +979,15 @@ async def retain_batch(
     document_tags: list[str] | None = None,
     operation_id: str | None = None,
     schema: str | None = None,
-    outbox_callback: RetainOutboxCallback | None = None,
-    outbox_callback_factory: RetainOutboxCallbackFactory | None = None,
     db_semaphore: "asyncio.Semaphore | None" = None,
     full_document_body: str | None = None,
     document_body_hash: str | None = None,
     chunk_index_offset: int = 0,
-    body_accum: "dict[str, DocumentBodyAccumulator] | None" = None,
-    retain_session=None,
     document_prefetch: "dict[str, dict] | asyncio.Task | None" = None,
     progress_callback: "Callable[..., Awaitable[None]] | None" = None,
-    webhook_manager: Any = None,
     memory_defense_extension: "MemoryDefenseExtension | None" = None,
     audit_logger: Any = None,
     attachment_loader: "RetainAttachmentLoader | None" = None,
-    fact_filter: "RetainFactFilter | None" = None,
     vlm_config: "LLMConfig | None" = None,
 ) -> RetainBatchResult:
     """
@@ -1624,19 +1013,8 @@ async def retain_batch(
         didn't dedup (caller should treat as "bill full submitted content").
         See ``RetainResult.processed_content_tokens`` for details.
     """
-    # Before anything is written. A retain is the one operation that writes to BOTH stores —
-    # documents, chunks and entities go to SQL through paths that never touch the memories
-    # interface — so a store that needs a bank closed to writes (a backend cutover) cannot enforce
-    # it from its own methods alone. Checked here, at the single entry every retain passes through,
-    # rather than at each of the writes it fans out into.
-    from ..memories import get_memories
-
-    await get_memories().assert_writable(bank_id)
     # A retain job whose bank was deleted since it started stops here, before its writes would
     # recreate the bank's storage (#6344).
-    # ponytail: one check per pass. A delete landing mid-pass still fails the SQL writes on their
-    # foreign keys, but a store that owns its storage can take that pass's writes; check per
-    # document write if that window shows up.
     await assert_job_bank_alive_on_pool(pool, bank_id)
     # Before extraction: an embeddings outage found after the LLM pass wastes the whole
     # extraction bill, on every retry (issue #5999). Free unless the last embedding call failed.
@@ -1691,22 +1069,6 @@ async def retain_batch(
             #
             # A miss is as meaningful as a hit here (the document is new), so the prefetch records
             # BOTH: the dict is what was found, and `prefetched` is the fact that we asked.
-            if retain_session is not None and document_prefetch is None:
-                from ..memories import get_memories as _gm_prefetch
-
-                # Started, not awaited. Delta needs the answer before it decides which chunks to
-                # extract, but chunking the new content does not -- and on a store whose cost is
-                # round trips, this read is a whole one on the critical path of every retain.
-                # Handing the TASK down lets the groups chunk while it is in flight; each awaits it
-                # where the answer is actually consumed. Awaiting a task more than once is fine,
-                # and the concurrent groups do exactly that.
-                async def _prefetch():
-                    async with _timing.timed("delta.read"):
-                        return await _gm_prefetch().get_document_records(
-                            bank_id=bank_id, document_ids=sorted(groups.keys())
-                        )
-
-                document_prefetch = asyncio.create_task(_prefetch())
 
             # Without sub-batching there is nothing else running these in parallel, so the groups
             # do it themselves. Hardcoded rather than a knob: it is not a capacity dial, it is how
@@ -1722,10 +1084,6 @@ async def retain_batch(
                     return await _one_group(doc_key, group_dicts, group_contents)
 
             async def _one_group(doc_key, group_dicts, group_contents):
-                group_outbox_callback = (
-                    outbox_callback_factory(group_dicts) if outbox_callback_factory is not None else outbox_callback
-                )
-
                 group_result = await retain_batch(
                     pool=pool,
                     embeddings_model=embeddings_model,
@@ -1741,13 +1099,10 @@ async def retain_batch(
                     document_tags=document_tags,
                     operation_id=operation_id,
                     schema=schema,
-                    outbox_callback=group_outbox_callback,
-                    outbox_callback_factory=outbox_callback_factory,
                     db_semaphore=db_semaphore,
                     full_document_body=full_document_body,
                     chunk_index_offset=chunk_index_offset,
                     progress_callback=progress_callback,
-                    webhook_manager=webhook_manager,
                     memory_defense_extension=memory_defense_extension,
                     audit_logger=audit_logger,
                     # Forward the accumulator. Without it every document in a multi-document
@@ -1756,15 +1111,12 @@ async def retain_batch(
                     # document case, and a bulk ingest (the case it matters most for) issued one
                     # record write per document. Each of those is an append to the namespace's one
                     # WAL head, which concurrent appends contend for.
-                    body_accum=body_accum,
-                    retain_session=retain_session,
                     document_prefetch=document_prefetch,
                     # Forward the attachment loader and vision model config. Without them, the
                     # recursive sub-batches reset them to None, causing fact extraction to skip
                     # resolving inline attachment placeholders into prompt blocks (leaving raw
                     # placeholders in the prompt) and dropping multimodal vision routing.
                     attachment_loader=attachment_loader,
-                    fact_filter=fact_filter,
                     vlm_config=vlm_config,
                 )
                 # Returned rather than merged in place: the groups may run concurrently, and the
@@ -1787,63 +1139,52 @@ async def retain_batch(
     # --- Memory Defense pre-extraction screening ---
     # Delegate to the loaded extension. `config` is a resolved RememberConfig
     # object at this point (see _retain_batch_async_internal). On a non-allow
-    # decision we redact in place or drop the item, and fire a
-    # memory_defense.triggered webhook when one is configured.
+    # decision we redact in place or drop the item.
     _policy = parse_policy(config.memory_defense)
     _blocked_violations: list[BlockedViolation] = []
     original_count = len(contents)
     surviving_indices: list[int] | None = None
 
     if memory_defense_extension is not None and _policy.enabled:
-        async with acquire_with_retry(pool) as _defense_conn:
-            for _idx, _content in enumerate(contents):
-                # Prefer the per-item document_id over the batch-level value so
-                # the decision and webhook carry the document the caller
-                # submitted, not whichever doc_id the batch happens to share.
-                _item_doc_id = contents_dicts[_idx].get("document_id") or document_id
+        for _idx, _content in enumerate(contents):
+            # Prefer the per-item document_id over the batch-level value so
+            # the decision carries the document the caller
+            # submitted, not whichever doc_id the batch happens to share.
+            _item_doc_id = contents_dicts[_idx].get("document_id") or document_id
 
-                _decision = await memory_defense_extension.screen(
-                    policy=_policy,
-                    bank_id=bank_id,
-                    document_id=_item_doc_id,
-                    content=_content.content,
-                    tags=_content.tags,
-                )
+            _decision = await memory_defense_extension.screen(
+                policy=_policy,
+                bank_id=bank_id,
+                document_id=_item_doc_id,
+                content=_content.content,
+                tags=_content.tags,
+            )
 
-                if _decision.action is DefenseAction.ALLOW:
-                    continue
+            if _decision.action is DefenseAction.ALLOW:
+                continue
 
-                if _decision.action is DefenseAction.REDACT:
-                    _redacted = _decision.redacted_content or _content.content
-                    _content.content = _redacted
-                    # Mirror the redaction into the raw dict so the document
-                    # body persisted further down the pipeline also stores the
-                    # redacted text, not the verbatim secret.
-                    contents_dicts[_idx]["content"] = _redacted
-                elif _decision.action is DefenseAction.BLOCK:
-                    _blocked_violations.append(
-                        BlockedViolation(
-                            index=_idx,
-                            detector=_decision.detector,
-                            message=_decision.message,
-                        )
+            if _decision.action is DefenseAction.REDACT:
+                _redacted = _decision.redacted_content or _content.content
+                _content.content = _redacted
+                # Mirror the redaction into the raw dict so the document
+                # body persisted further down the pipeline also stores the
+                # redacted text, not the verbatim secret.
+                contents_dicts[_idx]["content"] = _redacted
+            elif _decision.action is DefenseAction.BLOCK:
+                _blocked_violations.append(
+                    BlockedViolation(
+                        index=_idx,
+                        detector=_decision.detector,
+                        message=_decision.message,
                     )
+                )
 
-                await _fire_memory_defense_webhook(
-                    webhook_manager,
-                    conn=_defense_conn,
-                    schema=schema,
-                    bank_id=bank_id,
-                    operation_id=operation_id,
-                    document_id=_item_doc_id,
-                    decision=_decision,
-                )
-                await _audit_memory_defense(
-                    audit_logger,
-                    bank_id=bank_id,
-                    document_id=_item_doc_id,
-                    decision=_decision,
-                )
+            await _audit_memory_defense(
+                audit_logger,
+                bank_id=bank_id,
+                document_id=_item_doc_id,
+                decision=_decision,
+            )
 
     if _blocked_violations:
         # All items blocked → raise so the HTTP layer can return 422.
@@ -1939,15 +1280,11 @@ async def retain_batch(
     # ``_APPEND_BASE_ABSENT`` distinguishes "read a document that wasn't there"
     # from "not an append", which None alone cannot express.
     #
-    # The same hash is what serializes appends on a store that owns its documents: there is no row
-    # to lock, so the store's write is a compare-and-set on it (``_append_expectation``).
     append_base_hash: str | None = None
     is_append = update_mode == "append" and bool(effective_doc_id) and is_first_batch
 
     if is_append:
-        # The base text comes from whichever store HOLDS it: the SQL `documents` row, or the
-        # record of a store that owns the document store (whose SQL row, when there was one,
-        # kept `original_text` NULL — reading it there silently turned the append into a replace).
+        # Read the current document text and hash together for the append check.
         from ..memories import get_memories
 
         async with acquire_with_retry(pool) as conn:
@@ -2079,27 +1416,7 @@ async def retain_batch(
     # extra ids are dropped), `chunk_index_offset` advances by the splitter's per-slice count rather
     # than by what a delta wrote, and a brand-new oversized document would extract its whole tail in
     # one step — the bound the sub-batch splitting exists to keep.
-    # A store that owns its whole retain has exactly ONE write path: `provider.retain()`, via
-    # `_streaming_store_owned_retain`. It deliberately does NOT delta.
-    #
-    # Delta cannot be expressed as a Retain today. Retain replaces a document wholesale
-    # (`replace_document_id` tombstones the document's prior-seq facts) whereas delta rewrites only
-    # the chunks that changed, so routing delta through it would need a chunk-scoped replace the RPC
-    # has no way to say. The alternative — writing the new facts with `Write` and tombstoning the
-    # superseded ones separately — is what this path used to do, and it is precisely the second
-    # retain operation being removed here: two RPCs, non-atomic, and bypassing the server-side
-    # entity resolution that owning the retain is for.
-    #
-    # It had also stopped working. The store-owned delta write was reached only when the store
-    # minted a cross-store write-group handle, and a store whose single write is already atomic
-    # mints none. So a store-owned bank fell through to the Postgres branch below, which resolves
-    # entities against Postgres and takes its document lock on a `documents` row that store-owned
-    # banks no longer have: `current_hash` comes back None, the stale-chunk guard never fires, and
-    # delta ran with no concurrency control at all.
-    from ..memories import get_memories as _get_memories_delta
-
-    _delta_provider = _get_memories_delta()
-    if not force_reextract and attempts_delta_retain(_delta_provider, bank_id, is_first_batch):
+    if not force_reextract and is_first_batch:
         with track_observation_changes() as delta_changes:
             delta_result = await _try_delta_retain(
                 pool,
@@ -2118,7 +1435,6 @@ async def retain_batch(
                 elapsed_start,
                 operation_id,
                 schema,
-                outbox_callback,
                 db_semaphore,
                 document_prefetch=document_prefetch,
                 full_document_body=full_document_body,
@@ -2126,7 +1442,6 @@ async def retain_batch(
                 document_body_hash=document_body_hash,
                 append_base_hash=append_base_hash,
                 attachment_loader=attachment_loader,
-                fact_filter=fact_filter,
                 vlm_config=vlm_config,
             )
         if delta_result is not None:
@@ -2203,19 +1518,15 @@ async def retain_batch(
             chunk_batch_size=chunk_batch_size,
             operation_id=operation_id,
             schema=schema,
-            outbox_callback=outbox_callback,
             db_semaphore=db_semaphore,
             full_document_body=full_document_body,
             document_body_hash=document_body_hash,
             chunk_index_offset=chunk_index_offset,
-            body_accum=body_accum,
-            retain_session=retain_session,
             document_prefetch=document_prefetch,
             progress_callback=progress_callback,
             append_base_hash=append_base_hash,
             force_reextract=force_reextract,
             attachment_loader=attachment_loader,
-            fact_filter=fact_filter,
             vlm_config=vlm_config,
         )
     await _record_retain_event(
@@ -2329,90 +1640,6 @@ async def _run_final_semantic_ann(
 # ---------------------------------------------------------------------------
 
 
-async def _store_document_bodies(
-    *,
-    bank_id: str,
-    document_id: str,
-    combined_content: str,
-    chunk_texts: list[str],
-    merged_tags: list[str] | None,
-    config: Any,
-    content_hash: str | None = None,
-    retain_params: dict | None = None,
-    chunk_index_offset: int = 0,
-    expect_content_hash: str | None = None,
-    attachment_filenames: dict[str, str] | None = None,
-) -> None:
-    """Route a document's bulky bodies — its extracted text and ordered chunk texts — to the
-    store's dedicated document store, when the store owns one. No-op for Postgres.
-
-    Content-addressed and idempotent, so this is safe to call up front, before the facts commit:
-    a re-ingest re-uploads only the bodies whose hash changed, and a retain that later rolls back
-    leaves only orphan bodies the store's sweep reclaims (they are referenced by no committed
-    record). Cold, never-searched, key-based — see docs/documents-chunks.md.
-
-    ``retain_params`` rides along in the record's metadata. It used to be true that "the SQL
-    ``documents`` row still carries the small metadata" — it is not, for a store that owns the
-    whole retain: there is no SQL row at all, so anything not carried here is simply lost, and
-    ``get_document`` returned null ``retain_params`` / ``document_metadata`` /
-    ``observation_scopes`` for such a bank. The store's metadata map is ``string -> string``, so
-    the params are carried as one JSON value rather than flattened.
-
-    ``attachment_filenames`` rides the same map as the store's own copy of the names. The
-    authority is ``attachments.filename``, which every bank writes at the ingress; this is
-    what the paths that replay stored text (append, reprocess) restate from.
-    """
-    from ..memories import get_memories
-    from ..memories.base import StoreWriteConflict, document_record_metadata
-
-    store = get_memories()
-    if not store.store_owned_for(bank_id):
-        return
-    # `put_document` REPLACES a document's chunk list — it takes the ordered texts whole, because
-    # the store packs them into one object. A sub-batched retain calls this once per sub-batch
-    # with only that slice's chunks, so every call after the first replaced the document's chunks
-    # with its own few and the body ended up covered by one slice (issue #1888's store-side twin:
-    # the SQL rows were already offset by `chunk_index_offset`, the store's packed object was not).
-    # Restore the prefix the earlier sub-batches stored, so what goes in is the whole document.
-    # Sub-batches run sequentially, so [0, offset) is complete by the time this runs.
-    chunk_texts = list(chunk_texts)
-    if chunk_index_offset > 0:
-        prior = await store.get_chunk_texts(bank_id=bank_id, refs=[(document_id, i) for i in range(chunk_index_offset)])
-        # A missing prior chunk becomes "" rather than being dropped: the list is positional, and
-        # shortening it would shift every following chunk's index — silent corruption in place of
-        # one absent chunk.
-        chunk_texts = [t or "" for t in prior] + chunk_texts
-    # The record's content_hash must equal what the SQL documents row stores, so a read is
-    # consistent whichever it comes from: sanitize + sha256 the same combined_content. The
-    # streaming path already has it (passes it in); delta computes it here.
-    if content_hash is None:
-        _sanitized = fact_extraction._sanitize_text(combined_content) or ""
-        content_hash = hashlib.sha256(_sanitized.encode()).hexdigest()
-    # `expect_content_hash` makes this a compare-and-set on the document (the append case: the body
-    # being written was derived from the stored one). The store reports a lost race as
-    # `StoreWriteConflict`, which is exactly the retain-level `ConcurrentAppendConflict` the caller
-    # already knows how to redo — the Postgres path raises it from its own document-row gate.
-    # Translating here keeps the two stores' append semantics the same instead of one of them being
-    # last-writer-wins.
-    try:
-        await store.put_document(
-            bank_id=bank_id,
-            document_id=document_id,
-            content_hash=content_hash,
-            # Honour the bank's store_document_text on the body AND the chunks, as the SQL path
-            # does: a bank that keeps no text keeps none, and the store still records each chunk's
-            # hash so delta retain can diff a re-send against it (#6249).
-            original_text=combined_content if config.store_document_text else None,
-            chunk_texts=list(chunk_texts),
-            keep_chunk_text=config.store_document_text,
-            tags=list(merged_tags or []),
-            metadata=document_record_metadata(retain_params, attachment_filenames),
-            expect_content_hash=expect_content_hash,
-        )
-    except StoreWriteConflict as e:
-        raise ConcurrentAppendConflict(str(e)) from e
-
-
 # A document body is flushed once its unwritten chunk text has at least DOUBLED since the last
 # flush. Doubling from the FIRST slice makes the number of writes O(log chunks) and the total bytes
 # written ~2x the document, where flushing per sub-batch is O(chunks^2).
@@ -2422,187 +1649,6 @@ async def _store_document_bodies(
 # memories with no body at all — worse than the per-sub-batch writes this replaces, which at least
 # left a partial body. Doubling from the first slice keeps the guarantee the size claim rests on:
 # an interruption never loses more than half of what had accumulated.
-
-
-@dataclasses.dataclass
-class DocumentBodyMeta:
-    """What a document-body write needs, beyond the chunk texts themselves.
-
-    Every sub-batch of a document carries the same values here — `combined_content` is the WHOLE
-    document on each of them, so the content hash matches too — so whichever sub-batch arrives
-    first fills this in and the rest reuse it.
-    """
-
-    bank_id: str
-    content_hash: str | None
-    combined_content: str
-    merged_tags: list[str] | None
-    config: Any
-    retain_params: dict | None
-    expect_content_hash: str | None
-    attachment_filenames: dict[str, str] | None = None
-
-
-@dataclasses.dataclass
-class DocumentBodyAccumulator:
-    """One document's chunk texts as its sub-batches produce them, plus what has been written.
-
-    A dataclass rather than a dict so the shape is checkable: `slices` is positional (offset ->
-    that sub-batch's chunks), `meta` carries what the write needs and is filled by whichever
-    sub-batch gets there first, and `flushed_bytes` is how much of the prefix is already durable.
-    """
-
-    slices: dict[int, list[str]] = dataclasses.field(default_factory=dict)
-    meta: DocumentBodyMeta | None = None
-    flushed_bytes: int = 0
-    lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
-
-
-def _contiguous_prefix(slices: dict[int, list[str]]) -> list[str]:
-    """The document's chunk texts from index 0, stopping at the first gap.
-
-    Sub-batches may complete out of order, so the accumulator can hold slice 0 and slice 2 while
-    slice 1 is still in flight. The chunk list is POSITIONAL — `put_document` takes it whole and
-    index N is chunk N — so writing across a gap would shift every following chunk. Writing only
-    the gap-free prefix is exactly what a sequential retain would have written by that point.
-    """
-    out: list[str] = []
-    for offset in sorted(slices):
-        if offset != len(out):
-            break
-        out.extend(slices[offset])
-    return out
-
-
-async def _document_body_write_args(acc: DocumentBodyAccumulator, document_id: str, *, force: bool) -> dict | None:
-    """The arguments for this document's next body write, or None if it does not need one.
-
-    Split out from the write itself so the end-of-retain flush can collect several documents'
-    writes and issue them as ONE store call, while the incremental (doubling) flush during the
-    retain still writes as it goes. Both compute the write here, so they cannot diverge.
-
-    Advances `flushed_bytes` and collapses the slice map exactly as writing would: the caller is
-    expected to perform the returned write.
-    """
-    meta = acc.meta
-    if not meta:
-        return None
-    async with acc.lock:
-        chunks = _contiguous_prefix(acc.slices)
-        if not chunks:
-            return None
-        pending = sum(len(c) for c in chunks)
-        # Batching mode: hold every write for the end-of-retain flush, which issues them as ONE
-        # store call. Without this the first slice of each document writes immediately and the
-        # final flush has nothing left to batch. See `retain_batch_document_writes` for when this
-        # is the right trade and what it gives up.
-        if not force and config_module.get_config().retain_batch_document_writes:
-            return None
-        # "Nothing new" holds regardless of `force`. force means "write the remainder even though
-        # it has not doubled", not "write again what is already durable" -- and the end-of-retain
-        # flush passes force=True for every document, so without this it re-issued a record write
-        # per document whose body was already fully written. The bodies dedup on hash, but the
-        # RECORD write is still an append to the namespace's WAL head.
-        if pending <= acc.flushed_bytes:
-            return None
-        if not force and pending < max(1, 2 * acc.flushed_bytes):
-            return None
-        args = dict(
-            bank_id=meta.bank_id,
-            document_id=document_id,
-            content_hash=meta.content_hash,
-            combined_content=meta.combined_content,
-            chunk_texts=chunks,
-            merged_tags=meta.merged_tags,
-            config=meta.config,
-            retain_params=meta.retain_params,
-            attachment_filenames=meta.attachment_filenames,
-            # The append CAS belongs to the write derived from the stored base, which is the first
-            # one this retain issues; later flushes build on what it wrote.
-            expect_content_hash=meta.expect_content_hash if acc.flushed_bytes == 0 else None,
-            # The accumulator holds the document from index 0, so the write needs no offset — it
-            # IS the prefix, which is what `put_document` wants.
-            chunk_index_offset=0,
-        )
-        acc.flushed_bytes = pending
-        # Collapse what was just written into one entry. `put_document` REPLACES the chunk list, so
-        # the next flush needs these strings again and they cannot be dropped — but the per-slice
-        # entries can, which keeps the prefix walk O(1) instead of O(sub-batches) and stops the dict
-        # growing for the rest of the retain. Slices past the write stay keyed where they are.
-        rest = {off: sl for off, sl in acc.slices.items() if off >= len(chunks)}
-        acc.slices = {0: chunks, **rest}
-        return args
-
-
-async def _flush_document_body(acc: DocumentBodyAccumulator, document_id: str, *, force: bool) -> None:
-    """Write the accumulated body if enough has accumulated (or the retain is finishing)."""
-    args = await _document_body_write_args(acc, document_id, force=force)
-    if args is not None:
-        async with _timing.timed("store.document"):
-            await _store_document_bodies(**args)
-
-
-async def flush_document_bodies(body_accum: dict[str, DocumentBodyAccumulator]) -> None:
-    """Write out every accumulated document body. Call once a retain's sub-batches have all run.
-
-    Documents whose body is already fully written are skipped, so for a multi-document retain --
-    where each document's chunks arrive in one slice and are written as they arrive -- this is
-    usually a no-op. It matters for a document split across sub-batches whose last slice did not
-    trigger the doubling rule.
-
-    Deliberately one write per document rather than one batched write for all of them: batching
-    them into a single store call was measured SLOWER (892 KB/s against 1,348 KB/s on a 64-document
-    retain). One large call serialises what independent writes overlap, and that overlap is worth
-    more than the WAL-head contention the batch would avoid.
-    """
-    from ..memories import get_memories
-    from ..memories.base import document_record_metadata
-
-    pending = list(body_accum.items())
-    body_accum.clear()
-    if not pending:
-        return
-
-    store = get_memories()
-    batch: list[dict] = []
-    for document_id, acc in pending:
-        args = await _document_body_write_args(acc, document_id, force=True)
-        if args is None:
-            continue
-        # A guarded write goes alone, so a lost race fails only its own document rather than the
-        # batch it would share one entry with; and a bank whose documents live in SQL has no batch
-        # call to make. Both go the single-document route.
-        if args["expect_content_hash"] is not None or not store.store_owned_for(args["bank_id"]):
-            await _store_document_bodies(**args)
-            continue
-        batch.append(args)
-
-    if not batch:
-        return
-    if len(batch) == 1:
-        await _store_document_bodies(**batch[0])
-        return
-
-    # Assert rather than assume: a batch is one namespace's write, and silently splitting
-    # documents across banks here would write them to whichever bank sorted first.
-    bank_id = batch[0]["bank_id"]
-    assert all(a["bank_id"] == bank_id for a in batch), "flush spans banks"
-    async with _timing.timed("store.document"):
-        await store.put_documents(
-            bank_id=bank_id,
-            documents=[
-                {
-                    "document_id": a["document_id"],
-                    "content_hash": a["content_hash"] or "",
-                    "original_text": (a["combined_content"] if a["config"].store_document_text else None),
-                    "chunk_texts": a["chunk_texts"],
-                    "keep_chunk_text": a["config"].store_document_text,
-                    "tags": list(a["merged_tags"] or []),
-                    "metadata": document_record_metadata(a["retain_params"], a["attachment_filenames"]),
-                }
-                for a in batch
-            ],
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -2631,19 +1677,15 @@ async def _streaming_retain_batch(
     chunk_batch_size: int,
     operation_id: str | None = None,
     schema: str | None = None,
-    outbox_callback: Callable[["asyncpg.Connection"], Awaitable[None]] | None = None,
     db_semaphore: "asyncio.Semaphore | None" = None,
     full_document_body: str | None = None,
     document_body_hash: str | None = None,
     chunk_index_offset: int = 0,
-    body_accum: "dict[str, DocumentBodyAccumulator] | None" = None,
-    retain_session=None,
     document_prefetch: "dict[str, dict] | asyncio.Task | None" = None,
     progress_callback: "Callable[..., Awaitable[None]] | None" = None,
     append_base_hash: str | None = None,
     force_reextract: bool = False,
     attachment_loader: "RetainAttachmentLoader | None" = None,
-    fact_filter: "RetainFactFilter | None" = None,
     vlm_config: "LLMConfig | None" = None,
 ) -> RetainBatchResult:
     """
@@ -2716,10 +1758,6 @@ async def _streaming_retain_batch(
         sanitized_content = ""
     is_recovery = False
 
-    # Same reason as the stale-request check above: the recovery probe reads the SQL `documents`
-    # row and the SQL chunk rows, and a store that owns its documents has neither (it commits a
-    # retain atomically, so there is nothing half-written to resume) -- it answers with no hashes,
-    # without a pool acquire.
     from ..memories import get_memories as _get_memories_recov
 
     # A forced re-extraction is an operator saying "extract this again under the current
@@ -2760,102 +1798,10 @@ async def _streaming_retain_batch(
     # See _run_mini_batch_db_work() for the implementation.
     retain_params, merged_tags = _build_retain_params(contents_dicts, document_tags)
 
-    # Route the document's bulky bodies (extracted text + ordered chunk texts) to the store's
-    # dedicated document store when it owns one — up front, before the streaming batches
-    # write facts. Idempotent and content-addressed, so this is safe here and dedups a re-ingest;
-    # a no-op for a Postgres store (which keeps the text in its own columns below). ``all_pre_chunks``
-    # is the full ordered chunk-text list; ``combined_content`` is the full document text (both are
-    # released as the batches stream, so the write happens now while they are still resident).
-    # Accumulate only when the store actually owns a document store. `_store_document_bodies`
-    # early-returns on the SAME predicate, so on a SQL deployment accumulating would hold the whole
-    # document's chunk texts for the retain and then flush them into a no-op — and worse, it would
-    # pin exactly the strings the streaming producer frees as it goes (`all_pre_chunks[i] = ""`).
     from ..memories import get_memories
-    from ..memories.base import RetainDocumentPart, document_record_metadata
-
-    # A session owns the document body: it carries the chunk texts in the same entry as the facts,
-    # so accumulating them here as well would write them twice.
-    if retain_session is not None and effective_doc_id:
-        # The chunk texts go to the session HERE, not at the consumer batch: the streaming producer
-        # frees each one as it is extracted (`all_pre_chunks[i] = ""`), so this is the last point
-        # they are live. The facts follow from the consumer batch, and the session merges the two.
-        async with _timing.timed("store.bodies"):
-            await retain_session.add(
-                RetainDocumentPart(
-                    document_id=effective_doc_id,
-                    document_body=combined_content,
-                    content_hash=new_content_hash or "",
-                    chunk_offset=chunk_index_offset,
-                    chunk_texts=list(all_pre_chunks),
-                    facts=[],
-                    tags=list(merged_tags or []),
-                    metadata=document_record_metadata(retain_params, _attachment_filenames_for(contents)),
-                    # The append's base, on the part from the sub-batch that read it; the session
-                    # guards every later write of the document on what it wrote itself.
-                    expect_content_hash=_append_expectation(append_base_hash) if is_first_batch else None,
-                )
-            )
-    elif body_accum is not None and effective_doc_id and get_memories().store_owned_for(bank_id):
-        # Accumulating path — see below. Written as the positive branch so `body_accum` and
-        # `effective_doc_id` are both narrowed inside it.
-        acc = body_accum.get(effective_doc_id)
-        if acc is None:
-            acc = DocumentBodyAccumulator()
-            body_accum[effective_doc_id] = acc
-        acc.slices[chunk_index_offset] = list(all_pre_chunks)
-        # Every sub-batch carries the WHOLE document as `combined_content` (and so the same content
-        # hash), so any one of them can supply the metadata for the writes.
-        if acc.meta is None:
-            acc.meta = DocumentBodyMeta(
-                bank_id=bank_id,
-                content_hash=new_content_hash,
-                combined_content=combined_content,
-                merged_tags=merged_tags,
-                config=config,
-                retain_params=retain_params,
-                expect_content_hash=_append_expectation(append_base_hash),
-                attachment_filenames=_attachment_filenames_for(contents),
-            )
-        await _flush_document_body(acc, effective_doc_id, force=False)
-    else:
-        await _store_document_bodies(
-            bank_id=bank_id,
-            document_id=effective_doc_id,
-            content_hash=new_content_hash,
-            combined_content=combined_content,
-            chunk_texts=all_pre_chunks,
-            merged_tags=merged_tags,
-            config=config,
-            retain_params=retain_params,
-            attachment_filenames=_attachment_filenames_for(contents),
-            # An append derives the new body from the stored one, so its write is conditional on
-            # that base still being current. Only the first sub-batch carries it: it is the one
-            # that read the base, and the later sub-batches build on what it just wrote.
-            expect_content_hash=_append_expectation(append_base_hash) if is_first_batch else None,
-            # `all_pre_chunks` is THIS sub-batch's chunks; the offset is where they sit in the
-            # document, and is what lets the store keep the earlier sub-batches' chunks instead of
-            # being handed one slice as if it were the whole document. The delta path's two calls
-            # need no offset: delta retain only runs on the first sub-batch, where the offset is 0.
-            chunk_index_offset=chunk_index_offset,
-        )
 
     # Track whether document tracking has been done (by the first batch)
     doc_tracking_done = [False]
-    # Whether the document's prior version has actually been REPLACED. Distinct from
-    # `doc_tracking_done`, which records that tracking completed and is set even when a batch wrote
-    # zero units — there `provider.retain` was never called and no replace was issued, so reusing
-    # that latch would let batch 1 replace nothing, latch, and leave the prior version standing
-    # beside the new memories for every batch after it.
-    doc_replace_done = [False]
-    # Track whether the transactional-outbox callback has already fired inside a
-    # batch write TXN. The in-TXN fire only runs on a final facts-bearing batch
-    # (is_last=True); two success paths never reach it — a committed-chunk count
-    # that lands exactly on a chunk_batch_size boundary (the sentinel drains an
-    # empty batch), and a final batch that extracts zero facts (it returns before
-    # the insert). A post-loop fallback fires the callback in those cases, so this
-    # flag exists to guarantee the callback fires exactly once.
-    outbox_fired = [False]
-
     # ---------------------------------------------------------------------------
     # Producer-consumer pipeline: LLM extraction runs concurrently with DB writes
     # ---------------------------------------------------------------------------
@@ -2965,7 +1911,6 @@ async def _streaming_retain_batch(
                     operation_id,
                     schema,
                     attachment_loader=attachment_loader,
-                    fact_filter=fact_filter,
                     vlm_config=vlm_config,
                     document_id=effective_doc_id,
                 )
@@ -3193,7 +2138,7 @@ async def _streaming_retain_batch(
         # ``batch_extracted`` contains only survivors after the degenerate-text
         # guard. Chunk metadata still records whether extraction originally
         # produced facts, so an all-rejected batch follows the normal write path
-        # and preserves chunk/outbox behavior from before filtering was added.
+        # and preserves chunk behavior from before filtering was added.
         had_extracted_facts = bool(batch_extracted) or any(chunk.fact_count for chunk in batch_chunk_meta)
         if not had_extracted_facts:
             # Even with 0 facts, the first batch must still run document tracking
@@ -3203,25 +2148,6 @@ async def _streaming_retain_batch(
                 from ..memories import get_memories
 
                 _edge_provider = get_memories()
-                if _edge_provider.store_owned_for(bank_id):
-                    # Store-owned 0-fact (re-)ingest: the document's bodies are already in the store
-                    # (via _store_document_bodies) and there are no new memories. A re-ingest that now
-                    # yields 0 facts must drop the document's PRIOR memories — ONE plain store-side
-                    # delete-by-document. No Postgres documents row and no lock — this is the
-                    # 0-fact analogue of the fact-bearing PG-free path's replace-tombstone.
-                    await _edge_provider.delete_document(
-                        conn=None, fq_table=fq_table, bank_id=bank_id, document_id=effective_doc_id
-                    )
-                    doc_tracking_done[0] = True
-                    combined_content = ""
-                    log_buffer.append(
-                        f"[streaming] Document {effective_doc_id} tracked (0 facts, store-owned, PG-free)"
-                    )
-                    log_buffer.append(
-                        f"[streaming] Consumer batch {consumer_batch_idx + 1}: "
-                        f"0 facts extracted from {len(batch)} chunks, skipping"
-                    )
-                    return
                 async with acquire_with_retry(pool) as conn:
                     async with conn.transaction():
                         # Same create-and-lock the fact-bearing path uses. Routed
@@ -3286,12 +2212,8 @@ async def _streaming_retain_batch(
             entity_resolver.discard_pending_stats()
             mb_start = time.perf_counter()
 
-            # Phase 1 — Entity Resolution only (no ANN — deferred to Phase 3). A store that resolves
-            # and mints entities itself (server-side, ``store_owned``) skips the Postgres
-            # trigram scan + entity INSERTs entirely — the PG-free path touches no Postgres in retain.
-            from ..memories import get_memories as _get_memories_p1
+            # Phase 1 resolves entities; ANN runs after the facts are committed.
 
-            _store_owned = _get_memories_p1().store_owned_for(bank_id)
             p1_start = time.perf_counter()
             phase1 = await _pre_resolve_phase1(
                 pool,
@@ -3302,7 +2224,6 @@ async def _streaming_retain_batch(
                 config,
                 log_buffer,
                 skip_semantic_ann=True,
-                skip_entity_resolution=_store_owned,
             )
 
             logger.info(f"[streaming] Phase 1 (entity resolution): {time.perf_counter() - p1_start:.3f}s")
@@ -3331,94 +2252,9 @@ async def _streaming_retain_batch(
             p2_start = time.perf_counter()
             batch_result_ids = None
 
-            # A store that owns its whole retain writes the batch in ONE server-side call and
-            # holds no data-plane connection at all, so it takes its own path. Postgres falls
-            # through to the single-transaction path below, unchanged.
-            #
-            # The gate is the store's CAPABILITY. It was once "did the store mint a cross-store
-            # write-group handle", which asked the same question only while every non-SQL store
-            # ran that commit protocol; a store whose single write is already atomic mints
-            # nothing, so the handle came back None, this branch stopped being taken, and
-            # store-owned banks silently fell through to the Postgres path with their `Retain`
-            # RPC never called while `store_owned_for()` went on reporting True. Asking what the
-            # store CAN do cannot drift out of sync with what it does.
             from ..memories import get_memories
 
-            _ext_provider = get_memories()
-            if retain_session is not None:
-                # The store owns persistence: hand it this batch and let it decide when to write.
-                # The session was opened for the WHOLE retain, above the per-document grouping, so
-                # parts from every document accumulate into one commit — the grouping stays and
-                # chunk identity stays document-local, which is what makes this safe.
-                async with _timing.timed("store.retain"):
-                    ext_result_ids = await _streaming_session_retain(
-                        session=retain_session,
-                        bank_id=bank_id,
-                        batch_contents=batch_contents,
-                        batch_extracted=batch_extracted,
-                        batch_processed=batch_processed,
-                        batch_chunk_meta=batch_chunk_meta,
-                        chunk_index_offset=chunk_index_offset,
-                        effective_doc_id=effective_doc_id,
-                        combined_content=combined_content,
-                        content_hash=new_content_hash,
-                        merged_tags=merged_tags,
-                        retain_params=retain_params,
-                        is_first_batch=is_first_batch,
-                        doc_tracking_done=doc_tracking_done,
-                        doc_replace_done=doc_replace_done,
-                        entity_resolver=entity_resolver,
-                        log_buffer=log_buffer,
-                        attachment_filenames=_attachment_filenames_for(contents),
-                    )
-                combined_content = ""
-                try:
-                    await entity_resolver.flush_pending_stats()
-                except Exception:
-                    logger.warning(
-                        f"Entity stats flush (consumer batch {consumer_batch_idx + 1}) failed", exc_info=True
-                    )
-                for content_ids in ext_result_ids:
-                    all_unit_ids.extend(content_ids)
-                return
-
-            if _ext_provider.store_owned_for(bank_id):
-                async with _timing.timed("store.retain"):
-                    ext_result_ids = await _streaming_store_owned_retain(
-                        provider=_ext_provider,
-                        pool=pool,
-                        bank_id=bank_id,
-                        batch_contents=batch_contents,
-                        batch_extracted=batch_extracted,
-                        batch_processed=batch_processed,
-                        batch_chunk_meta=batch_chunk_meta,
-                        effective_doc_id=effective_doc_id,
-                        config=config,
-                        log_buffer=log_buffer,
-                        is_first_batch=is_first_batch,
-                        append_base_hash=append_base_hash,
-                        doc_tracking_done=doc_tracking_done,
-                        doc_replace_done=doc_replace_done,
-                        p2_start=p2_start,
-                    )
-                # Doc-tracking consumed combined_content on the first batch; release it (mirrors
-                # the Postgres path's first-batch reset).
-                combined_content = ""
-                # `outbox_fired` is deliberately NOT set: this path writes no transactional-outbox
-                # row (there is no Postgres transaction to put one in), so the post-loop fallback
-                # is what delivers the webhook. Marking it fired here would drop the delivery.
-                #
-                # Deferred-stats flush + unit collection — mirrors the shared tail the Postgres
-                # path reaches after its connection block exits.
-                try:
-                    await entity_resolver.flush_pending_stats()
-                except Exception:
-                    logger.warning(
-                        f"Entity stats flush (consumer batch {consumer_batch_idx + 1}) failed", exc_info=True
-                    )
-                for content_ids in ext_result_ids:
-                    all_unit_ids.extend(content_ids)
-                return
+            _store = get_memories()
 
             async with acquire_with_retry(pool) as conn:
                 async with conn.transaction():
@@ -3431,7 +2267,7 @@ async def _streaming_retain_batch(
                     # takeover check for later batches below. The PG/Oracle split
                     # lives in the ops layer because Oracle can't do this upsert +
                     # RETURNING in a single statement.
-                    existing_hash = await _ext_provider.lock_document_for_write(
+                    existing_hash = await _store.lock_document_for_write(
                         conn=conn,
                         ops=pool.ops,
                         fq_table=fq_table,
@@ -3517,7 +2353,7 @@ async def _streaming_retain_batch(
                     if batch_chunk_meta and not document_cleared:
                         committed = {
                             c.chunk_index: c.content_hash
-                            for c in await _ext_provider.load_existing_chunks(
+                            for c in await _store.load_existing_chunks(
                                 conn=conn,
                                 fq_table=fq_table,
                                 bank_id=bank_id,
@@ -3579,17 +2415,10 @@ async def _streaming_retain_batch(
                         unit_to_entity_ids=phase1.entities.unit_to_entity_ids,
                         semantic_ann_links=[],
                         skip_semantic_links=True,
-                        outbox_callback=outbox_callback if is_last else None,
                         ops=pool.ops,
                     )
 
                 logger.info(f"[streaming] Phase 2 (write transaction): {time.perf_counter() - p2_start:.3f}s")
-
-                # The write TXN above committed the transactional-outbox row in the
-                # same transaction as this batch's facts. Record it so the post-loop
-                # fallback doesn't queue a duplicate delivery.
-                if is_last and outbox_callback is not None:
-                    outbox_fired[0] = True
 
             # Best-effort: flush entity_cooccurrences and other deferred stats.
             #
@@ -3714,77 +2543,48 @@ async def _streaming_retain_batch(
             from ..memories import get_memories
 
             _edge_provider = get_memories()
-            if _edge_provider.store_owned_for(bank_id):
-                # Store-owned zero-batch retain — the post-loop analogue of the per-batch 0-fact
-                # PG-free branch above. Reached when NO batch ran at all (empty/gibberish content,
-                # or a recovery where every chunk was already committed as a prior attempt). The
-                # document's bodies are already in the store (via _store_document_bodies); a
-                # re-ingest that yields no facts must still drop the document's PRIOR memories —
-                # ONE plain store-side delete-by-document, with no Postgres documents row.
-                await _edge_provider.delete_document(
-                    conn=None, fq_table=fq_table, bank_id=bank_id, document_id=effective_doc_id
-                )
-                doc_tracking_done[0] = True
-                combined_content = ""
-                log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (no facts, store-owned, PG-free)")
-            else:
-                async with acquire_with_retry(pool) as conn:
-                    async with conn.transaction():
-                        await _edge_provider.lock_pending_document(
-                            conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=effective_doc_id
-                        )
-                        if is_recovery:
-                            await fact_storage.upsert_document_metadata(
-                                conn,
-                                bank_id,
-                                effective_doc_id,
-                                combined_content,
-                                retain_params,
-                                merged_tags,
-                                store_document_text=config.store_document_text,
-                                attachment_filenames=_attachment_filenames_for(contents),
-                            )
-                        else:
-                            # A no-facts re-ingest still deletes the outgoing memories, in the same
-                            # transaction as the document row.
-                            await fact_storage.handle_document_tracking(
-                                conn,
-                                bank_id,
-                                effective_doc_id,
-                                combined_content,
-                                is_first_batch,
-                                retain_params,
-                                merged_tags,
-                                ops=pool.ops,
-                                store_document_text=config.store_document_text,
-                                attachment_filenames=_attachment_filenames_for(contents),
-                            )
-                        doc_tracking_done[0] = True
-                        # Memory: combined_content has been persisted and won't be
-                        # read again — release the per-document text now.
-                        combined_content = ""
-                        log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (no facts extracted)")
-
-        # Transactional-outbox fallback. The in-TXN fire only runs on a final
-        # facts-bearing batch (is_last=True). When the committed-chunk count lands
-        # exactly on a chunk_batch_size boundary the sentinel drains an empty batch
-        # and never marks one last; when the final batch extracts zero facts it
-        # returns before the insert; and when every chunk is skipped as already
-        # committed no batch runs at all. In each of those the retain still
-        # succeeded, so the retain.completed delivery must be queued — exactly once,
-        # in its own transaction (there is no batch TXN left to attach it to). Skip
-        # it on a concurrent takeover: an aborted request must not emit completion.
-        if outbox_callback is not None and not outbox_fired[0] and not pipeline_aborted[0]:
             async with acquire_with_retry(pool) as conn:
                 async with conn.transaction():
-                    await outbox_callback(conn)
-            outbox_fired[0] = True
+                    await _edge_provider.lock_pending_document(
+                        conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=effective_doc_id
+                    )
+                    if is_recovery:
+                        await fact_storage.upsert_document_metadata(
+                            conn,
+                            bank_id,
+                            effective_doc_id,
+                            combined_content,
+                            retain_params,
+                            merged_tags,
+                            store_document_text=config.store_document_text,
+                            attachment_filenames=_attachment_filenames_for(contents),
+                        )
+                    else:
+                        # A no-facts re-ingest still deletes the outgoing memories, in the same
+                        # transaction as the document row.
+                        await fact_storage.handle_document_tracking(
+                            conn,
+                            bank_id,
+                            effective_doc_id,
+                            combined_content,
+                            is_first_batch,
+                            retain_params,
+                            merged_tags,
+                            ops=pool.ops,
+                            store_document_text=config.store_document_text,
+                            attachment_filenames=_attachment_filenames_for(contents),
+                        )
+                    doc_tracking_done[0] = True
+                    # Memory: combined_content has been persisted and won't be
+                    # read again — release the per-document text now.
+                    combined_content = ""
+                    log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (no facts extracted)")
 
         # Mark facts as committed in operation metadata (crash recovery checkpoint). Not for a
         # retain session: it may buffer until `commit()`, so its facts are not durable here, and a
         # retry trusting the checkpoint would skip a document whose facts were never written
         # (#6099). The session commits once for the whole retain, so there is nothing to resume.
-        if operation_id and all_unit_ids and retain_session is None:
+        if operation_id and all_unit_ids:
             try:
                 async with acquire_with_retry(pool) as conn:
                     await _persist_facts_committed_checkpoint(
@@ -3795,7 +2595,7 @@ async def _streaming_retain_batch(
                 logger.warning("Failed to save facts_committed checkpoint", exc_info=True)
     else:
         # Recovery path: load committed unit IDs from whichever store holds them. Read from SQL
-        # alone this reported none for a store that owns its memories, so the operation result
+        # alone may omit committed units, so the operation result
         # and the retain metric carried an empty list.
         from ..memories import get_memories
 
@@ -3810,13 +2610,7 @@ async def _streaming_retain_batch(
     # This replaces per-batch within-batch + fire-and-forget ANN with a single
     # efficient pass after all facts are in the database.
     # ---------------------------------------------------------------------------
-    # A store that derives its own semantic links makes this pass pure waste: the units it would
-    # read are not in `memory_units` at all, so it acquires a connection and queries an empty table
-    # once per retain and derives nothing.
-    from ..memories import get_memories as _get_memories_ann
-
-    _derives_links_itself = _get_memories_ann().derives_semantic_links_internally_for(bank_id)
-    if all_unit_ids and not pipeline_aborted[0] and not _derives_links_itself:
+    if all_unit_ids and not pipeline_aborted[0]:
         ann_start = time.perf_counter()
         try:
             await _run_final_semantic_ann(
@@ -3950,7 +2744,6 @@ async def _try_delta_retain(
     start_time,
     operation_id,
     schema,
-    outbox_callback,
     db_semaphore: "asyncio.Semaphore | None" = None,
     document_prefetch: "dict[str, dict] | asyncio.Task | None" = None,
     *,
@@ -3963,7 +2756,6 @@ async def _try_delta_retain(
     document_body_hash: str | None = None,
     append_base_hash: str | None = None,
     attachment_loader: "RetainAttachmentLoader | None" = None,
-    fact_filter: "RetainFactFilter | None" = None,
     vlm_config: "LLMConfig | None" = None,
 ) -> RetainBatchResult | None:
     """
@@ -3975,30 +2767,10 @@ async def _try_delta_retain(
     (``0`` if the submission matched prior content exactly and nothing was
     re-extracted).
     """
-    # Delta RUNS for a store-owned (PG-free) bank. It did not always: the two things this path
-    # relies on are absent for such a bank, and each had to be replaced rather than assumed.
-    #
-    #   * the concurrency control. The Postgres delta write serializes concurrent writers on
-    #     `SELECT content_hash FROM documents ... FOR UPDATE`. A store-owned bank has no such row,
-    #     so parallel appends each planned against the same base and overwrote each other — turns
-    #     lost silently, every call returning success. Its place is taken by the store's own
-    #     compare-and-set: `put_document(expect_content_hash=...)` on the hash this delta planned
-    #     against, made the batch's FIRST store write so the fact writes after it are covered.
-    #   * the document write itself. The delta path updates the document through
-    #     `upsert_document_metadata`, which is SQL and writes nothing for such a bank, so the record
-    #     would keep its pre-delta body. `_store_document_bodies` carries it instead.
-    #
-    # Leaving delta off was not free, which is why it was worth replacing both. A full replace
-    # deletes the document's facts and rebuilds them, so re-submitting a document that changed
-    # NOTHING orphans or destroys every observation standing on those facts and requeues them for
-    # consolidation — test_delta_retain_orphan_observations.py covers that, and enabling delta
-    # without the store-side CAS would have traded it for silent append loss, which is worse. Both
-    # directions are covered by tests, so the trade was measurable rather than a matter of opinion.
     from ..memories import get_memories as _get_memories_delta
     from ..memories.base import document_chunk_state
 
     _delta_store = _get_memories_delta()
-    _store_owned_delta = _delta_store.store_owned_for(bank_id)
 
     # Need a single document_id
     effective_doc_id = document_id
@@ -4122,7 +2894,6 @@ async def _try_delta_retain(
                 document_tags,
                 log_buffer,
                 start_time,
-                outbox_callback,
                 full_document_body=full_document_body,
                 config=config,
                 expected_content_hash=doc_hash_at_load,
@@ -4159,7 +2930,6 @@ async def _try_delta_retain(
             document_tags,
             log_buffer,
             start_time,
-            outbox_callback,
             full_document_body=full_document_body,
             config=config,
             expected_content_hash=doc_hash_at_load,
@@ -4188,7 +2958,6 @@ async def _try_delta_retain(
             document_tags,
             log_buffer,
             start_time,
-            outbox_callback,
             full_document_body=full_document_body,
             config=config,
             expected_content_hash=doc_hash_at_load,
@@ -4244,7 +3013,6 @@ async def _try_delta_retain(
                 document_tags,
                 log_buffer,
                 start_time,
-                outbox_callback,
                 full_document_body=full_document_body,
                 config=config,
                 expected_content_hash=recheck_hash,
@@ -4274,9 +3042,7 @@ async def _try_delta_retain(
     # compare-and-set that ADVANCES the document, so it has no way to commit facts while leaving the
     # document at its base -- and since it never leaves a document half-written, a retry never
     # inherits a predecessor's unwritten chunks either.
-    groups = (
-        [chunks_to_process] if _store_owned_delta else _delta_batches(chunks_to_process, config.retain_chunk_batch_size)
-    )
+    groups = _delta_batches(chunks_to_process, config.retain_chunk_batch_size)
     all_unit_ids: list[list[str]] = []
     usage = TokenUsage()
     processed_tokens = 0
@@ -4305,7 +3071,6 @@ async def _try_delta_retain(
                 operation_id,
                 schema,
                 attachment_loader=attachment_loader,
-                fact_filter=fact_filter,
                 vlm_config=vlm_config,
                 document_id=effective_doc_id,
             )
@@ -4342,31 +3107,6 @@ async def _try_delta_retain(
             # counts and co-occurrences, and threw the result away. PHASE 2 locks a `documents` row
             # such a bank does not have, so `current_hash` would come back None, the stale-chunk
             # guard would never fire, and the delta would run with no concurrency control at all.
-            if _store_owned_delta:
-                ok, result_unit_ids = await _delta_store_owned_write(
-                    provider=_delta_store,
-                    pool=pool,
-                    bank_id=bank_id,
-                    effective_doc_id=effective_doc_id,
-                    config=config,
-                    log_buffer=log_buffer,
-                    entity_resolver=entity_resolver,
-                    contents_dicts=contents_dicts,
-                    delta_contents=delta_contents,
-                    document_tags=document_tags,
-                    full_document_body=full_document_body,
-                    extracted_facts=extracted_facts,
-                    processed_facts=processed_facts,
-                    new_chunk_metadata=new_chunk_metadata,
-                    delta_chunk_map=delta_chunk_map,
-                    new_chunks_with_contents=new_chunks_with_contents,
-                    existing_by_index=existing_by_index,
-                    changed_indices=changed_indices,
-                    removed_indices=removed_indices,
-                    doc_hash_at_load=doc_hash_at_load,
-                    doc_tags_at_load=doc_tags_at_load,
-                )
-                return ok
 
             # PHASE 1 — Entity Resolution + Semantic ANN (separate connection, read-heavy)
             phase1 = await _pre_resolve_phase1(
@@ -4467,19 +3207,6 @@ async def _try_delta_retain(
                             store_document_text=config.store_document_text,
                             attachment_filenames=_attachment_filenames_for(contents),
                         )
-                        # Re-store the document's bodies in the store's document store with the
-                        # FULL new chunk set — put_document dedups by content hash, so unchanged chunks and
-                        # text re-upload nothing; only what the delta changed moves. A no-op for Postgres.
-                        await _store_document_bodies(
-                            bank_id=bank_id,
-                            document_id=effective_doc_id,
-                            combined_content=combined_content,
-                            chunk_texts=[new_chunks_with_contents[i] for i in sorted(new_chunks_with_contents)],
-                            merged_tags=merged_tags,
-                            config=config,
-                            retain_params=retain_params,
-                            attachment_filenames=_attachment_filenames_for(contents),
-                        )
                         log_buffer.append(f"  Document metadata update in {time.perf_counter() - step_start:.3f}s")
 
                     # Delete changed and removed chunks (cascades to memory_units and links)
@@ -4573,7 +3300,6 @@ async def _try_delta_retain(
                         entity_to_unit=phase1.entities.entity_to_unit,
                         unit_to_entity_ids=phase1.entities.unit_to_entity_ids,
                         semantic_ann_links=phase1.semantic_ann_links,
-                        outbox_callback=outbox_callback,
                         ops=pool.ops,
                     )
 
@@ -4632,7 +3358,6 @@ async def _delta_metadata_only(
     document_tags,
     log_buffer,
     start_time,
-    outbox_callback,
     *,
     full_document_body: str | None = None,
     config: Any,
@@ -4641,73 +3366,8 @@ async def _delta_metadata_only(
 ) -> RetainBatchResult | None:
     """Handle the case where no chunks changed — just update document metadata and tags."""
     from ..memories import get_memories as _get_memories_meta
-    from ..memories.base import document_record_metadata
 
     _meta_store = _get_memories_meta()
-    if _meta_store.store_owned_for(bank_id):
-        # The document and its chunks are not in SQL, so the row lock and the hash read above have
-        # nothing to read: the whole point of this path — "the document has not moved, so leave its
-        # facts alone" — would otherwise decide it HAD moved and fall back to a full retain, which
-        # rebuilds the facts and orphans every observation standing on them.
-        current_content_hash = await _meta_store.document_content_hash(bank_id=bank_id, document_id=document_id)
-        if expected_content_hash is not None and current_content_hash != expected_content_hash:
-            log_buffer.append(
-                f"[delta] Document {document_id} changed before metadata update — falling back to full retain"
-            )
-            return None
-        combined_content = (
-            full_document_body
-            if full_document_body is not None
-            else "\n".join([c.get("content", "") for c in contents_dicts])
-        )
-        retain_params, merged_tags = _build_retain_params(contents_dicts, document_tags)
-        # Re-put the record with the SAME body hashes: PutDocuments mints upload URLs only for
-        # bodies it is missing, and none are missing, so this changes labels without moving bytes.
-        chunk_texts = await _meta_store.list_chunk_texts(bank_id=bank_id, document_id=document_id) or []
-        await _meta_store.put_document(
-            bank_id=bank_id,
-            document_id=document_id,
-            content_hash=current_content_hash or "",
-            original_text=combined_content if config.store_document_text else None,
-            chunk_texts=chunk_texts,
-            keep_chunk_text=config.store_document_text,
-            tags=merged_tags,
-            # The same map every other write path produces. This path used to pass the params dict
-            # itself, which the store flattened key by key: the record then carried no
-            # `retain_params` entry, and a metadata-only re-retain blanked what get_document and
-            # reprocess read back.
-            metadata=document_record_metadata(retain_params, _attachment_filenames_for(contents)),
-        )
-        # The document record now carries the new labels, but the memories do not: the SQL branch
-        # below propagates them onto the units with the same call, and without it a tags-only
-        # re-retain relabelled the document and left every unit on the OLD tags and metadata —
-        # measured, v2 units still read ['team-a'] after a retain carrying ['team-b', 'important'].
-        # This is the whole work of a metadata-only retain for such a bank, not a detail of it.
-        # In a transaction: relabelling can cascade into an observation sweep (see
-        # update_memory_units_metadata_and_tags), and that delete plus the requeue of the
-        # co-sources it strands has to land atomically or a crash between them leaves facts
-        # marked consolidated against observations that are gone.
-        async with acquire_with_retry(pool) as conn:
-            async with conn.transaction():
-                await fact_storage.update_memory_units_metadata_and_tags(
-                    conn,
-                    bank_id,
-                    document_id,
-                    merged_tags,
-                    retain_params.get("metadata", {}),
-                    observation_scopes=retain_params.get("observation_scopes"),
-                    label_tag_keys=label_tag_keys(getattr(config, "entity_labels", None)),
-                    previous_document_tags=previous_document_tags,
-                    ops=pool.ops,
-                )
-        if outbox_callback is not None:
-            # The outbox is still SQL for every deployment, so it keeps its own connection.
-            async with acquire_with_retry(pool) as conn:
-                await outbox_callback(conn)
-        total_time = time.perf_counter() - start_time
-        log_buffer.append(f"DELTA RETAIN (no changes): metadata updated in {total_time:.3f}s")
-        logger.info("\n" + "\n".join(log_buffer) + "\n")
-        return RetainBatchResult([[] for _ in contents], TokenUsage(), 0)
 
     async def _update() -> bool:
         async with acquire_with_retry(pool) as conn:
@@ -4750,8 +3410,6 @@ async def _delta_metadata_only(
                     previous_document_tags=previous_document_tags,
                     ops=pool.ops,
                 )
-                if outbox_callback is not None:
-                    await outbox_callback(conn)
         return True
 
     # Retried whole on a deadlock: the transaction plans queries on the shared

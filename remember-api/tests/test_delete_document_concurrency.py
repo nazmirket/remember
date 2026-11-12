@@ -73,7 +73,6 @@ async def delete_race(pg0_db_url):
             engine = MemoryEngine.__new__(MemoryEngine)
             engine._initialized = True
             engine._backend = backend
-            engine._operation_validator = None
             engine._tenant_extension = None
             engine._authenticate_tenant = AsyncMock(return_value="public")
             engine._bank_stats_cache = SimpleNamespace(invalidate=AsyncMock())

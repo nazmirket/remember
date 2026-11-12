@@ -19,7 +19,7 @@ _PACKAGE_ROOT = Path(remember_api.__file__).parent
 
 @pytest.mark.parametrize(
     "name",
-    ["ApiKeyTenantExtension", "MemoryDefenseRegexExtension", "SupabaseTenantExtension"],
+    ["MemoryDefenseRegexExtension", "SupabaseTenantExtension"],
 )
 def test_concrete_extensions_are_not_re_exported(name: str):
     assert name not in extensions.__all__
@@ -29,7 +29,7 @@ def test_concrete_extensions_are_not_re_exported(name: str):
 def test_builtin_package_exports_only_the_bundled_extensions():
     from remember_api.extensions import builtin
 
-    assert sorted(builtin.__all__) == ["ApiKeyTenantExtension", "MemoryDefenseRegexExtension"]
+    assert sorted(builtin.__all__) == ["MemoryDefenseRegexExtension"]
 
 
 def test_no_core_module_imports_jwt():

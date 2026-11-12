@@ -17,7 +17,7 @@ import pytest
 from remember_api.config import RememberConfig, LLMMemberConfig, LLMStrategyConfig, _get_raw_config
 from remember_api.config_resolver import ConfigResolver
 
-from .test_hierarchical_config import FakeBankConfigBackend, FakeBankConfigConnection, MockTenantExtension
+from .test_hierarchical_config import FakeBankConfigBackend, FakeBankConfigConnection
 
 BANK = "test-config-shape-bank"
 
@@ -71,8 +71,7 @@ async def test_resolved_config_matches_dict_roundtrip():
     with asdict(), splice the overrides in, rebuild, then restore the member
     dataclasses asdict() had turned into plain dicts.
     """
-    tenant = MockTenantExtension({"retain_extraction_mode": "tenant-mode", "retain_chunk_size": 5000})
-    resolver = ConfigResolver(backend=FakeBankConfigBackend(), tenant_extension=tenant)
+    resolver = ConfigResolver(backend=FakeBankConfigBackend())
     global_config = resolver._global_config
     context = _context()
 
@@ -82,7 +81,6 @@ async def test_resolved_config_matches_dict_roundtrip():
         resolved = await resolver.resolve_full_config(BANK, context, cached=False)
 
         merged = asdict(global_config)
-        merged.update({"retain_extraction_mode": "tenant-mode", "retain_chunk_size": 5000})
         merged.update(overrides)
         expected = replace(
             RememberConfig(**merged),
@@ -172,9 +170,8 @@ async def test_bank_config_excludes_static_and_credential_fields():
 
 @pytest.mark.asyncio
 async def test_bulk_and_single_bank_config_agree():
-    """get_bank_configs is the batched form of get_bank_config, including tenant overrides."""
-    tenant = MockTenantExtension({"retain_chunk_size": 5000})
-    resolver = ConfigResolver(backend=_BulkCapableBackend(), tenant_extension=tenant)
+    """Bulk and single-bank config reads resolve the same bank overrides."""
+    resolver = ConfigResolver(backend=_BulkCapableBackend())
     resolver._backend.config = {"enable_observations": False}
     context = _context()
 
@@ -182,7 +179,7 @@ async def test_bulk_and_single_bank_config_agree():
     bulk = await resolver.get_bank_configs([BANK], context)
 
     assert bulk[BANK] == single
-    assert single["retain_chunk_size"] == 5000
+    assert single["retain_chunk_size"] == resolver._global_config.retain_chunk_size
     assert single["enable_observations"] is False
 
 

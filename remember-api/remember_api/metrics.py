@@ -31,7 +31,6 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import Resource
 
-from remember_api.operation_runs import add_phase
 from remember_api.schema_context import _current_schema, get_current_schema
 
 if TYPE_CHECKING:
@@ -50,15 +49,8 @@ _current_memories_backend: ContextVar[str] = ContextVar("remember_metrics_memori
 
 
 def memories_backend_for(bank_id: str) -> str:
-    """The ``memories_backend`` label for a bank: the name the memories extension gives the store
-    serving it, or "" -- the default -- for no label, which leaves existing series untouched.
-    Only a metric attribute, so it never raises: an unresolvable store also yields ""."""
-    try:
-        from remember_api.engine.memories import get_memories
-
-        return get_memories().backend_name_for(bank_id) or ""
-    except Exception:
-        return ""
+    """The local store does not need an additional backend label."""
+    return ""
 
 
 def _backend_attrs(backend: str) -> dict[str, str]:
@@ -76,8 +68,7 @@ class OperationOutcome(StrEnum):
     FAILURE = "false"
     # The client disconnected before a recall/reflect finished (#2122).
     CANCELLED = "cancelled"
-    # The operation was refused before it did any work (OperationValidationError): an
-    # OperationValidatorExtension rejected it, or the caller's tag scope does not allow it.
+    # The operation was refused before it did any work.
     REJECTED = "rejected"
 
 
@@ -94,12 +85,8 @@ def _outcome_of_error(exc: BaseException) -> OperationOutcome:
       fresh one; before #5946 it raised a bare 499 and every hard disconnect counted as a
       failure. Per the engine contract a cancellation is "not a failure to retry or
       report" (cancellation.OperationCancelledError).
-    - **Rejected.** An OperationValidatorExtension that refuses an operation (over quota,
-      a policy refusal, ...), like the engine's tag-scope checks, raises
-      OperationValidationError before it does any work, and the HTTP layer returns its
-      status code. The server decided not to run it. Counted as a failure, one client
-      that keeps calling after it has been refused drives the operation's failure rate
-      to its share of the traffic.
+    - **Rejected.** An invalid request raises OperationValidationError before the
+      operation runs; it is counted separately from server failures.
 
     Either error is matched anywhere in the ``__cause__`` chain, so a route that re-raises
     it as an HTTPException ``from`` it is still recognised. Matching on the cause chain
@@ -108,7 +95,7 @@ def _outcome_of_error(exc: BaseException) -> OperationOutcome:
     # Imported lazily to avoid import-time coupling (cf. _get_tenant above): both
     # modules are heavier than this one and must not be loaded by importing metrics.
     from remember_api.cancellation import OperationCancelledError
-    from remember_api.extensions.operation_validator import OperationValidationError
+    from remember_api.errors import OperationValidationError
 
     cause: BaseException | None = exc
     seen: set[int] = set()  # guard against a cyclic __cause__ chain
@@ -351,10 +338,6 @@ class MetricsCollectorBase:
         """Record one phase of a retain."""
         raise NotImplementedError
 
-    def record_validator_phase(self, operation: str, hook: str, seconds: float):
-        """Record one operation-validator hook (`hook` is "pre" or "post")."""
-        raise NotImplementedError
-
     def record_recall_phase(self, phase: str, seconds: float, *, diagnostic: bool = False):
         """Record one phase of a recall.
 
@@ -449,14 +432,10 @@ class NoOpMetricsCollector(MetricsCollectorBase):
         pass
 
     def record_retain_phase(self, phase: str, seconds: float, calls: int = 1, store: str = ""):
-        add_phase(f"retain.{phase}", seconds)
-
-    def record_validator_phase(self, operation: str, hook: str, seconds: float):
         pass
 
     def record_recall_phase(self, phase: str, seconds: float, *, diagnostic: bool = False):
-        if not diagnostic:
-            add_phase(f"recall.{phase}", seconds)
+        pass
 
     def record_loop_stall(self, stall_seconds: float):
         """No-op loop-stall recording."""
@@ -589,17 +568,6 @@ class MetricsCollector(MetricsCollectorBase):
             name="remember.retain.phase.calls",
             description="Number of times a retain phase ran -- the round-trip count per phase",
             unit="calls",
-        )
-        # The operation validator runs OUTSIDE the recall/retain timers -- `validate_*` before the
-        # work starts and `on_*_complete` after it ends -- so whatever it does is invisible in the
-        # `[phases]` accounting, which measures only the inner search. A validator that reaches a
-        # database (billing does: an org row and a pricing table, uncached, on a small control
-        # pool) is then latency nobody can see. Labelled by hook so the pre-check and the
-        # post-charge are separable: they fail differently and are fixed differently.
-        self.validator_phase_duration = self.meter.create_histogram(
-            name="remember.validator.phase.duration",
-            description="Time in an operation-validator hook, which runs outside the operation's own timer",
-            unit="s",
         )
         # A recall's phases, from the same tracer that writes the `[phases]` log line. That line is
         # per-request and lives in a log; this is the aggregate, so "where does a recall's time go"
@@ -925,17 +893,11 @@ class MetricsCollector(MetricsCollectorBase):
     def record_retain_phase(self, phase: str, seconds: float, calls: int = 1, store: str = ""):
         """Record one phase of a retain. `store` labels which memories backend served it, so a
         store-owned bank's profile is separable from a Postgres one on the same deployment."""
-        add_phase(f"retain.{phase}", seconds)
         attrs = {"phase": phase, **self._tenant_attrs()}
         if store:
             attrs["store"] = store
         self.retain_phase_duration.record(seconds, attrs)
         self.retain_phase_calls.add(calls, attrs)
-
-    def record_validator_phase(self, operation: str, hook: str, seconds: float):
-        """Record one operation-validator hook. `hook` is "pre" or "post"."""
-        attrs = {"operation": operation, "hook": hook, **self._tenant_attrs()}
-        self.validator_phase_duration.record(seconds, attrs)
 
     def record_recall_phase(self, phase: str, seconds: float, *, diagnostic: bool = False):
         """Record one phase of a recall.
@@ -944,9 +906,6 @@ class MetricsCollector(MetricsCollectorBase):
         per-arm timing inside `parallel_retrieval`, say — so a consumer summing phases into a
         request total can exclude them instead of double-counting.
         """
-        if not diagnostic:
-            # Every recall's phases, whatever the sampling below: the run is per recall.
-            add_phase(f"recall.{phase}", seconds)
         if diagnostic and not self._record_diagnostic_phases:
             return
         # Opt-in sampling: ~10 phases per recall each go through OTel's aggregation, which was

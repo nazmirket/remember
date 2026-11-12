@@ -421,7 +421,7 @@ class AnthropicLLM(LLMInterface):
                     # on every byte, so an upstream trickling keep-alive whitespace never trips it
                     # and the call pins its worker slot forever (#4763).
                     response = await asyncio.wait_for(
-                        self._request_client().messages.create(**call_params),
+                        self._client.messages.create(**call_params),
                         timeout=self.timeout or _DEFAULT_ANTHROPIC_TIMEOUT,
                     )
                 # Stash usage before parse/validate, which may raise locally
@@ -728,16 +728,6 @@ class AnthropicLLM(LLMInterface):
         """Clean up resources (close Anthropic client connections)."""
         if hasattr(self, "_client") and self._client:
             await self._client.close()
-
-    def supports_request_overrides(self) -> bool:
-        return True
-
-    def _request_client(self) -> Any:
-        """The SDK client for one call, with the credentials an LLM request extension chose."""
-        # Lazy: importing the extensions package here would be circular.
-        from remember_api.extensions.llm_request import request_client
-
-        return request_client(self._client)
 
     def supports_attempt_scoped_concurrency(self) -> bool:
         return True

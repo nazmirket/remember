@@ -48,8 +48,7 @@ RefreshOutcome = Literal[
 # What a refresh did, as recorded on the operation. A superset of RefreshOutcome:
 # the persist path can still refuse a document the executor accepted, when
 # structured-output extraction fails against a configured response_schema, an
-# operation validator rejects the finished document
-# (``refresh_failed_candidate_rejected``, #5970), and
+# and
 # a refresh can also die on an error rather than refuse to write a document
 # (``refresh_failed_error`` — a retrieval tool raised, the agent produced no
 # answer, or something unforeseen escaped). Kept
@@ -65,7 +64,6 @@ RefreshOperationOutcome = Literal[
     "refresh_failed_empty_candidate",
     "refresh_failed_delta_not_applied",
     "refresh_failed_structured_output",
-    "refresh_failed_candidate_rejected",
     "refresh_failed_error",
 ]
 
@@ -86,7 +84,6 @@ RefreshFailureReason = Literal[
     "delta_ops_all_skipped",
     "delta_not_applied",
     "structured_output_failed",
-    "candidate_rejected",
     "retrieval_failed",
     "no_answer",
     "unexpected_error",

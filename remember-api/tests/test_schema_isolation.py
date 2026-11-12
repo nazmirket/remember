@@ -53,11 +53,6 @@ class MultiSchemaTestTenantExtension(TenantExtension):
 
         raise AuthenticationError(f"Unknown API key: {context.api_key}")
 
-    async def list_tenants(self) -> list:
-        from remember_api.extensions.tenant import Tenant
-
-        return [Tenant(schema=schema) for schema in self.valid_schemas]
-
 
 async def drop_schema(conn, schema_name: str) -> None:
     """Drop a schema and all its contents."""

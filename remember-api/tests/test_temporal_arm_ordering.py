@@ -70,11 +70,10 @@ async def _run_recall(
     captured: list[list[RetrievalResult]] = []
 
     engine = memory_engine.MemoryEngine.__new__(memory_engine.MemoryEngine)
-    engine._operation_validator = None
     engine._config_resolver = _ConfigResolver()
     engine._search_semaphore = asyncio.Semaphore(1)
     engine._initialized = True
-    engine._read_backend = object()
+    engine._backend = object()
     engine.embeddings = object()
     engine.query_analyzer = object()
     engine._cross_encoder_reranker = _Reranker()

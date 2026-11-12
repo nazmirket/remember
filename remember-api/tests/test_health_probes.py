@@ -29,21 +29,6 @@ def _api_client(health: dict) -> tuple[TestClient, MagicMock]:
     return TestClient(create_app(memory, initialize_memory=False)), memory
 
 
-def _worker_client(health: dict, poller: MagicMock | None = None) -> tuple[TestClient, MagicMock]:
-    """Worker metrics app whose engine reports ``health``."""
-    from remember_api.worker.main import create_worker_app
-
-    memory = MagicMock()
-    # Copy: the worker handler enriches the payload it gets back in place.
-    memory.health_check = AsyncMock(return_value=dict(health))
-    if poller is None:
-        poller = MagicMock()
-        poller.worker_id = "w-test"
-        poller.is_shutdown = False
-        poller.seconds_since_last_poll = 0.4
-    return TestClient(create_worker_app(poller, memory)), memory
-
-
 # ---------------------------------------------------------------------------
 # Liveness: DB-free
 # ---------------------------------------------------------------------------
@@ -63,44 +48,6 @@ def test_api_liveness_stays_200_when_database_is_down():
     assert memory.health_check.await_count == 0
 
 
-def test_worker_liveness_stays_200_when_database_is_down():
-    client, memory = _worker_client(_DB_DOWN)
-
-    response = client.get("/health/live")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "alive"
-    assert body["worker_id"] == "w-test"
-    assert body["is_shutdown"] is False
-    assert body["seconds_since_last_poll"] == 0.4
-    assert memory.health_check.await_count == 0
-
-
-def test_worker_liveness_stays_200_when_poller_has_stalled():
-    """A stale poll cycle is reported, never converted into a restart."""
-    poller = MagicMock()
-    poller.worker_id = "w-stalled"
-    poller.is_shutdown = False
-    poller.seconds_since_last_poll = 900.0
-    client, _ = _worker_client(_DB_UP, poller=poller)
-
-    response = client.get("/health/live")
-
-    assert response.status_code == 200
-    assert response.json()["seconds_since_last_poll"] == 900.0
-
-
-def test_worker_liveness_reports_null_poll_age_before_first_cycle():
-    poller = MagicMock()
-    poller.worker_id = "w-fresh"
-    poller.is_shutdown = False
-    poller.seconds_since_last_poll = None
-    client, _ = _worker_client(_DB_UP, poller=poller)
-
-    assert client.get("/health/live").json()["seconds_since_last_poll"] is None
-
-
 # ---------------------------------------------------------------------------
 # Readiness: still gated on the database
 # ---------------------------------------------------------------------------
@@ -109,16 +56,6 @@ def test_worker_liveness_reports_null_poll_age_before_first_cycle():
 @pytest.mark.parametrize("path", ["/health", "/health/ready"])
 def test_api_readiness_fails_when_database_is_down(path):
     client, _ = _api_client(_DB_DOWN)
-
-    response = client.get(path)
-
-    assert response.status_code == 503
-    assert response.json()["status"] == "unhealthy"
-
-
-@pytest.mark.parametrize("path", ["/health", "/health/ready"])
-def test_worker_readiness_fails_when_database_is_down(path):
-    client, _ = _worker_client(_DB_DOWN)
 
     response = client.get(path)
 
@@ -138,16 +75,6 @@ def test_api_health_and_ready_return_the_same_payload():
     from remember_api.api import http
 
     assert health.json()["checkout_source"] == str(Path(http.__file__).resolve())
-
-
-def test_worker_health_and_ready_return_the_same_payload():
-    client, _ = _worker_client(_DB_UP)
-
-    health = client.get("/health")
-    ready = client.get("/health/ready")
-
-    assert health.status_code == ready.status_code == 200
-    assert health.json() == ready.json() == {**_DB_UP, "worker_id": "w-test", "is_shutdown": False}
 
 
 # ---------------------------------------------------------------------------

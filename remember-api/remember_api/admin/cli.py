@@ -8,9 +8,7 @@ import asyncio
 import io
 import json
 import logging
-import os
 import struct
-import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,17 +22,15 @@ from ..config import DEFAULT_DATABASE_SCHEMA, RememberConfig, load_dotenv_for_en
 from ..db_url import is_oracle_url
 from ..engine.memories import get_memories, sql_memories
 from ..engine.retain.attachment_store import ATTACHMENT_SWEEP_GRACE, reclaim_unreferenced_attachments
-from ..engine.retain.bank_utils import _vector_index_clause, bank_indexes_are_store_owned
+from ..engine.retain.bank_utils import _vector_index_clause
 from ..engine.schema import fq_table_explicit as _fq_table
-from ..engine.storage import bank_storage_prefix, create_file_storage
-from ..engine.transfer import TransferScope, stream_export_bank
+from ..engine.storage import PostgreSQLFileStorage, bank_storage_prefix
 from ..engine.vector_index_health import (
     BankIndexResult,
     drop_orphaned_bank_indexes,
     list_bank_ids,
     reconcile_bank_vector_indexes,
 )
-from ..extensions import TenantExtension, load_extension
 from ..pg0 import parse_pg0_url, resolve_database_url
 from ..schema_context import _current_schema
 from .reembed import SchemaReembed, finish_schema, reembed_schema
@@ -301,24 +297,8 @@ async def _sync_owned_sequences(conn: asyncpg.Connection, schema: str, tables: l
 
 
 def _effective_backup_tables() -> list[str]:
-    """Core backup tables plus any bank-scoped tables a loaded extension declares.
-
-    ``BACKUP_TABLES`` covers only the tables core owns. An extension that
-    provisions its own bank-scoped tables (via ``TenantExtension``) declares
-    them through ``extra_bank_tables()`` so they aren't dropped on restore.
-    Extension tables are appended *after* the core set so restore's forward
-    COPY inserts them after their FK parents (e.g. ``banks``) and the reversed
-    TRUNCATE clears them before those parents.
-    """
-    tables = list(BACKUP_TABLES)
-    tenant_extension = load_extension("TENANT", TenantExtension)
-    if tenant_extension is not None:
-        seen = set(tables)
-        for spec in tenant_extension.extra_bank_tables():
-            if spec.include_in_backup and spec.name not in seen:
-                tables.append(spec.name)
-                seen.add(spec.name)
-    return tables
+    """Return the tables owned by the local database."""
+    return list(BACKUP_TABLES)
 
 
 async def _admin_connect(db_url: str) -> asyncpg.Connection:
@@ -347,8 +327,7 @@ async def _backup(
 ) -> dict[str, Any]:
     """Backup all tables to a zip file using binary COPY protocol.
 
-    ``backup_tables`` defaults to the core ``BACKUP_TABLES``; callers pass the
-    extension-augmented list from ``_effective_backup_tables()``.
+    ``backup_tables`` defaults to the local database's ``BACKUP_TABLES``.
     """
     backup_tables = backup_tables if backup_tables is not None else BACKUP_TABLES
     # sql_memories(), not get_memories(): backup reads this Postgres schema's own tables, whatever the store.
@@ -417,10 +396,8 @@ async def _restore(
 ) -> dict[str, Any]:
     """Restore all tables from a zip file using binary COPY protocol.
 
-    ``backup_tables`` defaults to the core ``BACKUP_TABLES``; callers pass the
-    extension-augmented list from ``_effective_backup_tables()``. Tables named
-    here but absent from the archive are truncated then skipped for restore, so
-    a stale extension registration never leaves pre-restore rows behind.
+    ``backup_tables`` defaults to the local database's ``BACKUP_TABLES``. Tables
+    named here but absent from the archive are truncated then skipped.
     """
     backup_tables = backup_tables if backup_tables is not None else BACKUP_TABLES
     conn = await asyncpg.connect(database_url)
@@ -563,10 +540,9 @@ async def _run_migration(
     base_schema: str = DEFAULT_DATABASE_SCHEMA,
     embedding_dimension: int | None = None,
     ensure_extensions: bool = True,
-) -> list[str]:
-    """Resolve database URL and run migrations for one schema or all discovered schemas."""
-    from ..engine.memories import get_memories
-    from ..migrations import run_migrations_for_schemas
+) -> str:
+    """Resolve the database URL and migrate the selected local schema."""
+    from ..migrations import run_local_migrations
 
     _pg0 = parse_pg0_url(db_url)
     is_pg0, instance_name = _pg0.is_pg0, _pg0.instance_name
@@ -575,63 +551,21 @@ async def _run_migration(
     resolved_url = await resolve_database_url(db_url)
 
     config = RememberConfig.from_env()
-    tenant_extension = load_extension("TENANT", TenantExtension)
-    if schema:
-        schemas = [schema]
-    else:
-        schemas = [base_schema or DEFAULT_DATABASE_SCHEMA]
-        if tenant_extension:
-            tenants = await tenant_extension.list_tenants()
-            schemas.extend(tenant.schema for tenant in tenants if tenant.schema)
+    target_schema = schema or base_schema or DEFAULT_DATABASE_SCHEMA
 
-        # Preserve order while removing duplicates.
-        schemas = list(dict.fromkeys(schemas))
-
-    # Migrate up to `migration_concurrency` schemas at once (each in its own
-    # process); within a schema the work stays sequential. Run off the event
-    # loop so the process pool's blocking joins don't stall it.
+    # Run the local migration outside the event loop.
     await asyncio.to_thread(
-        run_migrations_for_schemas,
+        run_local_migrations,
         resolved_url,
-        schemas,
-        concurrency=config.migration_concurrency,
+        target_schema,
         migration_database_url=config.migration_database_url,
         embedding_dimension=embedding_dimension,
         vector_extension=config.vector_extension,
         text_search_extension=config.text_search_extension,
-        pg_search_tokenizer=config.text_search_extension_pg_search_tokenizer,
         ensure_extensions=ensure_extensions,
-        store_owned_memories=get_memories().store_owned,
     )
 
-    # After core migrations, provision any extension-owned bank-scoped tables
-    # per schema so extension schema evolves on the same lifecycle as core
-    # schema (rather than via a lazy first-request path).
-    if tenant_extension is not None:
-        await _provision_extra_bank_tables(resolved_url, schemas, tenant_extension)
-
-    return schemas
-
-
-async def _provision_extra_bank_tables(
-    resolved_url: str, schemas: list[str], tenant_extension: TenantExtension
-) -> None:
-    """Run the tenant extension's table provisioner for each migrated schema.
-
-    Fires after core migrations complete so extension-owned bank tables are
-    created/evolved on the same lifecycle as core schema. A failure aborts the
-    migration command (and names the offending schema) rather than being
-    swallowed — provisioning is idempotent, so the operator can fix and re-run.
-    """
-    for schema in schemas:
-        conn = await asyncpg.connect(resolved_url)
-        try:
-            await tenant_extension.provision_bank_tables(conn, schema)
-        except Exception as e:
-            typer.echo(f"  Failed to provision extension tables for schema '{schema}': {e}", err=True)
-            raise
-        finally:
-            await conn.close()
+    return target_schema
 
 
 @app.command(name="run-db-migration")
@@ -640,7 +574,7 @@ def run_db_migration(
         None,
         "--schema",
         "-s",
-        help="Database schema to run migrations on. If omitted, migrate the base schema and all discovered tenant schemas.",
+        help="Database schema to run migrations on. If omitted, migrate the configured base schema.",
     ),
     embedding_dimension: int | None = typer.Option(
         None,
@@ -654,8 +588,7 @@ def run_db_migration(
             "Skip the post-migration vector / text-search index reconcile. This step only does "
             "work when the configured backend (REMEMBER_API_VECTOR_EXTENSION / "
             "REMEMBER_API_TEXT_SEARCH_EXTENSION) differs from a schema's existing indexes — a "
-            "rare, operator-driven change. Skipping it makes a no-change re-migration over many "
-            "tenant schemas much faster. Only use when you have NOT changed the backend; a "
+            "rare, operator-driven change. Only use when you have NOT changed the backend; a "
             "backend change still needs a normal run to reshape the indexes."
         ),
     ),
@@ -671,11 +604,11 @@ def run_db_migration(
     if schema:
         typer.echo(f"Running database migrations for schema: {schema}...")
     else:
-        typer.echo("Running database migrations for base schema and all discovered tenant schemas...")
+        typer.echo("Running database migrations for the configured base schema...")
     if skip_extension_reconcile:
         typer.echo("Skipping post-migration extension reconcile (--skip-extension-reconcile).")
 
-    schemas = asyncio.run(
+    target_schema = asyncio.run(
         _run_migration(
             config.database_url,
             schema=schema,
@@ -685,39 +618,15 @@ def run_db_migration(
         )
     )
 
-    typer.echo(f"Database migrations completed successfully for {len(schemas)} schema(s)")
-
-
-async def _resolve_schemas(base_schema: str | None) -> list[str]:
-    """Base schema plus every discovered tenant schema, de-duplicated in order."""
-    schemas = [base_schema or DEFAULT_DATABASE_SCHEMA]
-    tenant_extension = load_extension("TENANT", TenantExtension)
-    if tenant_extension:
-        tenants = await tenant_extension.list_tenants()
-        schemas.extend(tenant.schema for tenant in tenants if tenant.schema)
-    return list(dict.fromkeys(schemas))
+    typer.echo(f"Database migrations completed successfully for schema '{target_schema}'")
 
 
 @dataclass
 class RepairSweep:
-    """What one ``repair-bank`` run did, and which schemas it could not do at all.
-
-    A dataclass rather than a second return value: the bank list alone cannot
-    distinguish "nothing needed doing" from "never got there", and the command must
-    exit non-zero for the second.
-
-    ``skipped_schemas`` means "not fully reconciled — re-run once the cause is
-    cleared". A schema that failed partway appears in BOTH lists: the banks it did
-    reconcile are real work that must still be reported (their failed-index names
-    appear nowhere else), and the ones it did not still need the re-run. A schema
-    whose banks were all repaired never appears here, even if the orphan sweep after
-    them failed; that is reported on its own line and left out, because telling an
-    operator to re-run a sweep that already did its work is how a report stops being
-    believed.
-    """
+    """Results and any incomplete work from a local schema repair."""
 
     banks: list[BankIndexResult]
-    skipped_schemas: list[str]
+    skipped_schema: str | None
     # Observations removed because a source memory they cite no longer exists (#5937);
     # in a dry run, how many would be.
     orphan_observations: int = 0
@@ -749,149 +658,122 @@ async def _run_repair_bank(
     Deliberately unbudgeted, unlike the background operation: this is an operator
     asking for convergence now, across as many banks as they named.
     """
-    schemas = [schema] if schema else await _resolve_schemas(base_schema)
+    target_schema = schema or base_schema or DEFAULT_DATABASE_SCHEMA
     index_clause = _vector_index_clause()
-    # sql_memories(), not get_memories(): the sweep reads this Postgres schema's own rows. A
-    # bank a custom store owns has none here, so it finds nothing to remove.
     pg_store = sql_memories()
 
     conn = await _admin_connect(db_url)
     results: list[BankIndexResult] = []
-    skipped_schemas: list[str] = []
     orphan_observations = 0
     rebuilt_search_vectors = 0
     banks_scanned = 0
     unreferenced_attachments = 0
-    # The daily sweep's rule with no lower bound, so it collects what leaked before
-    # the sweep existed. get_memories(), not the SQL store: whether an attachment is
-    # referenced is a question about the document, which a custom store may own.
+    # Include all attachments older than the normal sweep's grace period.
     attachments_before = datetime.now(timezone.utc) - ATTACHMENT_SWEEP_GRACE
     attachments_after = datetime(1970, 1, 1, tzinfo=timezone.utc)
     try:
-        for target_schema in schemas:
-            # The whole schema is inside the guard, not just list_bank_ids. Planning a
-            # bank can now raise — a memories store that cannot say who owns a bank
-            # must not be guessed at, or a transient blip would have the sweep rebuild
-            # every index it failed on (#4615). That is worth failing on, but per
-            # SCHEMA: an unreachable store used to take the whole command down with a
-            # bare traceback from inside a list comprehension, so a deployment whose
-            # admin process cannot reach the store repaired nothing at all, including
-            # the ordinary SQL-owned banks the operator ran this for.
-            # Appended as they complete, not built as a comprehension: a comprehension
-            # binds nothing until it finishes, so a blip partway through discarded every
-            # reconcile that had already run. See RepairSweep for what that means for
-            # the two lists.
-            bank_ids: list[str] = []
-            schema_results: list[BankIndexResult] = []
-            schema_orphans = 0
-            schema_rebuilt = 0
-            schema_attachments = 0
-            schema_banks_done = 0
-            schema_file_storage = _admin_file_storage(conn, target_schema) if attachments else None
-            try:
-                bank_ids = [bank_id] if bank_id else await list_bank_ids(conn, target_schema)
-                for bid in bank_ids:
-                    if index_clause is not None:
-                        schema_results.append(
-                            await reconcile_bank_vector_indexes(conn, target_schema, bid, index_clause, dry_run=dry_run)
-                        )
-                    schema_orphans += await pg_store.admin_sweep_orphan_observations(
-                        conn=conn, schema=target_schema, bank_id=bid, dry_run=dry_run
+        # Keep completed bank results if a later repair fails.
+        bank_ids: list[str] = []
+        schema_results: list[BankIndexResult] = []
+        schema_orphans = 0
+        schema_rebuilt = 0
+        schema_attachments = 0
+        schema_banks_done = 0
+        schema_file_storage = _admin_file_storage(conn, target_schema) if attachments else None
+        try:
+            bank_ids = [bank_id] if bank_id else await list_bank_ids(conn, target_schema)
+            for bid in bank_ids:
+                if index_clause is not None:
+                    schema_results.append(
+                        await reconcile_bank_vector_indexes(conn, target_schema, bid, index_clause, dry_run=dry_run)
                     )
-                    # After the sweep, so observations it just removed are not re-tokenized.
-                    schema_rebuilt += await pg_store.admin_rebuild_observation_search_vectors(
-                        conn=conn, schema=target_schema, bank_id=bid, dry_run=dry_run
-                    )
-                    if schema_file_storage is not None:
-                        # The shared rule resolves tables through fq_table.
-                        token = _current_schema.set(target_schema)
-                        try:
-                            schema_attachments += await reclaim_unreferenced_attachments(
-                                conn,
-                                schema_file_storage,
-                                get_memories(),
-                                bid,
-                                created_after=attachments_after,
-                                created_before=attachments_before,
-                                dry_run=dry_run,
-                            )
-                        finally:
-                            _current_schema.reset(token)
-                    schema_banks_done += 1
-            except Exception as exc:  # noqa: BLE001 — one bad schema must not abort the sweep
-                results.extend(schema_results)
-                orphan_observations += schema_orphans
-                rebuilt_search_vectors += schema_rebuilt
-                unreferenced_attachments += schema_attachments
-                banks_scanned += schema_banks_done
-                done = f", {schema_banks_done} of {len(bank_ids)} bank(s) done" if schema_banks_done else ""
-                typer.echo(f"  schema '{target_schema}': skipped ({exc}){done}", err=True)
-                skipped_schemas.append(target_schema)
-                if isinstance(exc, asyncpg.PostgresConnectionError | asyncpg.InterfaceError):
-                    # The sweep holds ONE connection for every schema, so this is not a
-                    # property of the schema it happened on — every remaining schema
-                    # fails the same way. Mark them unlooked-at and stop rather than
-                    # print the same error once per tenant. Stop, not re-raise: raising
-                    # reaches repair_bank's asyncio.run with no handler and discards
-                    # every report, which is what the reporting split exists to avoid.
-                    remaining = schemas[schemas.index(target_schema) + 1 :]
-                    if remaining:
-                        typer.echo(
-                            f"  stopping: the shared connection is gone, so "
-                            f"{len(remaining)} further schema(s) were not attempted.",
-                            err=True,
+                schema_orphans += await pg_store.admin_sweep_orphan_observations(
+                    conn=conn, schema=target_schema, bank_id=bid, dry_run=dry_run
+                )
+                # After the sweep, so observations it just removed are not re-tokenized.
+                schema_rebuilt += await pg_store.admin_rebuild_observation_search_vectors(
+                    conn=conn, schema=target_schema, bank_id=bid, dry_run=dry_run
+                )
+                if schema_file_storage is not None:
+                    # The shared rule resolves tables through fq_table.
+                    token = _current_schema.set(target_schema)
+                    try:
+                        schema_attachments += await reclaim_unreferenced_attachments(
+                            conn,
+                            schema_file_storage,
+                            get_memories(),
+                            bid,
+                            created_after=attachments_after,
+                            created_before=attachments_before,
+                            dry_run=dry_run,
                         )
-                    skipped_schemas.extend(remaining)
-                    break
-                continue
+                    finally:
+                        _current_schema.reset(token)
+                schema_banks_done += 1
+        except Exception as exc:  # noqa: BLE001 — one bad schema must not abort the sweep
             results.extend(schema_results)
             orphan_observations += schema_orphans
             rebuilt_search_vectors += schema_rebuilt
             unreferenced_attachments += schema_attachments
             banks_scanned += schema_banks_done
-            # Only in --all mode: an index whose bank row is gone is unreachable
-            # from every bank-scoped path, so this is the one place that can collect
-            # it. Normally finds nothing — delete_bank drops a bank's indexes while it
-            # still knows their names — but a deployment that hit the #3485 wall could
-            # not run delete_bank at all.
-            #
-            # Best-effort, and deliberately NOT a "skipped schema": the banks here were
-            # reconciled, and reporting the schema as skipped would tell the operator
-            # to re-run a sweep that already did its work. Per-index drop failures are
-            # handled inside drop_orphaned_bank_indexes; this catches only the catalog
-            # read behind it.
-            orphans: list[str] = []
-            if not bank_id and index_clause is not None:
-                try:
-                    orphans = await drop_orphaned_bank_indexes(conn, target_schema, dry_run=dry_run)
-                except Exception as exc:  # noqa: BLE001 — the banks were repaired; orphan collection is a nicety
-                    typer.echo(
-                        f"  schema '{target_schema}': banks repaired, but orphan collection failed ({exc})", err=True
-                    )
-            if orphans:
-                typer.echo(
-                    f"  schema '{target_schema}': {len(orphans)} orphaned index(es) "
-                    f"{'to drop (dry-run)' if dry_run else 'dropped'} (no matching bank)"
-                )
-            typer.echo(
-                f"  schema '{target_schema}': {len(bank_ids)} bank(s) scanned, "
-                f"{sum(r.already_present for r in schema_results)} present, "
-                f"{sum(r.created for r in schema_results)} created, "
-                f"{sum(r.dropped for r in schema_results)} dropped, "
-                f"{sum(r.skipped for r in schema_results)} to-create (dry-run), "
-                f"{sum(r.would_drop for r in schema_results)} to-drop (dry-run), "
-                f"{sum(r.failed for r in schema_results)} failed, "
-                f"{schema_orphans} orphan observation(s) {'to remove (dry-run)' if dry_run else 'removed'}, "
-                f"{schema_rebuilt} observation keyword index(es) {'to rebuild (dry-run)' if dry_run else 'rebuilt'}"
-                + (
-                    f", {schema_attachments} unreferenced attachment(s) {'to remove (dry-run)' if dry_run else 'removed'}"
-                    if attachments
-                    else ""
-                )
+            done = f", {schema_banks_done} of {len(bank_ids)} bank(s) done" if schema_banks_done else ""
+            typer.echo(f"  schema '{target_schema}': skipped ({exc}){done}", err=True)
+            return RepairSweep(
+                banks=results,
+                skipped_schema=target_schema,
+                orphan_observations=orphan_observations,
+                rebuilt_search_vectors=rebuilt_search_vectors,
+                banks_scanned=banks_scanned,
+                unreferenced_attachments=unreferenced_attachments,
             )
+        results.extend(schema_results)
+        orphan_observations += schema_orphans
+        rebuilt_search_vectors += schema_rebuilt
+        unreferenced_attachments += schema_attachments
+        banks_scanned += schema_banks_done
+        # Only in --all mode: an index whose bank row is gone is unreachable
+        # from every bank-scoped path, so this is the one place that can collect
+        # it. Normally finds nothing — delete_bank drops a bank's indexes while it
+        # still knows their names — but a deployment that hit the #3485 wall could
+        # not run delete_bank at all.
+        #
+        # Best-effort, and deliberately NOT a "skipped schema": the banks here were
+        # reconciled, and reporting the schema as skipped would tell the operator
+        # to re-run a sweep that already did its work. Per-index drop failures are
+        # handled inside drop_orphaned_bank_indexes; this catches only the catalog
+        # read behind it.
+        orphans: list[str] = []
+        if not bank_id and index_clause is not None:
+            try:
+                orphans = await drop_orphaned_bank_indexes(conn, target_schema, dry_run=dry_run)
+            except Exception as exc:  # noqa: BLE001 — the banks were repaired; orphan collection is a nicety
+                typer.echo(
+                    f"  schema '{target_schema}': banks repaired, but orphan collection failed ({exc})", err=True
+                )
+        if orphans:
+            typer.echo(
+                f"  schema '{target_schema}': {len(orphans)} orphaned index(es) "
+                f"{'to drop (dry-run)' if dry_run else 'dropped'} (no matching bank)"
+            )
+        typer.echo(
+            f"  schema '{target_schema}': {len(bank_ids)} bank(s) scanned, "
+            f"{sum(r.already_present for r in schema_results)} present, "
+            f"{sum(r.created for r in schema_results)} created, "
+            f"{sum(r.dropped for r in schema_results)} dropped, "
+            f"{sum(r.skipped for r in schema_results)} to-create (dry-run), "
+            f"{sum(r.would_drop for r in schema_results)} to-drop (dry-run), "
+            f"{sum(r.failed for r in schema_results)} failed, "
+            f"{schema_orphans} orphan observation(s) {'to remove (dry-run)' if dry_run else 'removed'}, "
+            f"{schema_rebuilt} observation keyword index(es) {'to rebuild (dry-run)' if dry_run else 'rebuilt'}"
+            + (
+                f", {schema_attachments} unreferenced attachment(s) {'to remove (dry-run)' if dry_run else 'removed'}"
+                if attachments
+                else ""
+            )
+        )
         return RepairSweep(
             banks=results,
-            skipped_schemas=skipped_schemas,
+            skipped_schema=None,
             orphan_observations=orphan_observations,
             rebuilt_search_vectors=rebuilt_search_vectors,
             banks_scanned=banks_scanned,
@@ -912,13 +794,13 @@ def repair_bank(
     all_banks: bool = typer.Option(
         False,
         "--all",
-        help="Repair every bank in the base schema and all discovered tenant schemas.",
+        help="Repair every bank in the selected local schema.",
     ),
     schema: str | None = typer.Option(
         None,
         "--schema",
         "-s",
-        help="Limit to a single schema. Defaults to the base schema plus discovered tenant schemas.",
+        help="Local schema to repair. Defaults to the configured schema.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -951,13 +833,6 @@ def repair_bank(
     is missing or invalid — a bank whose creation lost its DDL to a deadlock, one
     restored around it, or one whose access method drifted after a backend
     switch. Nothing is dropped in that mode.
-
-    A bank whose memories a custom store owns is outside all of this, decided per
-    bank rather than per deployment: it has no rows in memory_units, so nothing is
-    built for it and nothing it already carries is taken away (#4615). Such a bank
-    reports 0 present, 0 created either way; query pg_indexes to see what one still
-    holds. If the store cannot say who owns a bank, that schema is reported skipped
-    and this exits non-zero rather than guessing and rebuilding.
 
     With a threshold set, a (bank, fact_type) earns its index once it holds that
     many rows; below it the planner answers the same query exactly, and faster,
@@ -1002,7 +877,7 @@ def repair_bank(
         typer.echo("Configured vector backend does not use per-bank vector indexes — skipping index repair.")
 
     target = f"bank '{bank_id}'" if bank_id else "all banks"
-    scope = f"schema '{schema}'" if schema else "base schema and all discovered tenant schemas"
+    scope = f"schema '{schema or config.database_schema or DEFAULT_DATABASE_SCHEMA}'"
     typer.echo(f"Repairing {target} across {scope}...")
     if dry_run:
         typer.echo("Dry run: nothing will be created, dropped or deleted.")
@@ -1041,23 +916,14 @@ def repair_bank(
             else ""
         )
     )
-    # Both are reported before either exits. They are independent — a sweep can have
-    # failed builds in one schema and be unable to look at another — and raising on
-    # the first swallowed the index names, which appear nowhere else and are the whole
-    # point of the failed line.
     if total_failed:
         failed_names = [name for r in results for name in r.failed_indexes]
         typer.echo(f"Failed indexes (dropped, retry with a re-run): {', '.join(failed_names)}", err=True)
-    if sweep.skipped_schemas:
-        # Some or all of a skipped schema's banks were not reconciled, so a run that
-        # reported only successes would read as converged while whole tenants — or the
-        # tail of one — still carry whatever they carried.
+    if sweep.skipped_schema:
         typer.echo(
-            f"Skipped {len(sweep.skipped_schemas)} schema(s): "
-            f"{', '.join(sweep.skipped_schemas)}. Re-run once the cause is cleared.",
-            err=True,
+            f"Schema '{sweep.skipped_schema}' was not fully repaired. Re-run once the cause is cleared.", err=True
         )
-    if total_failed or sweep.skipped_schemas:
+    if total_failed or sweep.skipped_schema:
         raise typer.Exit(1)
 
 
@@ -1234,13 +1100,10 @@ async def _move_bank_files(conn: asyncpg.Connection, db_url: str, schema: str, o
     """
     old_prefix = bank_storage_prefix(old_id, schema)
     new_prefix = bank_storage_prefix(new_id, schema)
-    # Only the native backend needs a pool; building one unconditionally keeps
-    # this from branching on the storage type. Resolved like _admin_connect does,
-    # so a pg0:// URL reaches the embedded server it already started.
+    # Resolve pg0 URLs the same way as the other admin operations.
     pool = await asyncpg.create_pool(await resolve_database_url(db_url), min_size=1, max_size=2)
     try:
-        storage = create_file_storage(
-            storage_type=RememberConfig.from_env().file_storage_type,
+        storage = PostgreSQLFileStorage(
             pool_getter=lambda: pool,
             schema=schema,
         )
@@ -1296,18 +1159,6 @@ async def _run_rename_bank(
     CONCURRENTLY, which is why it runs after the commit, outside the transaction.
     Until it finishes, recall on the bank runs without its index.
     """
-    # Same unreachable-store case the reconcile below now handles, reported the same
-    # way: this runs before anything is changed, so refusing is free and a traceback
-    # would just look like a crash.
-    try:
-        old_is_store_owned = bank_indexes_are_store_owned(old_bank_id)
-    except Exception as exc:  # noqa: BLE001 — cannot verify the precondition, so do not proceed
-        raise RenameBankError(
-            f"cannot tell whether bank '{old_bank_id}' keeps its memories outside SQL ({exc}); "
-            f"nothing was changed. Re-run once the memories store is reachable."
-        ) from exc
-    if old_is_store_owned:
-        raise RenameBankError(f"bank '{old_bank_id}' keeps its memories outside SQL; rename is not supported for it")
     conn = await _admin_connect(db_url)
     try:
         moved = await _rename_bank(conn, schema, old_bank_id, new_bank_id, dry_run=dry_run)
@@ -1317,10 +1168,7 @@ async def _run_rename_bank(
         index_clause = _vector_index_clause()
         if not dry_run and index_clause is not None:
             # The rename is already committed here, so a failure in the rebuild must
-            # not surface as a bare traceback that buries that fact. Planning can now
-            # raise (a memories store that cannot say who owns the new id is not
-            # guessed at — see bank_indexes_are_store_owned), and the honest report is
-            # "the rename worked, the index did not".
+            # not surface as a bare traceback that buries that fact.
             try:
                 result = await reconcile_bank_vector_indexes(conn, schema, new_bank_id, index_clause)
             except Exception as exc:  # noqa: BLE001 — the rename is committed; say so rather than traceback
@@ -1425,162 +1273,9 @@ def _admin_file_storage(conn: asyncpg.Connection, schema: str) -> Any:
     Attachment bytes live here rather than in a column, so a bank with
     attachments cannot be exported without it.
     """
-    from ..engine.storage import create_file_storage
-
-    config = RememberConfig.from_env()
-    return create_file_storage(
-        storage_type=config.file_storage_type,
+    return PostgreSQLFileStorage(
         pool_getter=lambda: _SingleConnectionPool(conn),
         schema=schema,
-    )
-
-
-async def _run_export_bank(db_url: str, bank_id: str, output: Path, schema: str, include_history: bool) -> int:
-    """Export a whole bank to a ZIP archive.
-
-    The memories store is resolved from config here and handed to the export, because a bank whose
-    memories live outside SQL cannot be read from this connection: the tables would be empty and the
-    archive would come out well-formed and empty, which an operator only discovers at restore time.
-    A Postgres deployment resolves to the SQL store, whose capability probe sends the export down
-    exactly the path it always took.
-
-    Resolving it in a short-lived CLI process is safe because the store connects lazily on first
-    use rather than in `initialize()`.
-    """
-    conn = await _admin_connect(db_url)
-    try:
-        # export_bank resolves table names via fq_table (the _current_schema
-        # contextvar); set it so the raw connection targets the right schema.
-        _current_schema.set(schema)
-        # _admin_connect registers JSON codecs, so row dumps already contain
-        total_bytes = 0
-        tmp_output = output.with_suffix(f"{output.suffix}.tmp.{uuid.uuid4().hex[:8]}")
-        try:
-            with tmp_output.open("wb") as fp:
-                async for chunk in stream_export_bank(
-                    conn,
-                    bank_id,
-                    scope=TransferScope(data=True, bank_config=True, history=include_history),
-                    bank_rows_json_encoding="decoded",
-                    memories=get_memories(),
-                    file_storage=_admin_file_storage(conn, schema),
-                ):
-                    fp.write(chunk)
-                    total_bytes += len(chunk)
-                fp.flush()
-            os.replace(tmp_output, output)
-        finally:
-            if tmp_output.exists():
-                try:
-                    tmp_output.unlink()
-                except OSError:
-                    pass
-        return total_bytes
-    finally:
-        await conn.close()
-
-
-@app.command(name="export-bank")
-def export_bank_command(
-    bank_id: str = typer.Option(..., "--bank", "-b", help="Bank id to export."),
-    output: Path = typer.Option(..., "--output", "-o", help="Path to write the .zip archive."),
-    schema: str | None = typer.Option(
-        None,
-        "--schema",
-        "-s",
-        help="Database schema the bank lives in. Defaults to the configured base schema.",
-    ),
-    include_history: bool = typer.Option(
-        False,
-        "--include-history",
-        help="Also export operational history (audit_log, llm_requests). Off by default.",
-    ),
-):
-    """Export an entire bank to a portable ZIP (no embeddings — regenerated on import).
-
-    Carries documents, facts, observations, bank config, mental models, directives
-    and webhooks so the bank can be imported into a new instance configured with a
-    different embedding model / vector / text-search backend.
-    """
-    config = RememberConfig.from_env()
-
-    if not config.database_url:
-        typer.echo("Error: Database URL not configured.", err=True)
-        typer.echo("Set REMEMBER_API_DATABASE_URL environment variable.", err=True)
-        raise typer.Exit(1)
-
-    target_schema = schema or config.database_schema or DEFAULT_DATABASE_SCHEMA
-    typer.echo(f"Exporting bank '{bank_id}' from schema '{target_schema}'...")
-
-    size = asyncio.run(_run_export_bank(config.database_url, bank_id, output, target_schema, include_history))
-
-    typer.echo(f"Exported bank '{bank_id}' to {output} ({size} bytes)")
-
-
-async def _run_import_bank(archive_path: Path, schema: str, target_bank_id: str | None, include_history: bool):
-    """Boot a MemoryEngine (for the target's embedding model) and restore a bank archive."""
-    # MemoryEngine is heavy (loads embeddings); import it lazily so other admin
-    # commands don't pay for it. _current_schema is imported at module top.
-    from ..engine.memory_engine import MemoryEngine
-    from ..models import RequestContext
-
-    # run_migrations=True so a fresh target instance is provisioned at this
-    # instance's embedding dimension / vector / text-search backend before restore.
-    engine = MemoryEngine(run_migrations=True)
-    await engine.initialize()
-    try:
-        _current_schema.set(schema)
-        context = RequestContext(internal=True, user_initiated=True)
-        # The open file, not its bytes: the restore reads the archive entry by entry.
-        with archive_path.open("rb") as archive:
-            return await engine.import_bank_async(
-                archive,
-                context,
-                target_bank_id=target_bank_id,
-                scope=TransferScope(data=True, bank_config=True, history=include_history),
-            )
-    finally:
-        await engine.close()
-
-
-@app.command(name="import-bank")
-def import_bank_command(
-    archive: Path = typer.Option(..., "--archive", "-a", help="Path to the .zip produced by export-bank."),
-    schema: str | None = typer.Option(
-        None, "--schema", "-s", help="Target schema. Defaults to the configured base schema."
-    ),
-    target_bank: str | None = typer.Option(
-        None, "--target-bank", help="Override the bank id (defaults to the archive's source bank)."
-    ),
-    include_history: bool = typer.Option(
-        False, "--include-history", help="Also restore operational history if present in the archive."
-    ),
-):
-    """Restore a whole bank from an export-bank archive into THIS instance.
-
-    Re-embeds facts with this instance's configured embedding model and rebuilds
-    links and indexes — the import half of a cross-instance migration. Run against
-    an instance configured with the desired embedding / vector / text-search backend.
-    The target bank must not already exist (import restores a whole bank, not a merge).
-    """
-    config = RememberConfig.from_env()
-    if not config.database_url:
-        typer.echo("Error: Database URL not configured.", err=True)
-        typer.echo("Set REMEMBER_API_DATABASE_URL environment variable.", err=True)
-        raise typer.Exit(1)
-
-    target_schema = schema or config.database_schema or DEFAULT_DATABASE_SCHEMA
-    typer.echo(f"Importing bank archive '{archive}' into schema '{target_schema}'...")
-
-    result = asyncio.run(_run_import_bank(archive, target_schema, target_bank, include_history))
-
-    typer.echo(
-        f"Imported bank '{result.bank_id}': {result.documents_imported} doc(s), "
-        f"{result.facts_imported} fact(s), {result.observations_imported} observation(s), "
-        f"{result.mental_models_imported} mental model(s), "
-        f"{result.mental_model_history_imported} mm-history row(s), "
-        f"{result.knowledge_pages_imported} page(s), {result.directives_imported} directive(s), "
-        f"{result.webhooks_imported} webhook(s), {result.history_rows_imported} history row(s)"
     )
 
 
@@ -1781,8 +1476,8 @@ def worker_status(
 
 
 async def _run_reembed(
-    db_url: str, schemas: list[str], *, finish: bool, batch_size: int, concurrency: int, sleep_s: float
-) -> list[SchemaReembed]:
+    db_url: str, schema: str, *, finish: bool, batch_size: int, concurrency: int, sleep_s: float
+) -> SchemaReembed:
     from ..engine.embeddings import create_embeddings_from_env, embedding_model_id
 
     resolved_url = await resolve_database_url(db_url)
@@ -1792,38 +1487,21 @@ async def _run_reembed(
         await embeddings.initialize()
         typer.echo(f"New embedding model: {embedding_model_id(embeddings)}")
     conn = await _admin_connect(db_url)
-    results: list[SchemaReembed] = []
     try:
-        for target_schema in schemas:
-            if finish:
-                results.append(await finish_schema(conn, target_schema))
-            else:
-                assert embeddings is not None
-                typer.echo(f"Re-embedding schema '{target_schema}'...")
-                results.append(
-                    await reembed_schema(
-                        conn,
-                        resolved_url,
-                        target_schema,
-                        embeddings,
-                        batch_size=batch_size,
-                        concurrency=concurrency,
-                        sleep_s=sleep_s,
-                    )
-                )
+        if finish:
+            return await finish_schema(conn, schema)
+        assert embeddings is not None
+        typer.echo(f"Re-embedding schema '{schema}'...")
+        return await reembed_schema(
+            conn, resolved_url, schema, embeddings, batch_size=batch_size, concurrency=concurrency, sleep_s=sleep_s
+        )
     finally:
         await conn.close()
-    return results
 
 
 @app.command(name="reembed")
 def reembed(
-    schema: str | None = typer.Option(
-        None, "--schema", "-s", help="Schema to re-embed. Mutually exclusive with --all-schemas."
-    ),
-    all_schemas: bool = typer.Option(
-        False, "--all-schemas", help="Re-embed the base schema and every discovered tenant schema, one at a time."
-    ),
+    schema: str | None = typer.Option(None, "--schema", "-s", help="Local schema to re-embed."),
     finish: bool = typer.Option(
         False, "--finish", help="Remove the write guard, once every server runs the new embedding model."
     ),
@@ -1847,9 +1525,6 @@ def reembed(
 
     PostgreSQL only. Resumable: re-run after an interruption and it continues.
     """
-    if bool(schema) == all_schemas:
-        typer.echo("Error: pass exactly one of --schema <name> or --all-schemas.", err=True)
-        raise typer.Exit(2)
     config = RememberConfig.from_env()
     if not config.database_url:
         typer.echo("Error: Database URL not configured.", err=True)
@@ -1857,24 +1532,19 @@ def reembed(
     if is_oracle_url(config.database_url):
         typer.echo("Error: reembed is PostgreSQL-only.", err=True)
         raise typer.Exit(1)
-    if get_memories().store_owned:
-        typer.echo("Error: a custom memories store owns the vectors; it must re-embed them itself.", err=True)
-        raise typer.Exit(1)
-
-    schemas = [schema] if schema else asyncio.run(_resolve_schemas(config.database_schema))
-    results = asyncio.run(
+    target_schema = schema or config.database_schema or DEFAULT_DATABASE_SCHEMA
+    result = asyncio.run(
         _run_reembed(
             config.database_url,
-            schemas,
+            target_schema,
             finish=finish,
             batch_size=batch_size,
             concurrency=concurrency,
             sleep_s=sleep_s,
         )
     )
-    for r in results:
-        rows = f", {r.rows_embedded} rows embedded" if r.rows_embedded else ""
-        typer.echo(f"  {r.schema}: {r.status}{rows}")
+    rows = f", {result.rows_embedded} rows embedded" if result.rows_embedded else ""
+    typer.echo(f"  {result.schema}: {result.status}{rows}")
     if not finish:
         typer.echo("Next: restart every server with the new model, then run `remember-admin reembed --finish`.")
 

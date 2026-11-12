@@ -114,6 +114,11 @@ describe("daemonEnv", () => {
     expect(env.UNRELATED).toBeUndefined();
   });
 
+  it("passes the configured local API token to the daemon", () => {
+    const tokenConfig = resolveConfig({ apiToken: "local-test-token" });
+    expect(daemonEnv(tokenConfig, {}).REMEMBER_API_TOKEN).toBe("local-test-token");
+  });
+
   it("forces a local host and leaves database selection to the embedded manager", () => {
     const env = daemonEnv(cfg, {
       REMEMBER_API_HOST: "0.0.0.0",

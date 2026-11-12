@@ -2,7 +2,7 @@
 SQLAlchemy models for the memory system.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID as PyUUID
@@ -17,9 +17,7 @@ class RequestContext:
     Context for request authentication and authorization.
 
     This dataclass carries authentication data from HTTP requests to the
-    memory engine operations. Beyond the Authorization header, a deployment can
-    surface additional request headers to its extensions via ``extra_headers``
-    (see REMEMBER_API_EXTENSION_PASSTHROUGH_HEADERS).
+    memory engine operations.
     """
 
     api_key: str | None = None
@@ -45,14 +43,6 @@ class RequestContext:
     # consuming CPU/DB resources (issue #2122). None means "never cancelled" —
     # every checkpoint is a no-op.
     cancellation: "CancellationToken | None" = None
-    # Request headers an operator opted into forwarding to extensions, keyed by
-    # lower-cased header name. Populated by the HTTP transport from the
-    # REMEMBER_API_EXTENSION_PASSTHROUGH_HEADERS allowlist; always empty unless
-    # that variable is set, and it never carries a header absent from the
-    # request. Lets a custom TenantExtension read an identity signal that isn't
-    # the Authorization header — e.g. a per-caller assertion sent alongside a
-    # shared bearer token by an authenticating proxy.
-    extra_headers: dict[str, str] = field(default_factory=dict)
     # Tenant schema this context already authenticated into, memoised so one
     # request authenticates once. A request can reach the engine through more
     # than one entry point — the bank-alias resolution on the route class runs

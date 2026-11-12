@@ -65,9 +65,9 @@ an outdated decision — silent disregard leaves the trap armed for the next ses
 
 ## Local operation
 
-A session starts the daemon on demand. The service binds to `127.0.0.1` and stores its database locally in a profile-specific pg0 database. It uses the API source in this checkout and refuses to send memory requests to an unrelated service occupying the port. A daemon serves both agents and remains running between sessions.
+A session starts the daemon on demand. The service binds to `127.0.0.1` and stores its database locally in a local pg0 database. It uses the API source in this checkout and refuses to send memory requests to an unrelated service occupying the port. A daemon serves both agents and remains running between sessions.
 
-Set `REMEMBER_API_LLM_PROVIDER` and the provider's required environment variables before launching the agent. For example, a local model provider can be configured through the API's provider settings. Hosted providers transmit content for processing; local storage does not make hosted inference local. If no provider is explicitly selected, the integration detects supported API keys or a Claude Code CLI on PATH.
+Set `apiToken` in the shared configuration, or `REMEMBER_API_TOKEN`, to require a bearer token for local memory requests. Set `REMEMBER_API_LLM_PROVIDER` and the provider's required environment variables before launching the agent. For example, a local model provider can be configured through the API's provider settings. Hosted providers transmit content for processing; local storage does not make hosted inference local. If no provider is explicitly selected, the integration detects supported API keys or a Claude Code CLI on PATH.
 
 The default bank identity combines the repository name with a stable hash of the canonical main checkout path. Codex, Claude Code and linked git worktrees share that bank; unrelated repositories with the same name do not. Explicit bank mappings can intentionally share or separate memories.
 

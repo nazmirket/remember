@@ -235,7 +235,7 @@ def _patch_update_action_deps(consolidator, conn, source_ids, append_mock) -> Ex
     from remember_api.engine.memories.pg import consolidation as pg_consolidation
     from remember_api.engine.memories.postgres import PostgresMemories
 
-    store = PostgresMemories({})
+    store = PostgresMemories()
     stack = ExitStack()
     stack.enter_context(patch("remember_api.config.get_config", _fake_config))
     stack.enter_context(patch.object(pg_consolidation, "get_config", _fake_config))

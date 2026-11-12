@@ -213,39 +213,6 @@ async def test_only_a_bank_found_via_an_alias_is_labelled_with_one(client, memor
     assert [(b["bank_id"], b["matched_aliases"]) for b in by_alias.json()["banks"]] == [(bank, [alias])]
 
 
-@pytest.mark.asyncio
-async def test_extensions_see_the_canonical_id_not_the_alias(client, memory, bank, monkeypatch):
-    """Ordering guard: resolution happens before any bank-aware extension runs.
-
-    An operation validator gates access per bank, so handing it the alias would
-    have it authorise (or refuse) an id that names no bank — and a deployment
-    whose policy is keyed on bank ids would silently diverge from the data being
-    touched. The only extension that runs *before* resolution is the tenant
-    authentication, which takes no bank id and has to go first: aliases live in
-    the tenant's schema, so there is nothing to look one up in until the caller
-    is identified.
-    """
-    from unittest.mock import AsyncMock
-
-    from remember_api.extensions import ValidationResult
-
-    alias = f"a-{uuid.uuid4().hex[:8]}"
-    await client.post(f"/v1/default/banks/{bank}/aliases", json={"alias": alias})
-
-    validator = AsyncMock()
-    validator.validate_bank_read = AsyncMock(return_value=ValidationResult(allowed=True))
-    validator.precheck = AsyncMock(return_value=ValidationResult(allowed=True))
-    validator.resolve_tag_scope = AsyncMock(return_value=None)
-    validator.resolve_write_tag_scope = AsyncMock(return_value=None)
-    monkeypatch.setattr(memory, "_operation_validator", validator)
-
-    assert (await client.get(f"/v1/default/banks/{alias}/memories/list")).status_code == 200
-
-    seen = {c.args[0].bank_id for c in validator.validate_bank_read.await_args_list}
-    assert seen == {bank}, f"validator saw {seen}, expected only the bank's own id"
-    assert alias not in seen
-
-
 # ── Primary (display) alias ──────────────────────────────────────────────────
 #
 # A bank keeps its `bank_id` forever, so after a migration the UI would still
@@ -340,39 +307,15 @@ async def test_promoting_an_alias_of_another_bank_is_a_404(client, memory, bank)
 
 
 @pytest.mark.asyncio
-async def test_a_bank_cannot_be_cloned_under_an_alias(client, memory, bank):
-    """A clone carries its config by default, so it restores the banks row itself rather
-    than through the create path: the alias check has to hold there too, or the clone
-    silently takes over a name another bank's callers are still using."""
+async def test_clone_route_is_unavailable_and_alias_remains(client, memory, bank):
+    """The removed clone route must not change an existing alias."""
     alias = f"a-{uuid.uuid4().hex[:8]}"
     await client.post(f"/v1/default/banks/{bank}/aliases", json={"alias": alias})
     other = f"alias-other-{uuid.uuid4().hex[:8]}"
     await memory.ensure_bank_profile(other, request_context=RequestContext())
 
     resp = await client.post(f"/v1/default/banks/{other}/clone", params={"target_bank_id": alias})
-    assert resp.status_code == 409, resp.text
-    assert _aliases(await client.get(f"/v1/default/banks/{alias}/aliases")) == [alias]
-
-
-@pytest.mark.asyncio
-async def test_a_bank_cannot_be_restored_under_an_alias(client, memory, bank):
-    """The restore itself refuses too, with and without the config component, so a
-    submission that raced past the up-front check still cannot take the name."""
-    from remember_api.engine.db_utils import acquire_with_retry
-    from remember_api.engine.transfer import TransferScope, export_bank
-    from remember_api.extensions import OperationValidationError
-
-    alias = f"a-{uuid.uuid4().hex[:8]}"
-    await client.post(f"/v1/default/banks/{bank}/aliases", json={"alias": alias})
-    other = f"alias-other-{uuid.uuid4().hex[:8]}"
-    await memory.ensure_bank_profile(other, request_context=RequestContext())
-    async with acquire_with_retry(await memory._get_backend()) as conn:
-        archive = await export_bank(conn, other)
-
-    for scope in (TransferScope(), TransferScope(bank_config=False)):
-        with pytest.raises(OperationValidationError) as exc:
-            await memory.import_bank_async(archive, RequestContext(), target_bank_id=alias, scope=scope)
-        assert exc.value.status_code == 409
+    assert resp.status_code == 404, resp.text
     assert _aliases(await client.get(f"/v1/default/banks/{alias}/aliases")) == [alias]
 
 

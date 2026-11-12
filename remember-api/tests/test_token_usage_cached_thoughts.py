@@ -1,5 +1,5 @@
 """Tests for cached / thoughts token propagation through TokenUsage,
-LLMToolCallResult, TokenUsageSummary, and RetainResult.
+LLMToolCallResult and TokenUsageSummary.
 
 The Gemini 2.5+ family (and any future provider with prompt caching +
 reasoning tokens) reports four distinct token counts on every response:
@@ -26,7 +26,6 @@ from remember_api.engine.providers.openai_compatible_llm import OpenAICompatible
 from remember_api.engine.reflect.agent import _generate_structured_output
 from remember_api.engine.reflect.models import StructuredOutputResult, TokenUsageSummary
 from remember_api.engine.response_models import LLMToolCallResult, TokenUsage
-from remember_api.extensions.operation_validator import RetainResult
 from remember_api.metrics import MetricsCollector
 
 
@@ -115,46 +114,6 @@ def test_token_usage_summary_defaults_cached_and_thoughts_to_zero():
     s = TokenUsageSummary(input_tokens=100, output_tokens=50, total_tokens=150)
     assert s.cached_tokens == 0
     assert s.thoughts_tokens == 0
-
-
-def test_retain_result_carries_cached_input_and_thoughts():
-    """RetainResult is the contract between the engine and any metering
-    extension. The two new fields are optional (None) so older extensions
-    that don't read them are unaffected; engines that DO populate them get
-    end-to-end attribution into the metering hook."""
-
-    class _Ctx:
-        pass
-
-    r = RetainResult(
-        bank_id="b",
-        contents=[],
-        request_context=_Ctx(),
-        document_id=None,
-        fact_type_override=None,
-        unit_ids=[],
-        llm_input_tokens=1000,
-        llm_output_tokens=50,
-        llm_total_tokens=1050,
-        llm_cached_input_tokens=300,
-        llm_thoughts_tokens=25,
-    )
-    assert r.llm_cached_input_tokens == 300
-    assert r.llm_thoughts_tokens == 25
-
-    # Defaults stay None for engines that don't surface the data, so
-    # downstream extensions can use ``or 0`` without breaking on a
-    # core-only build.
-    r2 = RetainResult(
-        bank_id="b",
-        contents=[],
-        request_context=_Ctx(),
-        document_id=None,
-        fact_type_override=None,
-        unit_ids=[],
-    )
-    assert r2.llm_cached_input_tokens is None
-    assert r2.llm_thoughts_tokens is None
 
 
 @pytest.mark.asyncio

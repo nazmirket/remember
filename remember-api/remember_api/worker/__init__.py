@@ -1,9 +1,8 @@
 """
-Worker package for distributed task processing.
+Background task processing for the local daemon.
 
 This package provides:
 - WorkerPoller: Polls PostgreSQL for pending tasks and executes them
-- main: CLI entry point for remember-worker
 """
 
 from .poller import WorkerPoller

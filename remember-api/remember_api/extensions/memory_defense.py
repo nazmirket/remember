@@ -2,7 +2,7 @@
 
 Lives in extensions/ (not engine/) because it defines the public contract
 between the retain orchestrator and any installed Memory Defense extension —
-the same shape as TenantExtension and OperationValidatorExtension.
+the same shape as TenantExtension.
 
 api ships the :class:`MemoryDefenseExtension` protocol and a regex default
 that scrubs known secret/PII patterns from retained content.
@@ -339,7 +339,7 @@ class MemoryDefenseExtension(Extension, ABC):
     Implementations decide whether to allow, redact, or block a given retain
     item by inspecting its content against a per-bank policy. The orchestrator
     applies the returned decision (redacts content / drops blocked items) and
-    fires a webhook for non-allow decisions when one is configured.
+    records non-allow decisions in the audit log when enabled.
     """
 
     @abstractmethod

@@ -10,15 +10,13 @@ is covered end to end against a real database by
 ``test_worker.py::test_a_lost_append_race_defers_and_counts_up``.
 """
 
-from remember_api.engine.memories.base import StoreWriteConflict
 from remember_api.engine.retain.types import ConcurrentAppendConflict
 from remember_api.worker.backpressure import is_append_conflict
 from remember_api.worker.poller import _append_conflict_defer_seconds
 
 
-def test_both_stores_lost_races_are_recognised():
+def test_lost_append_race_is_recognised():
     assert is_append_conflict(ConcurrentAppendConflict("document moved"))
-    assert is_append_conflict(StoreWriteConflict("watermark mismatch"))
 
 
 def test_it_is_found_through_wrapping():

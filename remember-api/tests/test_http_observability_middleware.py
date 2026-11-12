@@ -25,7 +25,6 @@ from remember_api.api.observability import (
     HttpObservabilityMiddleware,
 )
 from remember_api.api.unknown_params import UnknownParamsRoute, use_unknown_params_routes
-from remember_api.extensions import HttpExtension
 from remember_api.metrics import get_metrics_collector
 
 
@@ -126,7 +125,7 @@ def test_routes_from_an_included_router_still_report_unknown_params():
 # --- endpoint label -----------------------------------------------------------
 
 
-class _ExtensionRoutes(HttpExtension):
+class _ExtensionRoutes:
     def get_router(self, memory) -> APIRouter:
         router = APIRouter()
 
@@ -169,8 +168,10 @@ def _recorded_endpoints(app: FastAPI, method: str, paths: list[str]) -> list[str
 
 @pytest.fixture(scope="module")
 def real_app() -> FastAPI:
-    """The real route table, with an HTTP extension, so the labels come from the routes users hit."""
-    return create_app(MagicMock(), initialize_memory=False, http_extension=_ExtensionRoutes({}))
+    """The real route table and a nested test router exercise endpoint labels."""
+    app = create_app(MagicMock(), initialize_memory=False)
+    app.include_router(_ExtensionRoutes().get_router(None), prefix="/ext")
+    return app
 
 
 @pytest.mark.parametrize(
@@ -196,7 +197,7 @@ def real_app() -> FastAPI:
             "/v1/default/banks/b1/documents/a/b/c/chunks",
             "/v1/default/banks/{bank_id}/documents/{document_id}/chunks",
         ),
-        ("GET", "/v1/default/files/download/some/nested/key.pdf", "/v1/default/files/download/{key}"),
+        ("GET", "/v1/default/banks/b1/attachments/photo", "/v1/default/banks/{bank_id}/attachments/{attachment_id}"),
         ("GET", "/v1/default/banks/b1/memories/mem_7f3a", "/v1/default/banks/{bank_id}/memories/{memory_id}"),
         # A method the route does not serve (405) still names the route.
         ("GET", "/v1/default/banks/b1/reflect", "/v1/default/banks/{bank_id}/reflect"),

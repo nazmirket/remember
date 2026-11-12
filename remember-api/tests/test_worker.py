@@ -557,28 +557,6 @@ class TestWorkerPoller:
             assert row["status"] == "processing"
             assert row["worker_id"] == "test-worker-1"
 
-        # Runs opened by the executor carry the task's id and queue time.
-        from remember_api import operation_runs
-
-        runs = []
-        operation_runs.set_sink(runs.append)
-
-        async def run_one(task_dict):
-            with operation_runs.timed_operation("retain", bank_id):
-                pass
-
-        poller._executor = run_one
-        try:
-            await poller.execute_task(my_claims[0])  # runs in the background
-            for _ in range(100):
-                if runs:
-                    break
-                await asyncio.sleep(0.05)
-        finally:
-            operation_runs.set_sink(None)
-        [run] = runs
-        assert run.task_id == my_claims[0].operation_id and run.queued_at == my_claims[0].queued_at
-
     @pytest.mark.asyncio
     async def test_claim_batch_cannot_see_rows_outside_this_files_schema(self, pool, clean_operations):
         """Rows in ``public`` are invisible here, so they can never crowd out our claims (#3963).
@@ -1065,100 +1043,7 @@ class TestWorkerPoller:
         assert any(c.operation_id == str(op_id) for c in claimed), "task must be claimed once next_retry_at has passed"
 
     @pytest.mark.asyncio
-    async def test_defer_operation_exported_from_extensions(self):
-        """DeferOperation must be importable from remember_api.extensions for extension authors."""
-        from remember_api.extensions import DeferOperation as DeferFromExtensions
-        from remember_api.worker.exceptions import DeferOperation as DeferFromWorker
-
-        assert DeferFromExtensions is DeferFromWorker
-
-    @pytest.mark.asyncio
-    async def test_extension_validate_retain_defer_propagates_to_poller(self, pool, backend, clean_operations):
-        """An OperationValidatorExtension that raises DeferOperation in validate_retain
-        causes the worker to requeue the task at the requested exec_date.
-
-        Mimics the MemoryEngine flow: the executor calls validate_retain before doing
-        any real work, the exception bubbles up to the poller, which defers the row.
-        """
-        from datetime import datetime, timedelta, timezone
-
-        from remember_api.extensions import (
-            DeferOperation,
-            OperationValidatorExtension,
-            RecallContext,
-            ReflectContext,
-            RetainContext,
-            ValidationResult,
-        )
-        from remember_api.worker import WorkerPoller
-        from remember_api.worker.poller import ClaimedTask
-
-        defer_until = datetime.now(timezone.utc) + timedelta(minutes=10)
-
-        class DeferringValidator(OperationValidatorExtension):
-            def __init__(self):
-                super().__init__({})
-
-            async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
-                raise DeferOperation(exec_date=defer_until, reason="quota window closed")
-
-            async def validate_recall(self, ctx: RecallContext) -> ValidationResult:
-                return ValidationResult.accept()
-
-            async def validate_reflect(self, ctx: ReflectContext) -> ValidationResult:
-                return ValidationResult.accept()
-
-        validator = DeferringValidator()
-
-        bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
-        op_id = uuid.uuid4()
-        payload = json.dumps({"type": "retain", "operation_id": str(op_id), "bank_id": bank_id})
-        await _ensure_bank(pool, bank_id)
-        await pool.execute(
-            """
-            INSERT INTO async_operations (operation_id, bank_id, operation_type, status, task_payload, worker_id, claimed_at, retry_count)
-            VALUES ($1, $2, 'retain', 'processing', $3::jsonb, 'test-worker-1', now(), 0)
-            """,
-            op_id,
-            bank_id,
-            payload,
-        )
-
-        async def executor_calling_validator(task_dict):
-            ctx = RetainContext(
-                bank_id=task_dict["bank_id"],
-                contents=[],
-                request_context=None,  # type: ignore[arg-type]
-            )
-            await validator.validate_retain(ctx)
-
-        poller = WorkerPoller(
-            backend=backend,
-            worker_id="test-worker-1",
-            executor=executor_calling_validator,
-        )
-
-        task_dict = json.loads(payload)
-        claimed_task = ClaimedTask(operation_id=str(op_id), task_dict=task_dict, schema=None)
-        await poller.execute_task(claimed_task)
-
-        completed = await poller.wait_for_active_tasks(timeout=5.0)
-        assert completed, "Task did not complete within timeout"
-
-        row = await pool.fetchrow(
-            "SELECT status, worker_id, claimed_at, retry_count, error_message, next_retry_at "
-            "FROM async_operations WHERE operation_id = $1",
-            op_id,
-        )
-        assert row["status"] == "pending"
-        assert row["worker_id"] is None
-        assert row["claimed_at"] is None
-        assert row["retry_count"] == 0
-        assert row["error_message"] is None
-        assert abs((row["next_retry_at"] - defer_until).total_seconds()) < 1
-
-    @pytest.mark.asyncio
-    async def test_memory_engine_execute_task_passes_through_defer_operation(self, memory):
+    async def test_memory_engine_execute_task_passes_through_defer_operation(self, memory, monkeypatch):
         """Regression test: MemoryEngine.execute_task must pass DeferOperation
         through to the worker poller unchanged (same as RetryTaskAt).
 
@@ -1170,41 +1055,19 @@ class TestWorkerPoller:
         backpressure-aware extension waiting for a quota window to open)
         would instead come back in 60 seconds with retry_count bumped.
 
-        Verify by injecting a validator that raises DeferOperation during
-        validate_retain and confirming the outer exception type that
-        escapes execute_task is DeferOperation, not RetryTaskAt.
+        Verify that a deferred retain reaches the poller unchanged.
         """
         from datetime import datetime, timedelta, timezone
 
-        from remember_api.extensions import (
-            DeferOperation,
-            OperationValidatorExtension,
-            RecallContext,
-            ReflectContext,
-            RetainContext,
-            ValidationResult,
-        )
         from remember_api.worker.exceptions import DeferOperation as DeferOpFromExceptions
         from remember_api.worker.exceptions import RetryTaskAt
 
         defer_until = datetime.now(timezone.utc) + timedelta(hours=6)
 
-        class QuotaDeferringValidator(OperationValidatorExtension):
-            def __init__(self):
-                super().__init__({})
+        async def defer_retain(_task_dict):
+            raise DeferOpFromExceptions(exec_date=defer_until, reason="quota_window_closed")
 
-            async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
-                raise DeferOperation(exec_date=defer_until, reason="quota_window_closed")
-
-            async def validate_recall(self, ctx: RecallContext) -> ValidationResult:
-                return ValidationResult.accept()
-
-            async def validate_reflect(self, ctx: ReflectContext) -> ValidationResult:
-                return ValidationResult.accept()
-
-        # Attach the validator to the MemoryEngine so it's invoked from
-        # inside retain_batch_async → _validate_operation.
-        memory._operation_validator = QuotaDeferringValidator()
+        monkeypatch.setattr(memory, "_handle_batch_retain", defer_retain)
 
         # Set up a bank the task handler can address.
         bank_id = f"test-defer-passthrough-{uuid.uuid4().hex[:8]}"
@@ -2457,14 +2320,8 @@ class TestTaskReleaseOnStop:
         assert row["worker_id"] == "other-worker"
 
     @pytest.mark.asyncio
-    async def test_shutdown_release_visits_only_schemas_it_claimed_in(self, pool, backend, clean_operations):
-        """With many tenant schemas, shutdown must not walk them all.
-
-        One reclaim per schema across thousands of tenants outlasts a typical
-        termination grace period, so the process is killed before the release
-        (and the rest of the teardown) finishes. The worker can only own rows
-        where it claimed, so those schemas are the only ones it visits.
-        """
+    async def test_shutdown_releases_the_local_schema(self, pool, backend, clean_operations):
+        """Shutdown releases claimed tasks from the configured local schema."""
         from remember_api.worker import WorkerPoller
 
         bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
@@ -2483,11 +2340,6 @@ class TestTaskReleaseOnStop:
         await poller.execute_task(task)
         await asyncio.wait_for(started.wait(), timeout=5)
 
-        # From here on the deployment has thousands of tenants.
-        async def many_schemas():
-            return [None] + [f"tenant_{i}" for i in range(5000)]
-
-        poller._get_schemas = many_schemas
         visited: list[str | None] = []
         real_reclaim = poller._reclaim_own_processing_tasks
 
@@ -2499,7 +2351,7 @@ class TestTaskReleaseOnStop:
 
         await poller.shutdown_graceful(timeout=0.1)
 
-        assert visited == [task.schema], "shutdown must visit only the schemas this worker claimed in"
+        assert visited == [task.schema], "shutdown must release the local schema"
         row = await pool.fetchrow("SELECT status, worker_id FROM async_operations WHERE operation_id = $1", op_id)
         assert row["status"] == "pending", "the claimed row must still be handed back"
         assert row["worker_id"] is None
@@ -3153,163 +3005,12 @@ class TestWorkerTaskBackend:
         assert len(child_claimed) == 1, "Child task should be claimable on next poll"
 
 
-class TestDynamicTenantDiscovery:
-    """Tests for dynamic tenant discovery via TenantExtension."""
+class TestLocalWorkerSchema:
+    """Tests for the configured local worker schema."""
 
     @pytest.mark.asyncio
-    async def test_poller_discovers_tenants_dynamically(self, pool, backend, clean_operations):
-        """Test that poller calls list_tenants() on each poll cycle."""
-        from remember_api.extensions.tenant import Tenant, TenantExtension
-        from remember_api.worker import WorkerPoller
-
-        # Create a mock tenant extension that tracks calls
-        class MockTenantExtension(TenantExtension):
-            def __init__(self):
-                self.list_tenants_calls = 0
-                self.tenants_to_return: list[Tenant] = [Tenant(schema="public")]
-
-            async def authenticate(self, context):
-                raise NotImplementedError("Not used in this test")
-
-            async def list_tenants(self) -> list[Tenant]:
-                self.list_tenants_calls += 1
-                return self.tenants_to_return
-
-        mock_extension = MockTenantExtension()
-
-        # Create pending tasks in public schema
-        bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
-        await _ensure_bank(pool, bank_id)
-        for i in range(2):
-            op_id = uuid.uuid4()
-            payload = json.dumps({"type": "test_task", "index": i, "bank_id": bank_id})
-            await pool.execute(
-                """
-                INSERT INTO async_operations (operation_id, bank_id, operation_type, status, task_payload)
-                VALUES ($1, $2, 'test', 'pending', $3::jsonb)
-                """,
-                op_id,
-                bank_id,
-                payload,
-            )
-
-        poller = WorkerPoller(
-            backend=backend,
-            worker_id="test-worker-1",
-            executor=lambda x: None,
-            tenant_extension=mock_extension,
-        )
-
-        # First claim_batch should call list_tenants
-        claimed1 = await poller.claim_batch()
-        assert mock_extension.list_tenants_calls == 1
-        # Filter to our bank — parallel tests may contribute other claims.
-        my_claims1 = [c for c in claimed1 if c.task_dict.get("bank_id") == bank_id]
-        assert len(my_claims1) == 2, f"Expected 2 claims for our bank, got {len(my_claims1)}"
-
-        # Add more tasks
-        for i in range(2):
-            op_id = uuid.uuid4()
-            payload = json.dumps({"type": "test_task", "index": i + 10, "bank_id": bank_id})
-            await pool.execute(
-                """
-                INSERT INTO async_operations (operation_id, bank_id, operation_type, status, task_payload)
-                VALUES ($1, $2, 'test', 'pending', $3::jsonb)
-                """,
-                op_id,
-                bank_id,
-                payload,
-            )
-
-        # Second claim_batch should call list_tenants again
-        claimed2 = await poller.claim_batch()
-        assert mock_extension.list_tenants_calls == 2
-        my_claims2 = [c for c in claimed2 if c.task_dict.get("bank_id") == bank_id]
-        assert len(my_claims2) == 2, f"Expected 2 claims for our bank, got {len(my_claims2)}"
-
-    @pytest.mark.asyncio
-    async def test_poller_picks_up_new_tenants_without_restart(self, pool, backend, clean_operations):
-        """Test that new tenants are discovered on subsequent poll cycles."""
-        from remember_api.extensions.tenant import Tenant, TenantExtension
-        from remember_api.worker import WorkerPoller
-
-        class DynamicTenantExtension(TenantExtension):
-            def __init__(self):
-                # Start with just public
-                self.tenants: list[Tenant] = [Tenant(schema="public")]
-                self.list_tenants_calls = 0
-
-            async def authenticate(self, context):
-                raise NotImplementedError("Not used in this test")
-
-            async def list_tenants(self) -> list[Tenant]:
-                self.list_tenants_calls += 1
-                return self.tenants
-
-        dynamic_extension = DynamicTenantExtension()
-
-        # Create a task in public schema
-        bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
-        await _ensure_bank(pool, bank_id)
-        op_id = uuid.uuid4()
-        payload = json.dumps({"type": "test_task", "bank_id": bank_id})
-        await pool.execute(
-            """
-            INSERT INTO async_operations (operation_id, bank_id, operation_type, status, task_payload)
-            VALUES ($1, $2, 'test', 'pending', $3::jsonb)
-            """,
-            op_id,
-            bank_id,
-            payload,
-        )
-
-        poller = WorkerPoller(
-            backend=backend,
-            worker_id="test-worker-1",
-            executor=lambda x: None,
-            tenant_extension=dynamic_extension,
-        )
-
-        # First poll - only public schema. Filter to our bank — parallel tests
-        # may contribute other claims.
-        claimed1 = await poller.claim_batch()
-        my_claims1 = [c for c in claimed1 if c.task_dict.get("bank_id") == bank_id]
-        assert len(my_claims1) == 1, f"Expected 1 claim for our bank, got {len(my_claims1)}"
-        assert my_claims1[0].schema is None  # public is represented as None
-        assert dynamic_extension.list_tenants_calls == 1
-
-        # Simulate tenant list changing (but we won't add a non-existent schema)
-        # In real world, the schema would be created before list_tenants returns it
-        # Here we just verify that list_tenants is called again
-
-        # Add another task to public
-        op_id2 = uuid.uuid4()
-        payload2 = json.dumps({"type": "test_task", "bank_id": bank_id})
-        await pool.execute(
-            """
-            INSERT INTO async_operations (operation_id, bank_id, operation_type, status, task_payload)
-            VALUES ($1, $2, 'test', 'pending', $3::jsonb)
-            """,
-            op_id2,
-            bank_id,
-            payload2,
-        )
-
-        # Second poll - list_tenants should be called again
-        claimed2 = await poller.claim_batch()
-        my_claims2 = [c for c in claimed2 if c.task_dict.get("bank_id") == bank_id]
-        assert len(my_claims2) == 1, f"Expected 1 claim for our bank, got {len(my_claims2)}"
-        assert dynamic_extension.list_tenants_calls == 2  # Called again on second poll
-
-        # Third poll with no tasks - still calls list_tenants
-        claimed3 = await poller.claim_batch()
-        my_claims3 = [c for c in claimed3 if c.task_dict.get("bank_id") == bank_id]
-        assert len(my_claims3) == 0, f"Expected 0 claims for our bank, got {len(my_claims3)}"
-        assert dynamic_extension.list_tenants_calls == 3  # Called again even with no tasks
-
-    @pytest.mark.asyncio
-    async def test_poller_without_tenant_extension_uses_public(self, pool, backend, clean_operations):
-        """Test that poller uses public schema when no tenant extension is configured."""
+    async def test_poller_uses_public_schema(self, pool, backend, clean_operations):
+        """Test that the poller uses the default public schema."""
         from remember_api.worker import WorkerPoller
 
         # Create pending tasks
@@ -3328,7 +3029,6 @@ class TestDynamicTenantDiscovery:
                 payload,
             )
 
-        # No tenant_extension provided
         poller = WorkerPoller(
             backend=backend,
             worker_id="test-worker-1",
@@ -3340,7 +3040,7 @@ class TestDynamicTenantDiscovery:
         my_claims = [c for c in claimed if c.task_dict.get("bank_id") == bank_id]
         assert len(my_claims) == 3, f"Expected 3 claims for our bank, got {len(my_claims)}"
 
-        # All tasks (ours or not) should have schema=None since no tenant extension is set.
+        # All tasks (ours or not) should have schema=None for the public schema.
         for task in claimed:
             assert task.schema is None
 
@@ -3932,6 +3632,20 @@ async def test_shared_pool_usable_by_reserved_types(pool, backend, clean_operati
 
 
 @pytest.mark.asyncio
+async def test_idle_worker_still_emits_stats(backend, caplog):
+    """An idle scan does not need a pending-work table query to log status."""
+    import logging
+
+    from remember_api.worker.poller import WorkerPoller
+
+    poller = WorkerPoller(backend=backend, worker_id="idle-worker", executor=lambda _: asyncio.sleep(0))
+    poller._has_pending_work = AsyncMock(return_value=False)
+    with caplog.at_level(logging.INFO, logger="remember_api.worker.poller"):
+        await poller._log_progress_if_due()
+    assert any("[WORKER_STATS]" in record.message and "pending=0" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_pending_breakdown_explains_unclaimable_rows(pool, backend, clean_operations, caplog):
     """Pending rows that the claim query filters out must be visible in logs.
 
@@ -4409,157 +4123,12 @@ class TestMarkFailedParentPropagation:
         )
 
 
-class TestClaimBatchRotation:
-    """Tests for round-robin schema rotation in claim_batch.
-
-    These use a mocked _claim_batch_for_schema so the tests are hermetic
-    and exercise rotation logic without needing multiple real tenant schemas.
-    """
-
-    def _make_poller_with_fake_work(self, pool, backend, pending_per_schema, max_slots=1):
-        """Build a poller whose schemas and per-schema claims are scripted.
-
-        ``pending_per_schema`` maps schema name -> current pending count.
-        The fake claim handler decrements the count and returns a ClaimedTask
-        if the schema still has work, else returns an empty list.
-        """
-        from remember_api.extensions.tenant import Tenant, TenantExtension
-        from remember_api.worker import WorkerPoller
-        from remember_api.worker.poller import ClaimedTask
-
-        schemas = list(pending_per_schema.keys())
-
-        class StaticTenantExtension(TenantExtension):
-            def __init__(self):
-                super().__init__(config={})
-
-            async def authenticate(self, context):
-                raise NotImplementedError
-
-            async def list_tenants(self) -> list[Tenant]:
-                return [Tenant(schema=s) for s in schemas]
-
-        poller = WorkerPoller(
-            backend=backend,
-            worker_id="test-rotation",
-            executor=lambda x: None,
-            tenant_extension=StaticTenantExtension(),
-            max_slots=max_slots,
-            # No per-type reservations — all slots available as shared pool.
-            # Keeps the fair-rotation behavior easy to assert.
-            slot_reservations={},
-        )
-
-        serviced: list[str] = []
-
-        async def fake_claim(conn, schema, reserved_limits, shared_limit):
-            # Tests only exercise non-reserved ("test") tasks, so we only
-            # consult the shared_limit.
-            remaining = pending_per_schema.get(schema, 0)
-            if remaining <= 0 or shared_limit <= 0:
-                return []
-            take = min(remaining, shared_limit)
-            pending_per_schema[schema] = remaining - take
-            out = []
-            for _ in range(take):
-                serviced.append(schema)
-                out.append(
-                    ClaimedTask(
-                        operation_id=str(uuid.uuid4()),
-                        task_dict={"operation_type": "test", "bank_id": schema or "default"},
-                        schema=schema,
-                    )
-                )
-            return out
-
-        poller._claim_batch_for_schema = fake_claim  # type: ignore[method-assign]
-
-        async def fake_scan(conn, scan_schemas):
-            return {s for s in scan_schemas if pending_per_schema.get(s, 0) > 0}
-
-        poller._scan_active_schemas = fake_scan  # type: ignore[method-assign]
-        return poller, serviced
+class TestLocalClaimBatch:
+    """Tests for the local worker's scan and claim path."""
 
     @pytest.mark.asyncio
-    async def test_rotation_advances_past_serviced_schema(self, pool, backend):
-        """After claiming from schema at offset N, next poll starts at N+1.
-
-        This is the 'crucial detail' that separates working rotation from
-        broken rotation: advancing +1 from the previous offset would cause
-        the first schema with work to always win.
-        """
-        # Only schema "b" has work; "a" and "c" are idle.
-        pending = {"a": 0, "b": 5, "c": 0}
-        poller, serviced = self._make_poller_with_fake_work(pool, backend, pending, max_slots=1)
-
-        await poller.claim_batch()
-        # Found work at index 1 ("b"), so next offset should be 2 ("c").
-        assert poller._next_schema_idx == 2
-        assert serviced == ["b"]
-
-    @pytest.mark.asyncio
-    async def test_rotation_advances_by_one_when_no_work(self, pool, backend):
-        """Empty sweep advances offset by 1 so we don't keep re-hitting the same head."""
-        pending = {"a": 0, "b": 0, "c": 0}
-        poller, serviced = self._make_poller_with_fake_work(pool, backend, pending, max_slots=1)
-
-        poller._next_schema_idx = 0
-        await poller.claim_batch()
-        assert poller._next_schema_idx == 1
-        assert serviced == []
-
-        await poller.claim_batch()
-        assert poller._next_schema_idx == 2
-        assert serviced == []
-
-    @pytest.mark.asyncio
-    async def test_small_tenant_not_starved_by_busy_tenant(self, pool, backend):
-        """Small tenant with 1 pending task gets serviced within bounded polls
-        even when another tenant has a huge backlog. Prevents the regression
-        observed in prod where one tenant's 1000+ retains monopolized workers.
-        """
-        pending = {"friday-main": 1000, "tenant-b": 1}
-        poller, serviced = self._make_poller_with_fake_work(pool, backend, pending, max_slots=1)
-
-        # MAX_SLOTS=1 means one claim per poll. Over ~2 polls the rotation
-        # must reach tenant-b, regardless of which started first.
-        for _ in range(5):
-            await poller.claim_batch()
-            if "tenant-b" in serviced:
-                break
-
-        assert "tenant-b" in serviced, f"tenant-b was starved; serviced={serviced[:20]}"
-
-    @pytest.mark.asyncio
-    async def test_max_slots_greater_than_one_spreads_across_tenants(self, pool, backend):
-        """With MAX_SLOTS>1 the first pass caps at 1 claim per schema so
-        a single poll services multiple tenants rather than draining one.
-        """
-        pending = {"a": 10, "b": 10, "c": 10, "d": 10, "e": 10}
-        poller, serviced = self._make_poller_with_fake_work(pool, backend, pending, max_slots=3)
-
-        await poller.claim_batch()
-        # First pass gives 1 claim each to 3 different schemas — not 3 from the same one.
-        assert len(serviced) == 3
-        assert len(set(serviced)) == 3, f"Expected 3 different tenants, got {serviced}"
-
-    @pytest.mark.asyncio
-    async def test_max_slots_greater_than_one_backfills_when_only_one_tenant_has_work(self, pool, backend):
-        """Second pass fills remaining slots when only one tenant has work,
-        so fairness doesn't sacrifice throughput in the single-tenant case.
-        """
-        pending = {"a": 0, "b": 10, "c": 0}
-        poller, serviced = self._make_poller_with_fake_work(pool, backend, pending, max_slots=3)
-
-        await poller.claim_batch()
-        # Pass 1: 1 from "b" (only one with work). Pass 2: 2 more from "b".
-        assert serviced == ["b", "b", "b"]
-
-    @pytest.mark.asyncio
-    async def test_scan_finds_schemas_with_pending_work(self, pool, backend, clean_operations):
-        """_scan_active_schemas identifies schemas with pending rows
-        and ignores empty schemas. Uses real DB, no mocks.
-        """
+    async def test_scan_finds_pending_local_work(self, pool, backend, clean_operations):
+        """The local scan finds pending rows in the database."""
         from remember_api.worker import WorkerPoller
 
         bank_id = f"test-scan-{uuid.uuid4().hex[:8]}"
@@ -4587,109 +4156,14 @@ class TestClaimBatchRotation:
 
         try:
             async with backend.acquire() as conn:
-                result = await poller._scan_active_schemas(conn, [None])
-            assert None in result, "Scan missed schema with pending work"
+                result = await poller._has_pending_work(conn, None)
+            assert result, "Scan missed pending work"
         finally:
             await pool.execute("DELETE FROM async_operations WHERE operation_id = $1", op_id)
 
     @pytest.mark.asyncio
-    async def test_scan_uses_optional_routine_when_installed(self, pool, backend, clean_operations):
-        """When ``public.schemas_with_pending_work()`` exists in pg_proc,
-        ``_scan_active_schemas`` invokes it instead of running per-schema
-        EXISTS queries from Python. Confirms the OptionalRoutines probe
-        path is wired correctly end-to-end.
-
-        The routine body installed here is a minimal stand-in that
-        satisfies the contract documented on
-        ``optional_routines.SCHEMAS_WITH_PENDING_WORK`` — Remember does
-        not own the canonical implementation.
-        """
-        from remember_api.engine.db.postgresql import PostgresConnection
-        from remember_api.worker import WorkerPoller
-
-        # Minimal contract-satisfying implementation: returns the empty
-        # set. Enough to prove the poller follows the server-side path.
-        await pool.execute(
-            "CREATE OR REPLACE FUNCTION public.schemas_with_pending_work() "
-            "RETURNS SETOF text AS $$ BEGIN RETURN; END $$ LANGUAGE plpgsql STABLE"
-        )
-        try:
-            poller = WorkerPoller(
-                backend=backend,
-                worker_id="test-routine",
-                executor=lambda x: None,
-            )
-
-            captured_fetch: list[str] = []
-            captured_fetchval: list[str] = []
-            original_fetch = PostgresConnection.fetch
-            original_fetchval = PostgresConnection.fetchval
-
-            async def spy_fetch(self, query, *args, timeout=None):
-                captured_fetch.append(query)
-                return await original_fetch(self, query, *args, timeout=timeout)
-
-            async def spy_fetchval(self, query, *args, column=0, timeout=None):
-                captured_fetchval.append(query)
-                return await original_fetchval(self, query, *args, column=column, timeout=timeout)
-
-            PostgresConnection.fetch = spy_fetch  # type: ignore[method-assign]
-            PostgresConnection.fetchval = spy_fetchval  # type: ignore[method-assign]
-            try:
-                async with backend.acquire() as conn:
-                    await poller._scan_active_schemas(conn, [None])
-            finally:
-                PostgresConnection.fetch = original_fetch  # type: ignore[method-assign]
-                PostgresConnection.fetchval = original_fetchval  # type: ignore[method-assign]
-
-            # Routine was probed (one pg_proc lookup) and then invoked.
-            assert any("pg_proc" in q for q in captured_fetchval), (
-                f"Expected a pg_proc existence probe; fetchval queries: {captured_fetchval}"
-            )
-            assert any("schemas_with_pending_work" in q for q in captured_fetch), (
-                f"Expected schemas_with_pending_work() to be invoked; fetch queries: {captured_fetch}"
-            )
-            # Fallback per-schema EXISTS path must NOT have run.
-            assert not any("async_operations" in q and "EXISTS" in q for q in captured_fetchval), (
-                f"Fallback EXISTS path should be skipped when routine is installed; fetchval queries: {captured_fetchval}"
-            )
-            # Probe result is cached so the next scan skips the pg_proc lookup.
-            assert poller._optional_routines._cache.get("schemas_with_pending_work") is True
-        finally:
-            await pool.execute("DROP FUNCTION IF EXISTS public.schemas_with_pending_work()")
-
-    @pytest.mark.asyncio
-    async def test_scan_normalizes_public_from_optional_routine(self, pool, backend, clean_operations):
-        """The optional routine returns PostgreSQL schema names, while the
-        poller represents the default schema as None. ``public`` must match
-        [None] or claim_batch filters the active schema out.
-        """
-        from remember_api.worker import WorkerPoller
-
-        await pool.execute(
-            "CREATE OR REPLACE FUNCTION public.schemas_with_pending_work() "
-            "RETURNS SETOF text AS $$ "
-            "BEGIN RETURN QUERY SELECT 'public'::text; END "
-            "$$ LANGUAGE plpgsql STABLE"
-        )
-        try:
-            poller = WorkerPoller(
-                backend=backend,
-                worker_id="test-routine-public",
-                executor=lambda x: None,
-            )
-
-            async with backend.acquire() as conn:
-                result = await poller._scan_active_schemas(conn, [None])
-
-            assert result == {None}
-        finally:
-            await pool.execute("DROP FUNCTION IF EXISTS public.schemas_with_pending_work()")
-
-    @pytest.mark.asyncio
-    async def test_claim_batch_only_queries_active_schemas(self, pool, backend, clean_operations):
-        """claim_batch uses _scan_active_schemas to pre-filter, then
-        only calls _claim_batch_for_schema on schemas the scan found.
+    async def test_claim_batch_queries_the_active_local_schema(self, pool, backend, clean_operations):
+        """claim_batch scans for work before attempting to claim it.
         Verifies the scan→claim pipeline end-to-end with real DB rows.
         """
         from remember_api.worker import WorkerPoller

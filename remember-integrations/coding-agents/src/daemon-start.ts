@@ -40,23 +40,12 @@ async function main(): Promise<void> {
   // An agent can start in any repository. Its .env must not override the local
   // bind address, database, or provider settings inherited by the daemon.
   process.env.PYTHON_DOTENV_DISABLED = "1";
-  process.env.REMEMBER_EMBED_PROFILE = cfg.daemonProfile;
-  // The lifecycle wrapper persists its `env` in the profile. Keep credentials in this
-  // starter's inherited environment instead of writing them into the profile file.
+  // Pass provider settings and credentials through the process environment.
   const daemonSettings = daemonEnv(cfg);
-  const profileSettings: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(daemonSettings)) {
-    if (/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)) {
-      if (value !== undefined) process.env[key] = value;
-    } else {
-      profileSettings[key] = value;
-    }
-  }
   const { RememberServer } = await import("./core/local-server/server");
   const server = new RememberServer({
-    profile: cfg.daemonProfile,
     port: cfg.apiPort,
-    env: profileSettings,
+    env: daemonSettings,
     embedPackagePath: cfg.embedPackagePath,
     logger: {
       debug: (m) => log.debug(harness, m),
@@ -66,7 +55,7 @@ async function main(): Promise<void> {
     },
   });
   await server.start();
-  diag(harness, "daemon_started", { apiUrl: cfg.apiUrl, profile: cfg.daemonProfile });
+  diag(harness, "daemon_started", { apiUrl: cfg.apiUrl });
 }
 
 main().catch((error) => {

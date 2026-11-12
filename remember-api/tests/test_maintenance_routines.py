@@ -9,7 +9,6 @@ table in a single round-trip. These tests drive them directly against pg0.
 import asyncio
 import importlib.util
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,11 +17,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from remember_api.alembic import _owned
-from remember_api.engine.memories import get_memories
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.engine.schema import fq_table
-from remember_api.engine.transfer.importer import FactLifecycle
-from tests.store_seed import store_write_facts
 
 
 def _load_repair_migration():
@@ -389,39 +384,6 @@ async def test_banks_needing_consolidation_returns_each_bank_once(memory: Memory
     assert observation_only not in returned
 
 
-@pytest.mark.asyncio
-async def test_import_never_writes_a_fact_both_consolidated_and_failed(memory: MemoryEngine, request_context):
-    """``banks_needing_consolidation()`` counts failed facts against unconsolidated
-    ones, which holds only while no fact carries both markers. An archive can carry
-    both; the importer keeps ``consolidated_at`` and drops the failure."""
-    bank_id = await _make_bank(memory, request_context, "lifecycle")
-    unit_id = uuid.uuid4()
-    when = datetime(2020, 1, 2, tzinfo=timezone.utc)
-    # Through the bank's memories store, so the importer's lifecycle restore is exercised on
-    # whichever store holds the fact — Postgres's SQL rewrite or a store-owned default.
-    store = get_memories()
-    async with memory._pool.acquire() as conn:
-        if store.store_owned_for(bank_id):
-            await store_write_facts(memory, bank_id, [str(unit_id)], ["a fact"])
-        else:
-            await conn.execute(
-                "INSERT INTO memory_units (id, bank_id, text, fact_type) VALUES ($1, $2, 'a fact', 'world')",
-                unit_id,
-                bank_id,
-            )
-        await store.restore_fact_lifecycle(
-            conn=conn,
-            fq_table=fq_table,
-            bank_id=bank_id,
-            rows=[
-                FactLifecycle(unit_id=str(unit_id), created_at=None, consolidated_at=when, consolidation_failed_at=when)
-            ],
-        )
-    (unit,) = (await memory.list_memory_units(bank_id, request_context=request_context))["items"]
-    assert unit["consolidated_at"] == when.isoformat()
-    assert unit["consolidation_failed_at"] is None
-
-
 class _FakeAlembicContext:
     """Stands in for ``alembic.context``, whose ``config`` only exists inside a
     live migration run."""
@@ -527,21 +489,7 @@ def test_tenant_runs_install_nothing_and_clean_up_strays(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_routines_callable_from_non_public_schema(memory: MemoryEngine, request_context, monkeypatch):
-    """End-to-end #2638: with the deployment schema set to a non-``public`` schema,
-    the migration installs the routines there and ``fq_routine()`` resolves to that
-    copy, which returns the same cross-tenant results as the ``public`` one.
-
-    Installs the CURRENT routine bodies, not ``b6d2f8a4c1e7``'s. #2638's install
-    gating has been carried forward unchanged by every migration since, but the
-    bodies have not: this test executes the routine against a live database that
-    xdist peers are creating and dropping schemas in, and the pre-``c8b4e2a71f95``
-    body waits indefinitely for AccessShareLock on every schema it scans. A peer's
-    concurrent DROP closes the lock cycle and PostgreSQL kills one side — a
-    recurring ``DeadlockDetectedError`` here, on a body no deployment runs.
-    ``_current_routines_migration_path`` keeps it on the real one.
-    """
-    from remember_api.engine import schema as schema_mod
-
+    """Historical migrations install their routines in a non-public schema."""
     migration = _load_current_routines_migration()
     schema = f"tenant_{uuid.uuid4().hex[:8]}"
 
@@ -556,13 +504,7 @@ async def test_routines_callable_from_non_public_schema(memory: MemoryEngine, re
             for stmt in _capture_upgrade(migration, monkeypatch, schema, configured_schema=schema):
                 await conn.execute(stmt)
 
-            # The loop's qualifier now points at the non-public copy...
-            # Config is a read-only proxy, so swap the accessor rather than the field.
-            monkeypatch.setattr(schema_mod, "get_config", lambda: SimpleNamespace(database_schema=schema))
-            assert schema_mod.fq_routine("banks_needing_consolidation") == f'"{schema}".banks_needing_consolidation'
-
-            # ...and that copy works: it enumerates pg_class database-wide, so it
-            # still finds the bank living in the public schema.
+            # The historical routine remains callable in a non-public schema.
             rows = await conn.fetch(f'SELECT schema_name, bank_id FROM "{schema}".banks_needing_consolidation()')
             assert bank_id in {r["bank_id"] for r in rows}
         finally:

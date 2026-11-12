@@ -113,8 +113,6 @@ class _StubEngine:
     """Just enough MemoryEngine for reprocess_document: it reads a document and
     submits a retain. Everything else the method touches is disabled."""
 
-    _operation_validator = None
-
     def __init__(self, doc: dict[str, Any]) -> None:
         self._doc = doc
         self.submitted: list[tuple[dict[str, Any], str | None]] = []

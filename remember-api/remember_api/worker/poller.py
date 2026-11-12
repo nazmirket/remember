@@ -1,11 +1,8 @@
 """
-Worker poller for distributed task execution.
+Worker poller for local background task execution.
 
-Polls the database for pending tasks and executes them using
-FOR UPDATE SKIP LOCKED for safe concurrent claiming.
-
-Backend-agnostic: works with any DatabaseBackend implementation
-(PostgreSQL via asyncpg, Oracle via oracledb, etc.).
+Polls PostgreSQL for pending tasks and uses FOR UPDATE SKIP LOCKED
+for safe concurrent claiming.
 """
 
 import asyncio
@@ -32,18 +29,15 @@ from ..config import (
 from ..engine.permit_wait import excluding_permit_wait
 from ..engine.schema import fq_table_explicit as fq_table
 from ..metrics import OperationOutcome, get_metrics_collector
-from ..operation_runs import worker_task
-from .backpressure import is_append_conflict, is_store_backpressure
+from .backpressure import is_append_conflict, is_reembed_guard
 from .exceptions import DeferOperation, RetryTaskAt, format_task_error
 
 
 def _backpressure_defer_seconds() -> int:
     """How long a task the store shed for backpressure is held before a retry.
 
-    Resolved per call, not once at import: ``worker.main`` imports this module at
-    module scope, before it runs ``load_dotenv_for_entrypoint()``. Building the config
-    here at import time would cache it from a pre-``.env`` environment for the whole
-    process. The rationale for the default lives with the value, on
+    Resolved per call so configuration is not cached before the daemon loads its
+    environment. The rationale for the default lives with the value, on
     DEFAULT_BACKPRESSURE_DEFER_SECONDS in config.py.
     """
     return get_config().backpressure_defer_seconds
@@ -145,10 +139,6 @@ def _current_rss_bytes() -> int | None:
 # about to be marked completed.
 _CANCEL_DRAIN_TIMEOUT = 5.0
 
-# Startup recovery logs a progress line every this many schemas, so a long walk
-# reads as "recovering" rather than "hung".
-_RECOVERY_PROGRESS_EVERY = 1000
-
 
 def _metric_operation_label(operation_type: str | None) -> str:
     if operation_type in _RETAIN_OP_TYPES:
@@ -220,7 +210,6 @@ def _updated_row_count(result: Any) -> int:
 
 if TYPE_CHECKING:
     from remember_api.engine.db.base import DatabaseBackend, DatabaseConnection
-    from remember_api.extensions.tenant import TenantExtension
 
 logger = logging.getLogger(__name__)
 
@@ -359,8 +348,7 @@ class WorkerPoller:
     Uses FOR UPDATE SKIP LOCKED for safe distributed claiming,
     allowing multiple workers to process tasks without conflicts.
 
-    Supports dynamic multi-tenant discovery via tenant_extension.
-    Backend-agnostic via DatabaseBackend abstraction.
+    Uses the configured local database schema.
     """
 
     def __init__(
@@ -370,7 +358,6 @@ class WorkerPoller:
         executor: Callable[[dict[str, Any]], Awaitable[None]],
         poll_interval_ms: int = 500,
         schema: str | None = None,
-        tenant_extension: "TenantExtension | None" = None,
         max_slots: int = 10,
         slot_reservations: dict[str, int] | None = None,
         consolidation_bank_priority: dict[str, int] | None = None,
@@ -381,13 +368,11 @@ class WorkerPoller:
         Initialize the worker poller.
 
         Args:
-            backend: Database backend (PostgreSQL, Oracle, etc.)
+            backend: Local PostgreSQL database backend
             worker_id: Unique identifier for this worker
             executor: Async function to execute tasks (typically MemoryEngine.execute_task)
             poll_interval_ms: Interval between polls when no tasks found (milliseconds)
-            schema: Database schema for single-tenant support (deprecated, use tenant_extension)
-            tenant_extension: Extension for dynamic multi-tenant discovery. If None, creates a
-                            DefaultTenantExtension with the configured schema.
+            schema: Database schema; defaults to the configured local schema.
             max_slots: Maximum concurrent tasks per worker
             slot_reservations: Per-operation-type reserved slot counts (e.g. {"consolidation": 2,
                 "retain": 3}). Reserved slots guarantee capacity for that operation type.
@@ -403,8 +388,7 @@ class WorkerPoller:
             on_wall_timeout: Optional async hook called with (task_dict, schema,
                 error_message, stage) after a task is failed by its wall-clock ceiling.
                 The ceiling cancels the executor, so the engine's own failure
-                handling (which fires the consolidation failure webhook) never
-                runs for that outcome; this hook is how the engine still gets told.
+                handling never runs for that outcome; this hook tells the engine.
                 Called after the operation row is already failed, and outside the
                 cancelled task, so it can safely do its own DB work.
         """
@@ -413,15 +397,7 @@ class WorkerPoller:
         self._executor = executor
         self._on_wall_timeout = on_wall_timeout
         self._poll_interval_ms = poll_interval_ms
-        self._schema = schema
-        # Always set tenant extension (use DefaultTenantExtension if none provided)
-        if tenant_extension is None:
-            from ..extensions.builtin.tenant import DefaultTenantExtension
-
-            # Pass schema parameter to DefaultTenantExtension if explicitly provided
-            config = {"schema": schema} if schema else {}
-            tenant_extension = DefaultTenantExtension(config=config)
-        self._tenant_extension = tenant_extension
+        self._schema = schema if schema is not None else get_config().database_schema
         self._max_slots = max_slots
         self._slot_reservations: dict[str, int] = (
             slot_reservations if slot_reservations is not None else {"consolidation": 2}
@@ -430,11 +406,6 @@ class WorkerPoller:
             consolidation_bank_priority if consolidation_bank_priority else None
         )
         self._max_retries = max(0, max_retries)  # Never negative
-        # Cache of which optional PG routines are installed on the server
-        # (probed once, memoised for the life of the poller).
-        from ..engine.db.optional_routines import OptionalRoutines
-
-        self._optional_routines = OptionalRoutines(self._backend)
         self._shutdown = asyncio.Event()
         # Loop time at which shutdown began: the drain budget counts from here, so a
         # drain started by a signal overlaps the HTTP server's own drain (#6021).
@@ -461,11 +432,7 @@ class WorkerPoller:
         self._active_tasks: dict[str, ActiveTaskInfo] = {}
         # Track in-flight tasks by operation type
         self._in_flight_by_type: dict[str, int] = {}
-        # Rotation offset for per-tenant fair claiming. Advances past the last
-        # schema we serviced so a busy tenant can't monopolize the poll order.
-        self._next_schema_idx: int = 0
-        # The same rotation one level down, per schema: the bank the claim
-        # served last, so the next one takes a row for the bank after it.
+        # The last bank claimed from, so the next claim starts with the next bank.
         # Claiming is otherwise a global FIFO on created_at, which lets one bank
         # mid-bulk-ingest hold every slot until its queue drains while other
         # banks' writes wait behind the backlog (#3861). A cursor over the bank
@@ -473,10 +440,8 @@ class WorkerPoller:
         # this worker has never claimed for, so only a range can discover it.
         # Empty string starts a round; claim_tasks resets to it at the end of one.
         self._next_bank_cursor: dict[str | None, str] = {}
-        # Every schema this process has claimed a row in. Shutdown hands back only
-        # what this worker owns, and it can only own rows where it claimed, so
-        # release_own_tasks walks these instead of every tenant schema.
-        self._claimed_schemas: set[str | None] = set()
+        # Shutdown only needs to release tasks if this worker has claimed any.
+        self._has_claimed_tasks = False
         # Retention cleanup runs outside the claim loop. Keep one task per
         # poller so maintenance cannot overlap with itself or block slot refill.
 
@@ -487,67 +452,18 @@ class WorkerPoller:
 
         return None if schema == DEFAULT_DATABASE_SCHEMA else schema
 
-    async def _get_schemas(self) -> list[str | None]:
-        """Get list of schemas to poll. Returns [None] for default schema (no prefix)."""
-        tenants = await self._tenant_extension.list_tenants()
-        # Convert default schema to None for SQL compatibility (no prefix), keep others as-is
-        return [self._normalize_poll_schema(t.schema) for t in tenants]
-
-    async def _scan_active_schemas(self, conn: "DatabaseConnection", schemas: list[str | None]) -> set[str | None]:
-        """Find which schemas have pending work.
-
-        Prefers a server-side PL/pgSQL routine (single DB round-trip,
-        ~200ms for 1400+ schemas) when ``public.schemas_with_pending_work()``
-        is installed. The presence check goes through
-        ``OptionalRoutines.is_installed`` which probes ``pg_proc`` once and
-        caches the result, so we don't generate a server-side error on
-        every poll cycle when the routine isn't installed.
-
-        Falls back to per-schema Python EXISTS queries (~4ms each) on
-        non-PostgreSQL backends or when the routine isn't installed. See
-        ``remember_api.engine.db.optional_routines`` for the canonical
-        install SQL.
-
-        Runs on the poll cycle's connection — see ``claim_batch``.
-        """
-        if await self._optional_routines.is_installed(conn, "schemas_with_pending_work"):
-            # The routine IS the authority on where work exists: every schema
-            # it returns is claimable, and every schema it does NOT return is
-            # treated as having nothing to do this cycle. That is the entire
-            # point of installing it — one round-trip replaces N per-schema
-            # EXISTS probes. We deliberately do NOT re-verify the omitted
-            # schemas with a per-schema scan: that re-runs the exact queries
-            # the routine exists to avoid, on every idle poll, silently
-            # negating the optimisation.
-            #
-            # Because the result is trusted wholesale, the routine is only
-            # appropriate for multi-tenant deployments. A single-schema
-            # (default/public only) install should NOT create it and instead
-            # falls through to the per-schema path below — a single cheap
-            # EXISTS check that cannot starve. See
-            # ``remember_api.engine.db.optional_routines``.
-            rows = await conn.fetch("SELECT * FROM public.schemas_with_pending_work()")
-            return {self._normalize_poll_schema(r[0]) for r in rows}
-
-        return await self._scan_active_schemas_by_exists(conn, schemas)
-
-    async def _scan_active_schemas_by_exists(
-        self, conn: "DatabaseConnection", schemas: list[str | None]
-    ) -> set[str | None]:
-        """Find active schemas using per-schema EXISTS checks."""
-        active: set[str | None] = set()
-        for schema in schemas:
-            table = fq_table("async_operations", schema)
-            try:
-                has_work = await conn.fetchval(
+    async def _has_pending_work(self, conn: "DatabaseConnection", schema: str | None) -> bool:
+        """Check whether the local schema has pending work."""
+        table = fq_table("async_operations", schema)
+        try:
+            return bool(
+                await conn.fetchval(
                     f"SELECT EXISTS(SELECT 1 FROM {table} "
                     f"WHERE status = 'pending' AND task_payload IS NOT NULL LIMIT 1)"
                 )
-                if has_work:
-                    active.add(schema)
-            except Exception:
-                pass
-        return active
+            )
+        except Exception:
+            return False
 
     async def _get_available_slots(self) -> SlotAvailability:
         """
@@ -608,134 +524,16 @@ class WorkerPoller:
             await asyncio.sleep(0.01)
 
     async def claim_batch(self) -> list[ClaimedTask]:
-        """
-        Claim pending tasks atomically across all tenant schemas,
-        respecting per-operation-type slot reservations and shared pool limits.
-
-        Uses FOR UPDATE SKIP LOCKED to ensure no conflicts with other workers.
-
-        Schema iteration is round-robin to prevent one busy tenant from
-        starving others. Each poll starts at ``self._next_schema_idx`` and
-        wraps around the full list. First pass caps at 1 claim per pool per
-        schema so every tenant with pending work gets a fair chance; a second
-        pass backfills remaining slots from any schema when there's spare
-        capacity. After the call, the offset advances past the last
-        schema we serviced (or by 1 if nothing was claimed) so the next
-        poll starts at a different position.
-
-        Returns:
-            List of ClaimedTask objects containing operation_id, task_dict, and schema
-        """
-        # Calculate available slots (per-type reserved + shared pool)
+        """Claim pending tasks in the local schema within available slots."""
         availability = await self._get_available_slots()
-
         if all(v <= 0 for v in availability.reserved.values()) and availability.shared <= 0:
             return []
 
-        schemas = await self._get_schemas()
-        if not schemas:
-            return []
-
-        # One pooled connection for the whole cycle — the scan *and* every
-        # per-schema claim. Each acquire pays the pool's setup callback (the
-        # session GUCs) and each release pays asyncpg's RESET ALL / UNLISTEN /
-        # CLOSE ALL; behind a transaction-mode pooler every one of those is its
-        # own server-side transaction. Acquiring per schema multiplied that
-        # ceremony by the number of active schemas — ~12 statements per
-        # schema-visit for 2 useful queries (#3499). The per-schema claims stay
-        # sequential and each still runs in its own transaction, so
-        # FOR UPDATE SKIP LOCKED semantics are unchanged by sharing the
-        # connection.
+        schema = self._normalize_poll_schema(self._schema)
         async with self._backend.acquire() as conn:
-            return await self._claim_batch_on_conn(conn, availability, schemas)
-
-    async def _claim_batch_on_conn(
-        self,
-        conn: "DatabaseConnection",
-        availability: SlotAvailability,
-        schemas: list[str | None],
-    ) -> list[ClaimedTask]:
-        """Run one full claim cycle (scan + per-schema claims) on a single connection."""
-        # Scan: find which schemas have pending work using a lightweight
-        # EXISTS check (no locks). Then only claim from those schemas
-        # using the expensive FOR UPDATE SKIP LOCKED query.
-        active_schemas = await self._scan_active_schemas(conn, schemas)
-
-        if not active_schemas:
-            self._next_schema_idx = (self._next_schema_idx + 1) % len(schemas)
-            return []
-
-        # Build rotation list from active schemas only, preserving their
-        # original positions for correct offset advancement.
-        all_indexed = list(enumerate(schemas))
-        active_indexed = [(i, s) for i, s in all_indexed if s in active_schemas]
-
-        # Rotate so no tenant is always first.
-        start = self._next_schema_idx % len(schemas)
-        rotated = [x for x in active_indexed if x[0] >= start] + [x for x in active_indexed if x[0] < start]
-
-        all_tasks: list[ClaimedTask] = []
-        remaining_reserved = dict(availability.reserved)
-        remaining_shared = availability.shared
-        last_serviced_idx: int | None = None
-        schemas_with_work: list[tuple[int, str | None]] = []
-
-        def _has_capacity() -> bool:
-            return any(v > 0 for v in remaining_reserved.values()) or remaining_shared > 0
-
-        def _account_tasks(tasks: list[ClaimedTask]) -> None:
-            nonlocal remaining_shared
-            for task in tasks:
-                op_type = task.task_dict.get("operation_type", "unknown")
-                if op_type in remaining_reserved and remaining_reserved[op_type] > 0:
-                    remaining_reserved[op_type] -= 1
-                else:
-                    remaining_shared -= 1
-
-        # Pass 1: fairness pass — iterate only active schemas, cap at
-        # 1 claim per pool per schema.
-        for orig_idx, schema in rotated:
-            if not _has_capacity():
-                break
-
-            fair_reserved = {t: min(1, v) for t, v in remaining_reserved.items() if v > 0}
-            fair_shared = min(1, remaining_shared) if remaining_shared > 0 else 0
-            tasks = await self._claim_batch_for_schema(conn, schema, fair_reserved, fair_shared)
-
-            _account_tasks(tasks)
-
-            if tasks:
-                last_serviced_idx = orig_idx
-                schemas_with_work.append((orig_idx, schema))
-
-            all_tasks.extend(tasks)
-
-        # Pass 2: capacity pass — fill remaining slots from schemas
-        # that had work in pass 1 only.
-        if _has_capacity() and schemas_with_work:
-            for orig_idx, schema in schemas_with_work:
-                if not _has_capacity():
-                    break
-
-                tasks = await self._claim_batch_for_schema(
-                    conn, schema, {t: v for t, v in remaining_reserved.items() if v > 0}, remaining_shared
-                )
-
-                _account_tasks(tasks)
-
-                if tasks:
-                    last_serviced_idx = orig_idx
-
-                all_tasks.extend(tasks)
-
-        # Advance offset past the last schema we serviced, or by 1 if
-        # nothing was claimed (so we don't keep re-hitting an empty head).
-        if last_serviced_idx is not None:
-            self._next_schema_idx = (last_serviced_idx + 1) % len(schemas)
-        else:
-            self._next_schema_idx = (start + 1) % len(schemas)
-
-        return all_tasks
+            if not await self._has_pending_work(conn, schema):
+                return []
+            return await self._claim_batch_for_schema(conn, schema, availability.reserved, availability.shared)
 
     async def _claim_batch_for_schema(
         self,
@@ -762,8 +560,7 @@ class WorkerPoller:
     ) -> list[ClaimedTask]:
         """Inner implementation for claiming tasks from a specific schema.
 
-        Delegates the SQL claiming logic to backend.ops.claim_tasks() which
-        handles backend-specific differences (e.g. Oracle's ORA-02014 workaround).
+        Delegates the SQL claiming logic to backend.ops.claim_tasks().
 
         Runs on the caller's connection (one per poll cycle) but opens its own
         transaction: the claim's row locks are held only until this schema's
@@ -781,14 +578,12 @@ class WorkerPoller:
                 bank_cursor=self._next_bank_cursor.get(schema, ""),
                 consolidation_bank_priority=self._consolidation_bank_priority,
             )
-            # Where the rotation got to. Carried across claims per schema, the
-            # way _next_schema_idx is across tenants; the claim query itself
-            # picks the bank, so this costs no extra statement to learn.
+            # Carry the bank cursor across claims to keep banks progressing fairly.
             self._next_bank_cursor[schema] = claimed.next_bank_cursor
             all_rows = claimed.rows
             if all_rows:
                 # Before anything below can fail: once claimed, the row is ours to release.
-                self._claimed_schemas.add(schema)
+                self._has_claimed_tasks = True
 
             if not all_rows:
                 return []
@@ -796,7 +591,6 @@ class WorkerPoller:
             result = []
             for row in all_rows:
                 payload = row["task_payload"]
-                # Oracle may return JSON columns as dict directly
                 task_dict = json.loads(payload) if isinstance(payload, str) else payload
                 task_dict["_retry_count"] = row["retry_count"]
                 task_dict["_operation_id"] = str(row["operation_id"])
@@ -1272,9 +1066,8 @@ class WorkerPoller:
         """Tell the engine a task was failed by its ceiling. Never fatal.
 
         The whole point of the ceiling is that it cancels the executor, which means
-        the engine's own ``except`` blocks — the ones that fire a consolidation
-        failure webhook — are skipped. Without this notification a timed-out
-        consolidation would be the single failure mode subscribers never hear about.
+        the engine's own ``except`` blocks are skipped. The notification lets the engine
+        mark a timed-out mental-model refresh as failed.
         """
         if self._on_wall_timeout is None:
             return
@@ -1329,8 +1122,7 @@ class WorkerPoller:
             logger.debug(f"Executing task {task.operation_id} (type={task_type}, bank={bank_id}{schema_info})")
             if task.schema:
                 task.task_dict["_schema"] = task.schema
-            with worker_task(task.operation_id, task.queued_at):
-                await self._run_executor(task, task_type, holder)
+            await self._run_executor(task, task_type, holder)
             logger.debug(f"Task {task.operation_id} execution finished")
         except _WallTimeoutExceeded as e:
             # The executor has already been cancelled; all that's left is to say so
@@ -1355,21 +1147,16 @@ class WorkerPoller:
                 task, "retry", lambda: self._schedule_retry_all(task, retry.retry_at, str(retry))
             )
         except Exception as e:
-            # A store refusing the write because its own indexing is behind is backpressure, not a
-            # failure: it clears itself as the fold catches up and says nothing about the payload.
-            # Deferring is what it asked for. Failing it here is what makes a long ingest lose the
-            # documents in flight when the backlog crosses the bound — the task's small retry
-            # budget runs out while the store is still legitimately shedding. Checked before the
-            # failure path so the operation keeps its retries for things that are actually wrong.
-            if is_store_backpressure(e):
+            # A model swap requires restarting the daemon before writes can resume.
+            if is_reembed_guard(e):
                 retry_at = datetime.now(timezone.utc) + timedelta(seconds=_backpressure_defer_seconds())
                 logger.warning(
-                    "Task %s deferred until %s: store backpressure (%s)",
+                    "Task %s deferred until %s: embedding model changed (%s)",
                     task.operation_id,
                     retry_at,
                     str(e)[:200],
                 )
-                reason = f"store backpressure: {str(e)[:400]}"
+                reason = f"embedding model changed: {str(e)[:400]}"
                 await self._write_terminal(task, "deferred", lambda: self._defer_all(task, retry_at, reason))
                 return
             # An append that lost its race is the same shape of answer: "the document moved, read
@@ -1602,7 +1389,7 @@ class WorkerPoller:
 
         Also recovers batch API operations that were in-flight.
 
-        If tenant_extension is configured, recovers across all tenant schemas.
+        Recovers tasks in the configured local schema.
 
         Args:
             claimed_before: Only touch rows claimed before this DB time, so it is
@@ -1611,34 +1398,18 @@ class WorkerPoller:
         Returns:
             Number of tasks recovered (reset to pending, not including failed)
         """
-        schemas = await self._get_schemas()
+        schema = self._normalize_poll_schema(self._schema)
         total_count = 0
         started = time.monotonic()
-        logger.info(f"Worker {self._worker_id} recovering stale tasks across {len(schemas)} schemas")
-
-        for i, schema in enumerate(schemas, 1):
-            if i % _RECOVERY_PROGRESS_EVERY == 0:
-                logger.info(f"Worker {self._worker_id} recovery progress: {i}/{len(schemas)} schemas")
-            try:
-                # First, recover batch API operations (before resetting worker tasks)
-                total_count += await self._recover_batch_operations(schema, claimed_before=claimed_before)
-
-                total_count += await self._reclaim_own_processing_tasks(schema, claimed_before=claimed_before)
-
-                # Finalize batch_retain parents that the aggregation left behind
-                # (crash between a child's terminal commit and the parent update,
-                # or children that never committed). These sit 'pending' with a
-                # NULL payload — unclaimable and invisible to failed_operations —
-                # until reconciled. See issue #2985.
-                await self._reconcile_orphaned_parents(schema)
-            except Exception as e:
-                # Format schema for logging: custom schemas in quotes, None as-is
-                schema_display = f'"{schema}"' if schema else str(schema)
-                logger.warning(f"Worker {self._worker_id} failed to recover tasks for schema {schema_display}: {e}")
-
+        try:
+            total_count += await self._recover_batch_operations(schema, claimed_before=claimed_before)
+            total_count += await self._reclaim_own_processing_tasks(schema, claimed_before=claimed_before)
+            await self._reconcile_orphaned_parents(schema)
+        except Exception as e:
+            logger.warning(f"Worker {self._worker_id} failed to recover tasks for schema {schema!r}: {e}")
         logger.info(
             f"Worker {self._worker_id} recovered {total_count} stale tasks from previous run "
-            f"({len(schemas)} schemas in {time.monotonic() - started:.1f}s)"
+            f"in {time.monotonic() - started:.1f}s"
         )
         return total_count
 
@@ -1658,26 +1429,20 @@ class WorkerPoller:
         rows claimed before startup and the parent pass re-checks each parent
         under a row lock.
 
-        Only the schemas this process claimed in are visited. With thousands of
-        tenant schemas, a walk over all of them takes longer than a typical
-        termination grace period, and the process is killed partway through —
-        the very stranding this release exists to prevent. Rows a previous run
-        under the same worker id left behind elsewhere are startup recovery's.
+        Only tasks claimed by this worker are released.
 
         Returns:
             Number of operations returned to pending.
         """
-        # Nothing here may raise: this runs on the shutdown path, where the DB
-        # being unwell is exactly the case that strands rows, and an exception
-        # escaping would abort the rest of the teardown.
-        total_count = 0
-        for schema in list(self._claimed_schemas):
-            try:
-                total_count += await self._reclaim_own_processing_tasks(schema)
-            except Exception as e:
-                schema_display = f'"{schema}"' if schema else str(schema)
-                logger.warning(f"Worker {self._worker_id} failed to release tasks for schema {schema_display}: {e}")
-        return total_count
+        # A failure here must not abort the rest of shutdown.
+        if not self._has_claimed_tasks:
+            return 0
+        schema = self._normalize_poll_schema(self._schema)
+        try:
+            return await self._reclaim_own_processing_tasks(schema)
+        except Exception as e:
+            logger.warning(f"Worker {self._worker_id} failed to release tasks for schema {schema!r}: {e}")
+            return 0
 
     async def _recover_batch_operations(self, schema: str | None, *, claimed_before: datetime | None = None) -> int:
         """
@@ -2124,31 +1889,14 @@ class WorkerPoller:
             if len(processing_info) > 10:
                 processing_str += f" +{len(processing_info) - 10} more"
 
-            # Get global stats from DB — scope the heavy COUNT/GROUP BY
-            # queries to schemas that actually have work. With N tenants the
-            # full fanout is 2*N queries every PROGRESS_LOG_INTERVAL; scoping
-            # via the routine (or per-schema EXISTS fallback) reduces this to
-            # 2*active_schemas which is typically << N.
-            schemas = await self._get_schemas()
-            total_schema_count = len(schemas)
-
+            schema = self._normalize_poll_schema(self._schema)
             global_pending = 0
             all_worker_counts: dict[str, int] = {}
-            # operation_type -> aggregated bucket counts across schemas
             pending_breakdown: dict[str, dict[str, int]] = {}
-            schemas_to_query: set[str | None] = set()
 
             async with self._backend.acquire() as conn:
-                # Schemas with pending async_operations (uses server-side
-                # routine when installed, falls back to per-schema EXISTS).
-                schemas_with_pending = await self._scan_active_schemas(conn, schemas)
-
-                # Also include schemas that have in-flight tasks on this worker
-                # so the "processing" worker_id GROUP BY still reports correctly.
-                schemas_with_active_tasks = {info.schema for info in active_tasks.values()}
-                schemas_to_query = schemas_with_pending | schemas_with_active_tasks
-
-                for schema in schemas_to_query:
+                has_work = await self._has_pending_work(conn, schema)
+                if has_work or active_tasks:
                     table = fq_table("async_operations", schema)
 
                     # Bucket pending rows by the claim-query predicates that are
@@ -2157,8 +1905,6 @@ class WorkerPoller:
                     # retry backoff, etc.). Deliberately a *subset* of the claim
                     # predicate — the serialization exclusions are left out, see
                     # _log_pending_breakdown.
-                    # Use SUM(CASE WHEN ...) instead of COUNT(*) FILTER (WHERE ...)
-                    # for Oracle compatibility — FILTER is PG-specific.
                     try:
                         breakdown_rows = await conn.fetch(
                             f"""
@@ -2214,19 +1960,12 @@ class WorkerPoller:
             pool_str = self._format_pool_stats()
             proc_str = self._format_proc_stats()
 
-            queried_count = len(schemas_to_query)
-            # Display queried schemas (cap at 20 for readability)
-            queried_list = sorted(s if s else "default" for s in schemas_to_query)
-            schemas_str = ", ".join(queried_list[:20])
-            if len(queried_list) > 20:
-                schemas_str += f" +{len(queried_list) - 20} more"
             logger.info(
                 f"[WORKER_STATS] worker={self._worker_id} "
                 f"slots={in_flight}/{self._max_slots} | "
                 f"reserved: [{reserved_str}] | "
                 f"shared={tasks_in_shared}/{shared_pool_size}(avail={shared_available}) | "
-                f"global: pending={global_pending} "
-                f"(queried={queried_count}/{total_schema_count} schemas: {schemas_str}) | "
+                f"pending={global_pending} | "
                 f"others: {others_str} | "
                 f"pool: {pool_str} | "
                 f"proc: {proc_str} | "

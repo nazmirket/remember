@@ -61,7 +61,7 @@ def stub_retrieval(monkeypatch):
 
     from remember_api.engine.memories.postgres import PostgresMemories
 
-    monkeypatch.setattr("remember_api.engine.memories._memories", PostgresMemories({}))
+    monkeypatch.setattr("remember_api.engine.memories._memories", PostgresMemories())
     monkeypatch.setattr("remember_api.engine.db_utils.acquire_with_retry", fake_acquire_with_retry)
     monkeypatch.setattr(recall_module, "retrieve_semantic_bm25_combined_sql", fake_semantic_bm25_combined_sql)
     monkeypatch.setattr(recall_module, "retrieve_temporal_combined_sql", fake_temporal_combined_sql)

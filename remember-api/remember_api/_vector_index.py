@@ -12,42 +12,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Extensions a user can set via REMEMBER_API_VECTOR_EXTENSION.
-CONFIGURABLE_EXTENSIONS = ("pgvector", "pgvectorscale", "vchord", "scann")
-
-# Extensions detect_vector_extension() can return. pg_diskann is a runtime-only
-# resolution from a configured "pgvectorscale" backend on Azure (uses a different
-# WITH clause), never a value the user sets directly.
-RESOLVED_EXTENSIONS = (*CONFIGURABLE_EXTENSIONS, "pg_diskann")
-
-# Backwards-compatible alias for older imports.
+# The local daemon uses pgvector's HNSW indexes.
+CONFIGURABLE_EXTENSIONS = ("pgvector",)
+RESOLVED_EXTENSIONS = CONFIGURABLE_EXTENSIONS
 VALID_EXTENSIONS = CONFIGURABLE_EXTENSIONS
 
-SCANN_MIN_ROWS_FOR_AUTO_INDEX = 10_000
-
-
-_EXTENSION_NAMES = {
-    "pgvector": "vector",
-    "pgvectorscale": "vectorscale",
-    "vchord": "vchord",
-    "scann": "alloydb_scann",
-}
-
-_INDEX_USING_CLAUSES = {
-    "pgvector": "USING hnsw (embedding vector_cosine_ops)",
-    "pgvectorscale": "USING diskann (embedding vector_cosine_ops) WITH (num_neighbors = 50)",
-    "pg_diskann": "USING diskann (embedding vector_cosine_ops) WITH (max_neighbors = 50)",
-    "vchord": "USING vchordrq (embedding vector_cosine_ops)",
-    "scann": "USING scann (embedding cosine) WITH (mode = 'AUTO')",
-}
-
-_INDEX_TYPE_KEYWORDS = {
-    "pgvector": "hnsw",
-    "pgvectorscale": "diskann",
-    "pg_diskann": "diskann",
-    "vchord": "vchordrq",
-    "scann": "scann",
-}
+_EXTENSION_NAMES = {"pgvector": "vector"}
+_INDEX_USING_CLAUSES = {"pgvector": "USING hnsw (embedding vector_cosine_ops)"}
+_INDEX_TYPE_KEYWORDS = {"pgvector": "hnsw"}
 
 # Ceiling on how many tuples one resumed ANN scan may visit (hnsw.max_scan_tuples).
 # Only iterative scans consult it, and it is approximate — the initial round is not
@@ -107,15 +79,6 @@ def ann_max_scan_tuples() -> int:
 #   and recall floor; see the memories/pg/links / pool init call sites for the
 #   latency-vs-recall framing). With iterative scans on (below) the ef value is a
 #   batch size rather than a ceiling, so a query's own LIMIT decides its depth.
-# - vchord exposes vchordrq.probes, but its shape must match the index's
-#   build.internal.lists hierarchy. VectorChord 1.1 added per-index fallback
-#   parameters for this reason: a session GUC overrides every vchordrq index,
-#   and a single value can be invalid for listless or mixed-layout indexes.
-#   Remember's built-in vchord clause does not set lists, so the safe default
-#   is no session-level probe override; deployments that partition vchordrq
-#   indexes should attach probes to the index storage parameters instead.
-# - pgvectorscale / pg_diskann / scann do not expose an equivalent per-statement
-#   knob in the engine today, so the dispatcher returns no statements for them.
 #
 # hnsw.iterative_scan is what makes ef_search a *batch* size rather than a ceiling.
 # With it off (pgvector's default, and what Remember ran until now) the ground-layer
@@ -147,17 +110,9 @@ _ANN_TUNING_HIGH_RECALL: dict[str, tuple[tuple[str, str], ...]] = {
 # in ``public`` even when migrations run with a tenant schema on the search_path.
 _EXTENSION_INSTALL_PLAN: dict[str, tuple[tuple[str, bool], ...]] = {
     "pgvector": (("vector", False),),
-    "pgvectorscale": (("vector", False), ("vectorscale", True)),
-    "vchord": (("vchord", True),),
-    "scann": (("vector", False), ("alloydb_scann", True)),
 }
 
-_INSTALL_HINTS = {
-    "pgvector": "CREATE EXTENSION vector;",
-    "pgvectorscale": "CREATE EXTENSION vector; then CREATE EXTENSION vectorscale CASCADE; (or pg_diskann on Azure)",
-    "vchord": "CREATE EXTENSION vchord CASCADE;",
-    "scann": "CREATE EXTENSION vector; then CREATE EXTENSION alloydb_scann CASCADE;",
-}
+_INSTALL_HINTS = {"pgvector": "CREATE EXTENSION vector;"}
 
 
 def configured_vector_extension() -> str:
@@ -179,8 +134,7 @@ def configured_vector_extension() -> str:
 def validate_extension(name: str) -> str:
     """Return a normalized configurable vector extension name or raise.
 
-    Used at the user-facing config boundary; pg_diskann is rejected here because
-    it is a detection-time alias, never a value the user sets directly.
+    The local database supports pgvector only.
     """
     ext = name.lower()
     if ext not in CONFIGURABLE_EXTENSIONS:
@@ -215,7 +169,8 @@ def index_type_keyword(ext: str) -> str:
 
 def minimum_rows_for_index(ext: str) -> int:
     """Return the minimum populated embedding rows before creating this index type."""
-    return SCANN_MIN_ROWS_FOR_AUTO_INDEX if _normalize_resolved(ext) == "scann" else 0
+    _normalize_resolved(ext)
+    return 0
 
 
 def should_defer_index_creation(ext: str, row_count: int) -> bool:
@@ -250,7 +205,8 @@ def ann_search_tuning_settings(ext: str, *, kind: str) -> tuple[tuple[str, str],
 
 def uses_per_bank_vector_indexes(ext: str) -> bool:
     """Return whether the backend should create per-bank partial vector indexes."""
-    return _normalize_resolved(ext) != "scann"
+    _normalize_resolved(ext)
+    return True
 
 
 def per_bank_index_min_rows() -> int:
@@ -260,15 +216,6 @@ def per_bank_index_min_rows() -> int:
     created up front at bank creation, exactly as they were before the threshold
     existed, and no maintenance operation ever runs. Everything below applies
     only when an operator sets a positive value.
-
-    Distinct from :func:`minimum_rows_for_index`, which is ScaNN's *build*
-    requirement for its single global index (AlloyDB cannot construct one below
-    a floor). This is a cost policy for the per-bank backends: the indexes sit on
-    the shared ``memory_units`` table, so each one is enumerated and locked at
-    plan time by queries belonging to every *other* bank, and opened by every DML
-    statement against the table. A small bank's index cannot repay that — the
-    ``(bank_id, fact_type)`` B-tree plus a top-N sort answers the same query
-    exactly and faster. See issue #3485.
 
     Read from config rather than passed in because the write path's pre-check,
     the maintenance operation and the admin command must all apply the same
@@ -357,30 +304,6 @@ def detect_vector_extension(conn: Connection, vector_extension: str = "pgvector"
     from sqlalchemy import text
 
     configured_ext = validate_extension(vector_extension)
-
-    if configured_ext == "pgvectorscale":
-        pgvector_check = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")).scalar()
-        if not pgvector_check:
-            raise RuntimeError(
-                "DiskANN (pgvectorscale/pg_diskann) requires pgvector to be installed. "
-                f"Install it with: {_INSTALL_HINTS['pgvectorscale']}"
-            )
-
-        vectorscale_check = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'vectorscale'")).scalar()
-        pg_diskann_check = conn.execute(text("SELECT 1 FROM pg_extension WHERE extname = 'pg_diskann'")).scalar()
-
-        if vectorscale_check:
-            logger.debug("Using vector extension: pgvectorscale (DiskANN)")
-            return "pgvectorscale"
-        if pg_diskann_check:
-            logger.debug("Using vector extension: pg_diskann (Azure DiskANN)")
-            return "pg_diskann"
-
-        raise RuntimeError(
-            "Configured vector extension 'pgvectorscale' not found. Install either:\n"
-            "  - pgvectorscale (open source): CREATE EXTENSION vectorscale CASCADE;\n"
-            "  - pg_diskann (Azure): CREATE EXTENSION pg_diskann CASCADE;"
-        )
 
     extension_name = pg_extension_name(configured_ext)
     extension_check = conn.execute(

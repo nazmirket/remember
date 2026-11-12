@@ -1,11 +1,11 @@
 # Project guidance
 
-Remember is a local, headless memory layer for Codex and Claude Code, maintained at `nazmirket/remember`. It originated from Hindsight; retain the upstream copyright notice and license. Both agents share an on-demand loopback API, a profile-specific pg0 database and the memory worker. Model inference can be local or hosted. Preserve session capture, retain/recall/reflect, Pages, consolidation, graph and temporal retrieval, git seeding, surveys, project isolation and linked-worktree sharing.
+Remember is a local, headless memory layer for Codex and Claude Code, maintained at `nazmirket/remember`. It originated from Hindsight; retain the upstream copyright notice and license. Both agents share an on-demand loopback API, a local pg0 database and the memory worker. Model inference can be local or hosted. Preserve session capture, retain/recall/reflect, Pages, consolidation, graph and temporal retrieval, git seeding, surveys, project isolation and linked-worktree sharing.
 
 ## Development
 
 - `remember-api/`: FastAPI service, memory engine, worker and PostgreSQL migrations.
-- `remember-embed/`: daemon lifecycle and profiles.
+- `remember-embed/`: daemon lifecycle.
 - `remember-integrations/coding-agents/`: shared agent integration, Codex/Claude hooks and MCP tools.
 - `remember-clients/python/`: Python API client, including the system-test client.
 - `remember-system-tests/`: blackbox memory tests using pg0 and deterministic model stubs.

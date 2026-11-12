@@ -4,9 +4,7 @@ Remember is a headless, persistent memory layer for Codex and Claude Code. Both 
 
 Remember is maintained at [nazmirket/remember](https://github.com/nazmirket/remember). It originated from [Hindsight](https://github.com/vectorize-io/hindsight), created by Vectorize, and is developed as its own project. The original copyright notice and MIT license are preserved in [LICENSE](LICENSE).
 
-The service runs on demand on loopback. Memory storage is local; inference can use OpenAI, Anthropic, their Codex or Claude Code adapters, or a local model. A hosted provider receives the content it processes. Server logs, metrics, and optional in-process traces stay local.
-
-The optional `hindsight` decision-model provider uses Vectorize's Hindsight Inference service. It is a third-party service and is used only when explicitly configured.
+The service runs on demand on loopback. Memory storage uses local PostgreSQL with pgvector and native text search; inference can use OpenAI, Anthropic, their Codex or Claude Code adapters, or a local model. A hosted provider receives the content it processes. Server logs, metrics, and optional in-process traces stay local.
 
 ## Setup
 
@@ -19,7 +17,7 @@ Remember stores its configuration and local state in `~/.remember` by default. S
 ## Development
 
 - `remember-api/`: API, memory engine, worker and database migrations.
-- `remember-embed/`: local daemon and profile lifecycle.
+- `remember-embed/`: local daemon lifecycle.
 - `remember-integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
 - `remember-system-tests/`: blackbox memory tests using local database and deterministic model stubs.
 - `remember-clients/python/`: the system-test API client.

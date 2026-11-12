@@ -75,32 +75,16 @@ def pg_search_vector_expr(
     signals_col: str | None = "text_signals",
     native_inline: bool = True,
 ) -> str | None:
-    """SQL expression that builds ``search_vector`` for the configured PG text-search backend.
+    """Build a native tsvector expression for the selected text columns.
 
-    Single source of truth shared by ``memory_units`` (the batch insert over the
-    ``input_data`` CTE columns and the curation-revert recompute) and
-    ``mental_models`` (the page writes), so the per-backend tokenization
-    can never drift between the two tables. Returns ``None`` for backends that
-    leave ``search_vector`` unpopulated — pgroonga / pg_textsearch / pg_search
-    index the base text columns directly and keep only a dummy column, so there is
-    nothing to build.
-
-    The ``*_col`` arguments are the SQL for each text source (a column name or a
-    bind placeholder); pass ``None`` to leave a source out — ``signals_col=None`` for a
-    two-column table like ``mental_models`` (name + content), both for an observation,
-    whose ``search_vector`` covers its text alone. Pass ``native_inline=False`` when the
-    table's native ``search_vector`` is a GENERATED column that populates itself
-    (``mental_models``) — writing it inline would fail; only vchord's plain
-    bm25vector column then needs an explicit value.
-
-    ``text_search_extension_native_language`` is validated as a PG identifier in
-    ``RememberConfig.validate()``, so embedding it as a SQL literal is safe.
+    Set ``native_inline=False`` for generated columns, such as a Page's search
+    vector, which PostgreSQL computes on write.
     """
     cols = [c for c in (text_col, context_col, signals_col) if c is not None]
     combined = " || ' ' || ".join(f"COALESCE({c}, '')" for c in cols)
-    if config.text_search_extension == "vchord":
-        return f"tokenize({combined}, 'llmlingua2')::bm25_catalog.bm25vector"
-    if config.text_search_extension == "native" and native_inline:
+    if config.text_search_extension != "native":
+        raise ValueError(f"Unsupported text search extension: {config.text_search_extension}")
+    if native_inline:
         return f"to_tsvector('{config.text_search_extension_native_language}'::regconfig, {combined})"
     return None
 
@@ -1422,136 +1406,6 @@ class PostgreSQLOps(DataAccessOps):
 
     def get_entity_resolution_strategy(self) -> str:
         return "trigram"
-
-    # -- Webhook operations ------------------------------------------------
-
-    async def create_webhook(
-        self,
-        conn,
-        table,
-        webhook_id,
-        bank_id,
-        url,
-        secret,
-        event_types,
-        enabled,
-        http_config_json,
-    ):
-        return await conn.fetchrow(
-            f"""
-            INSERT INTO {table}
-            (id, bank_id, url, secret, event_types, enabled, http_config, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
-            RETURNING id, bank_id, url, secret, event_types, enabled,
-                      http_config::text, created_at::text, updated_at::text
-            """,
-            webhook_id,
-            bank_id,
-            url,
-            secret,
-            event_types,
-            enabled,
-            http_config_json,
-        )
-
-    async def list_webhooks_for_bank(self, conn, table, bank_id, limit, offset):
-        return await conn.fetch(
-            f"""
-            SELECT id, bank_id, url, secret, event_types, enabled,
-                   http_config::text, created_at::text, updated_at::text
-            FROM {table}
-            WHERE bank_id = $1
-            ORDER BY created_at, id
-            LIMIT $2 OFFSET $3
-            """,
-            bank_id,
-            limit,
-            offset,
-        )
-
-    async def count_webhooks_for_bank(self, conn, table, bank_id):
-        row = await conn.fetchrow(f"SELECT COUNT(*) AS total FROM {table} WHERE bank_id = $1", bank_id)
-        return int(row["total"]) if row else 0
-
-    async def get_webhooks_for_dispatch(self, conn, webhook_table, bank_id):
-        return await conn.fetch(
-            f"""
-            SELECT id, bank_id, url, secret, event_types, enabled, http_config::text
-            FROM {webhook_table}
-            WHERE (bank_id = $1 OR bank_id IS NULL) AND enabled = true
-            """,
-            bank_id,
-        )
-
-    async def update_webhook(self, conn, table, webhook_id, bank_id, set_clauses, params):
-        set_clauses_with_ts = set_clauses + ["updated_at = NOW()"]
-        return await conn.fetchrow(
-            f"""
-            UPDATE {table}
-            SET {", ".join(set_clauses_with_ts)}
-            WHERE id = $1 AND bank_id = $2
-            RETURNING id, bank_id, url, secret, event_types, enabled,
-                      http_config::text, created_at::text, updated_at::text
-            """,
-            *params,
-        )
-
-    async def delete_webhook(self, conn, table, webhook_id, bank_id):
-        result = await conn.execute(
-            f"DELETE FROM {table} WHERE id = $1 AND bank_id = $2",
-            webhook_id,
-            bank_id,
-        )
-        return int(result.split()[-1]) > 0 if result else False
-
-    async def list_webhook_deliveries(self, conn, ops_table, webhook_id, bank_id, limit, cursor):
-        fetch_limit = limit + 1
-        if cursor:
-            return await conn.fetch(
-                f"""
-                SELECT operation_id, status, retry_count, next_retry_at::text,
-                       error_message, task_payload, result_metadata::text, created_at::text, updated_at::text
-                FROM {ops_table}
-                WHERE operation_type = 'webhook_delivery'
-                  AND bank_id = $1
-                  AND task_payload->>'webhook_id' = $2
-                  AND created_at < $3::timestamptz
-                ORDER BY created_at DESC
-                LIMIT $4
-                """,
-                bank_id,
-                webhook_id,
-                cursor,
-                fetch_limit,
-            )
-        return await conn.fetch(
-            f"""
-            SELECT operation_id, status, retry_count, next_retry_at::text,
-                   error_message, task_payload, result_metadata::text, created_at::text, updated_at::text
-            FROM {ops_table}
-            WHERE operation_type = 'webhook_delivery'
-              AND bank_id = $1
-              AND task_payload->>'webhook_id' = $2
-            ORDER BY created_at DESC
-            LIMIT $3
-            """,
-            bank_id,
-            webhook_id,
-            fetch_limit,
-        )
-
-    async def insert_webhook_delivery_task(self, conn, ops_table, operation_id, bank_id, payload_json, timestamp):
-        await conn.execute(
-            f"""
-            INSERT INTO {ops_table}
-              (operation_id, bank_id, operation_type, status, task_payload, result_metadata, created_at, updated_at)
-            VALUES ($1, $2, 'webhook_delivery', 'pending', $3::jsonb, '{{}}'::jsonb, $4, $4)
-            """,
-            operation_id,
-            bank_id,
-            payload_json,
-            timestamp,
-        )
 
     # -- Task claiming operations ------------------------------------------
 

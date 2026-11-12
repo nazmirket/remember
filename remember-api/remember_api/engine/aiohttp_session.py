@@ -161,8 +161,7 @@ class LoopLocalSession:
     because aiohttp pays for it *per request*: with ``trust_env`` it runs both the
     netrc lookup and ``getproxies()`` in the default executor on every call
     (``aiohttp/client.py``), two scheduling hops on the embedding/rerank/LLM hot
-    paths. Pass ``trust_env=False`` where the destination must be exactly the one
-    already validated (webhook delivery).
+    paths. Pass ``trust_env=False`` where a request must bypass the proxy.
 
     Requests carry ``User-Agent: remember/<version>`` unless ``headers`` sets one.
     """

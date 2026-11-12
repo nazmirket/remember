@@ -289,8 +289,7 @@ async def test_cursor_reports_the_bank_the_rotation_served(pool, backend, clean_
 async def test_poller_cycles_banks_across_claims(pool, backend, clean_operations):
     """Through the poller: successive claims serve each bank, then start over.
 
-    The cursor is the poller's state, carried between claims the way
-    ``_next_schema_idx`` is between tenants.
+    The poller carries the bank cursor between claims.
     """
     from remember_api.worker import WorkerPoller
 
@@ -358,13 +357,13 @@ async def test_rotation_skips_banks_with_nothing_claimable(pool, backend, clean_
 async def test_rotation_spans_operation_types(pool, backend, clean_operations):
     """A slot is a slot: the turn goes to the bank, whatever type it queued.
 
-    ``import_documents`` and ``refresh_mental_model`` compete for the same
+    ``graph_maintenance`` and ``refresh_mental_model`` compete for the same
     shared pool as ``retain``, so the rotation is over banks rather than over
     one type's queue.
     """
     bulk, quiet = sorted([await _make_bank(pool), await _make_bank(pool)])
 
-    bulk_convert = await _insert_op(pool, bulk, op_type="import_documents", age_seconds=300)
+    bulk_convert = await _insert_op(pool, bulk, op_type="graph_maintenance", age_seconds=300)
     quiet_refresh = await _insert_op(pool, quiet, op_type="refresh_mental_model", age_seconds=1)
 
     claimed = await _claim(backend, shared=1, cursor=bulk)

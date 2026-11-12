@@ -1,53 +1,33 @@
-"""Startup migrates the base schema even when the tenant extension does not list it (#5400).
+"""Startup migrates exactly the configured local schema."""
 
-The cross-tenant maintenance routines live in the base schema and only a migration
-run targeting it creates them. The step must never block startup.
-"""
-
-import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
-from remember_api.config import get_config
+from remember_api import migrations
+from remember_api.engine import memory_engine
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.extensions import Tenant
-
-
-def _base() -> str:
-    return get_config().database_schema or "public"
-
-
-def _engine(run: AsyncMock) -> SimpleNamespace:
-    return SimpleNamespace(_run_pg_migrations=run)
 
 
 @pytest.mark.asyncio
-async def test_base_schema_migrated_when_extension_lists_only_tenants():
-    run = AsyncMock()
-    await MemoryEngine._migrate_base_schema(_engine(run), "postgresql://x", [Tenant(schema="user_a")])  # type: ignore[arg-type]
-    run.assert_awaited_once_with("postgresql://x", [_base()])
+async def test_startup_migrates_only_the_configured_schema(monkeypatch):
+    config = SimpleNamespace(
+        database_schema="local_memory",
+        migration_database_url=None,
+        vector_extension="pgvector",
+        text_search_extension="native",
+    )
+    calls = []
+    monkeypatch.setattr(memory_engine, "get_config", lambda: config)
+    monkeypatch.setattr(migrations, "run_local_migrations", lambda *a, **kw: calls.append((a, kw)))
+    engine = SimpleNamespace(
+        embeddings=SimpleNamespace(dimension=384),
+        _backend=SimpleNamespace(supports_bm25=True),
+    )
 
+    await MemoryEngine._run_pg_migrations(engine, "postgresql://local")
 
-@pytest.mark.asyncio
-async def test_base_schema_migrated_when_extension_lists_nothing_yet():
-    # Supabase's list_tenants() is empty at startup.
-    run = AsyncMock()
-    await MemoryEngine._migrate_base_schema(_engine(run), "postgresql://x", [])  # type: ignore[arg-type]
-    run.assert_awaited_once_with("postgresql://x", [_base()])
-
-
-@pytest.mark.asyncio
-async def test_base_schema_not_migrated_twice_when_already_listed():
-    run = AsyncMock()
-    await MemoryEngine._migrate_base_schema(_engine(run), "postgresql://x", [Tenant(schema=_base())])  # type: ignore[arg-type]
-    run.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_base_schema_failure_does_not_block_startup(caplog):
-    run = AsyncMock(side_effect=RuntimeError("permission denied for schema public"))
-    with caplog.at_level(logging.WARNING):
-        await MemoryEngine._migrate_base_schema(_engine(run), "postgresql://x", [Tenant(schema="user_a")])  # type: ignore[arg-type]
-    assert "permission denied for schema public" in caplog.text
+    assert len(calls) == 1
+    args, options = calls[0]
+    assert args == ("postgresql://local", "local_memory")
+    assert options["embedding_dimension"] == 384

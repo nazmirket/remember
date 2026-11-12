@@ -20,13 +20,11 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from remember_api.engine.memories.base import MemoriesExtension
 from remember_api.engine.memory_engine import MemoryEngine
 from remember_api.engine.providers.mock_llm import MockLLM
 from remember_api.engine.reflect.tools import tool_expand
@@ -157,23 +155,6 @@ async def test_visible_document_ids_asks_the_store_for_the_tags(monkeypatch):
     )
 
     assert visible == {"dan"}
-
-
-@pytest.mark.asyncio
-async def test_the_default_store_read_leaves_out_a_record_without_tags():
-    """A record that does not carry ``tags`` is unreadable, not untagged: read as untagged,
-    an ``any`` filter would admit it. Left out, the document is hidden."""
-
-    async def get_document_records(*, bank_id: str, document_ids: list[str]) -> dict[str, dict]:
-        return {"tagged": {"tags": ["user:kate"]}, "null": {"tags": None}, "unreadable": {"text": "x"}}
-
-    store = SimpleNamespace(get_document_records=get_document_records)
-
-    tags = await MemoriesExtension.documents_tags(
-        store, conn=None, fq_table=lambda t: t, bank_id="bank", document_ids=["tagged", "null", "unreadable"]
-    )
-
-    assert tags == {"tagged": ["user:kate"], "null": []}
 
 
 # ---------------------------------------------------------------------------
