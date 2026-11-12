@@ -34,7 +34,6 @@ generate-openapi = "hindsight_dev.generate_openapi:generate_openapi_spec"
 generate-bank-template-schema = "hindsight_dev.generate_bank_template_schema:main"
 cli-coverage-check = "hindsight_dev.cli_coverage_check:main"
 check-openapi-compatibility = "hindsight_dev.check_openapi_compatibility:main"
-find-duplicate-observations = "hindsight_dev.obs_dedup.cli:main"
 
 [dependency-groups]
 dev = [

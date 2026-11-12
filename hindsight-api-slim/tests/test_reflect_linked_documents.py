@@ -1,8 +1,4 @@
-"""Which reflects read the knowledge banks a memory bank links: an interactive one, never a refresh.
-
-A mental model refresh that read the documents would fold them into the bank's own knowledge, so
-its recall tool must leave them out.
-"""
+"""Reflection does not query removed knowledge banks."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,11 +10,8 @@ from tests.test_reflect_decision_model_switch import engine  # noqa: F401  (fixt
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("label", "reads_documents"),
-    [("reflect", True), ("refresh_mental_model", False), ("dry_run_refresh_mental_model", False)],
-)
-async def test_only_an_interactive_reflect_reads_linked_documents(engine, monkeypatch, label, reads_documents):  # noqa: F811
+@pytest.mark.parametrize("label", ["reflect", "refresh_mental_model", "dry_run_refresh_mental_model"])
+async def test_reflect_does_not_read_knowledge_banks(engine, monkeypatch, label):  # noqa: F811
     from hindsight_api.engine.reflect.models import ReflectAgentResult
 
     engine._config_resolver = SimpleNamespace(
@@ -49,4 +42,4 @@ async def test_only_an_interactive_reflect_reads_linked_documents(engine, monkey
         exclude_mental_models=True,
         _operation_label=label,
     )
-    assert recalled == [reads_documents]
+    assert recalled == [False]

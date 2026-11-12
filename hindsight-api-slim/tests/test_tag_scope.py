@@ -565,17 +565,10 @@ async def test_every_other_surface_respects_both_scopes(memory, scoped_bank):
         await memory.clear_observations_for_memory(scoped_bank, rule["id"], request_context=dan)
     assert e.value.status_code == 403
 
-    # The async and file retain paths check before queueing: the worker runs unscoped.
+    # The async retain path checks before queueing: the worker runs unscoped.
     with pytest.raises(OperationValidationError):
         await memory.submit_async_retain(
             bank_id=scoped_bank, contents=[{"content": "x", "tags": ["kind:rule"]}], request_context=dan
-        )
-    with pytest.raises(OperationValidationError):
-        await memory.submit_async_file_retain(
-            bank_id=scoped_bank,
-            file_items=[{"file": None, "document_id": "kate-sync", "tags": ["user:dan"]}],
-            document_tags=None,
-            request_context=dan,
         )
     # Explicit observation scopes are writes too; "shared" writes untagged observations.
     for scopes in ("shared", [["user:kate"]]):

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import quote, unquote
 
 import orjson
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -1425,86 +1425,6 @@ class RetainRequest(BaseModel):
             raise ValueError("operation_id must be a valid UUID") from exc
 
 
-class FileRetainMetadata(BaseModel):
-    """Metadata for a single file in file retain request."""
-
-    document_id: str | None = Field(default=None, description="Document ID (auto-generated if not provided)")
-    context: str | None = Field(default=None, description="Context for the file")
-    metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
-    tags: list[str] | None = Field(default=None, description="Tags for this file")
-    timestamp: str | None = Field(default=None, description="ISO timestamp")
-    parser: str | list[str] | None = Field(
-        default=None,
-        description="Parser or ordered fallback chain for this file (overrides request-level parser). "
-        "E.g. 'iris' or ['iris', 'markitdown'].",
-    )
-    strategy: str | None = Field(
-        default=None,
-        description="Named retain strategy for this file. Overrides the bank's default strategy. "
-        "Strategies are defined in the bank config under 'retain_strategies'.",
-    )
-
-    @field_validator("timestamp")
-    @classmethod
-    def _reject_placeholder_timestamp(cls, v: str | None) -> str | None:
-        # Fail at request time rather than mid-retain; the retain parser enforces it too (#5820).
-        if v:
-            try:
-                parsed = datetime.fromisoformat(v.replace("Z", "+00:00"))
-            except ValueError:
-                return v  # format errors keep surfacing where they always have
-            if is_placeholder_date(parsed):
-                raise ValueError(f"timestamp year {parsed.year} is a placeholder, not a date.")
-        return v
-
-
-class FileRetainRequest(BaseModel):
-    """Request model for file retain endpoint."""
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "parser": "iris",
-                "files_metadata": [
-                    {"document_id": "report_2024", "tags": ["quarterly"]},
-                    {"context": "meeting notes", "parser": ["iris", "markitdown"]},
-                ],
-            }
-        }
-    )
-
-    parser: str | list[str] | None = Field(
-        default=None,
-        description="Default parser or ordered fallback chain for all files in this request. "
-        "E.g. 'markitdown' or ['iris', 'markitdown']. Falls back to server default if not set. "
-        "Per-file 'parser' in files_metadata takes precedence over this value.",
-    )
-    files_metadata: list[FileRetainMetadata] | None = Field(
-        default=None,
-        description="Metadata for each file (optional, must match number of files if provided)",
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_misplaced_file_metadata(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-
-        misplaced = sorted(name for name in _FILE_RETAIN_PER_FILE_FIELDS if data.get(name) is not None)
-        errors = []
-        if misplaced:
-            fields = ", ".join(misplaced)
-            errors.append(f"Per-file fields ({fields}) must be placed in the corresponding 'files_metadata' entry")
-        if data.get("update_mode") is not None:
-            errors.append("'update_mode' is not supported by /files/retain, which always processes asynchronously")
-        if errors:
-            raise ValueError("; ".join(errors))
-        return data
-
-
-_FILE_RETAIN_PER_FILE_FIELDS = frozenset(FileRetainMetadata.model_fields) - frozenset(FileRetainRequest.model_fields)
-
-
 class RetainResponse(BaseModel):
     """Response model for retain endpoint."""
 
@@ -1538,26 +1458,6 @@ class RetainResponse(BaseModel):
     usage: TokenUsage | None = Field(
         default=None,
         description="Token usage metrics for LLM calls during fact extraction (only present for synchronous operations)",
-    )
-
-
-class FileRetainResponse(BaseModel):
-    """Response model for file upload endpoint."""
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "operation_ids": [
-                    "550e8400-e29b-41d4-a716-446655440000",
-                    "550e8400-e29b-41d4-a716-446655440001",
-                    "550e8400-e29b-41d4-a716-446655440002",
-                ],
-            }
-        },
-    )
-
-    operation_ids: list[str] = Field(
-        description="Operation IDs for tracking file conversion operations. Use GET /v1/default/banks/{bank_id}/operations to list operations."
     )
 
 
@@ -4125,7 +4025,7 @@ class VersionResponse(BaseModel):
                     "worker": True,
                     "bank_config_api": False,
                     "bank_llm_health": True,
-                    "file_upload_api": True,
+                    "file_upload_api": False,
                     "document_export_api": True,
                     "document_import_api": True,
                     "knowledge_banks": False,
@@ -4823,10 +4723,6 @@ def _register_routes(app: FastAPI):
 
     app.state.resolve_bank_alias = _resolve_bank_alias
 
-    from hindsight_api.knowledge.routes import build_router as _build_knowledge_router
-
-    app.include_router(_build_knowledge_router(get_request_context))
-
     def admit_for(operation: PrecheckOperation):
         """Build a FastAPI dependency that holds an admission permit for the request.
 
@@ -5049,10 +4945,10 @@ def _register_routes(app: FastAPI):
                 worker=config.worker_enabled,
                 bank_config_api=config.enable_bank_config_api,
                 bank_llm_health=config.enable_bank_llm_health,
-                file_upload_api=config.enable_file_upload_api,
+                file_upload_api=False,
                 document_export_api=config.enable_document_export_api,
                 document_import_api=config.enable_document_import_api,
-                knowledge_banks=config.enable_knowledge_banks,
+                knowledge_banks=False,
                 audit_log=config.audit_log_enabled,
                 llm_trace=config.llm_trace_enabled,
                 store_document_text=config.store_document_text,
@@ -9896,175 +9792,6 @@ def _register_routes(app: FastAPI):
             )
             logger.error(f"Error in /v1/default/banks/{bank_id}/memories (retain): {error_detail}")
             raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post(
-        "/v1/default/banks/{bank_id}/files/retain",
-        response_model=FileRetainResponse,
-        summary="Convert files to memories",
-        description="Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\n"
-        "This endpoint handles file upload, conversion, and memory creation in a single operation.\n\n"
-        "**Features:**\n"
-        "- Supports PDF, DOCX, PPTX, XLSX, images (parser-dependent OCR), audio (with transcription)\n"
-        "- Automatic file-to-markdown conversion using pluggable parsers\n"
-        "- Files stored in PostgreSQL by default or a configured storage extension\n"
-        "- Each file becomes a separate document with optional metadata/tags\n"
-        "- Always processes asynchronously — returns operation IDs immediately\n\n"
-        "**The system automatically:**\n"
-        "1. Stores uploaded files in object storage\n"
-        "2. Converts files to markdown\n"
-        "3. Creates document records with file metadata\n"
-        "4. Extracts facts and creates memory units (same as regular retain)\n\n"
-        "Use the operations endpoint to monitor progress.\n\n"
-        "**Request format:** multipart/form-data with:\n"
-        "- `files`: One or more files to upload\n"
-        "- `request`: JSON string with FileRetainRequest model\n\n"
-        "**Parser selection:**\n"
-        "- Set `parser` in the request body to override the server default for all files.\n"
-        "- Set `parser` inside a `files_metadata` entry for per-file control.\n"
-        "- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain — "
-        "each parser is tried in sequence until one succeeds.\n"
-        "- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n"
-        "- Only parsers enabled on the server may be requested; others return HTTP 400.",
-        operation_id="file_retain",
-        tags=["Files"],
-    )
-    @audited("file_retain", request_param=None)
-    async def api_file_retain(
-        bank_id: str,
-        files: list[UploadFile] = File(..., description="Files to upload and convert"),
-        request: str = Form(..., description="JSON string with FileRetainRequest model"),
-        request_context: RequestContext = Depends(get_request_context),
-        _precheck: None = Depends(precheck_for(PrecheckOperation.FILES_RETAIN)),
-    ):
-        """Upload and convert files to memories."""
-        from hindsight_api.config import get_config
-
-        config = get_config()
-
-        # Check if file upload API is enabled
-        if not config.enable_file_upload_api:
-            raise HTTPException(
-                status_code=404,
-                detail="File upload API is disabled. Set HINDSIGHT_API_ENABLE_FILE_UPLOAD_API=true to enable.",
-            )
-
-        try:
-            # Parse request JSON
-            try:
-                request_data = FileRetainRequest.model_validate_json(request)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid request JSON: {str(e)}",
-                )
-
-            # Validate file count
-            if len(files) > config.file_conversion_max_batch_size:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Too many files. Maximum {config.file_conversion_max_batch_size} files per request.",
-                )
-
-            # Validate files_metadata count matches files count if provided
-            if request_data.files_metadata and len(request_data.files_metadata) != len(files):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"files_metadata count ({len(request_data.files_metadata)}) must match files count ({len(files)})",
-                )
-
-            # Resolve the registered parser names for allowlist validation
-            registered_parsers = app.state.memory._parser_registry.list_parsers()
-            allowlist = config.file_parser_allowlist if config.file_parser_allowlist is not None else registered_parsers
-
-            def _resolve_parser(raw: str | list[str] | None) -> list[str]:
-                """Normalize parser value to a non-empty list of names."""
-                if raw is None:
-                    return config.file_parser
-                return [raw] if isinstance(raw, str) else list(raw)
-
-            def _validate_parsers(parsers: list[str], context: str) -> None:
-                """Raise HTTP 400 if any parser name is not in the allowlist."""
-                disallowed = [p for p in parsers if p not in allowlist]
-                if disallowed:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Parser(s) not available ({context}): {disallowed}. Available: {allowlist}",
-                    )
-
-            # Validate request-level parser early (before reading files)
-            if request_data.parser is not None:
-                _validate_parsers(_resolve_parser(request_data.parser), "request-level parser")
-
-            # Prepare file items and calculate total batch size
-
-            file_items = []
-            total_batch_size = 0
-
-            for i, file in enumerate(files):
-                # Read file content to check size
-                file_content = await file.read()
-                total_batch_size += len(file_content)
-
-                # Create a mock UploadFile with the necessary attributes
-                class FileWrapper:
-                    def __init__(self, content, filename, content_type):
-                        self._content = content
-                        self.filename = filename
-                        self.content_type = content_type
-
-                    async def read(self):
-                        return self._content
-
-                wrapped_file = FileWrapper(file_content, file.filename, file.content_type)
-
-                # Get per-file metadata
-                file_meta = request_data.files_metadata[i] if request_data.files_metadata else FileRetainMetadata()
-                doc_id = file_meta.document_id or f"file_{uuid.uuid4()}"
-
-                # Resolve and validate per-file parser chain
-                # Priority: per-file > request-level > server default
-                raw_parser = file_meta.parser if file_meta.parser is not None else request_data.parser
-                parser_chain = _resolve_parser(raw_parser)
-                _validate_parsers(parser_chain, f"file '{file.filename}'")
-
-                item = {
-                    "file": wrapped_file,
-                    "document_id": doc_id,
-                    "context": file_meta.context,
-                    "metadata": file_meta.metadata or {},
-                    "tags": file_meta.tags or [],
-                    "timestamp": file_meta.timestamp,
-                    "parser": parser_chain,
-                    "strategy": file_meta.strategy,
-                }
-                file_items.append(item)
-
-            # Check total batch size after processing all files
-            if total_batch_size > config.file_conversion_max_batch_size_bytes:
-                total_mb = total_batch_size / (1024 * 1024)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Total batch size ({total_mb:.1f}MB) exceeds maximum of {config.file_conversion_max_batch_size_mb}MB",
-                )
-
-            result = await app.state.memory.submit_async_file_retain(
-                bank_id=bank_id,
-                file_items=file_items,
-                document_tags=None,
-                request_context=request_context,
-            )
-            return FileRetainResponse.model_validate(
-                {
-                    "operation_ids": result["operation_ids"],
-                }
-            )
-
-        except OperationValidationError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.reason)
-        except (AuthenticationError, HTTPException):
-            raise
-        except Exception as e:
-            raise _internal_error(e, f"/v1/default/banks/{bank_id}/files/retain")
 
     @app.delete(
         "/v1/default/banks/{bank_id}/memories",

@@ -758,11 +758,6 @@ ENV_FILE_PARSER_MARKITDOWN_OCR_BASE_URL = "HINDSIGHT_API_FILE_PARSER_MARKITDOWN_
 ENV_FILE_PARSER_MARKITDOWN_OCR_MODEL = "HINDSIGHT_API_FILE_PARSER_MARKITDOWN_OCR_MODEL"
 ENV_FILE_PARSER_MARKITDOWN_OCR_PROMPT = "HINDSIGHT_API_FILE_PARSER_MARKITDOWN_OCR_PROMPT"
 ENV_FILE_PARSER_MARKITDOWN_OCR_DEFAULT_HEADERS = "HINDSIGHT_API_FILE_PARSER_MARKITDOWN_OCR_DEFAULT_HEADERS"
-ENV_FILE_PARSER_IRIS_TOKEN = "HINDSIGHT_API_FILE_PARSER_IRIS_TOKEN"
-ENV_FILE_PARSER_IRIS_ORG_ID = "HINDSIGHT_API_FILE_PARSER_IRIS_ORG_ID"
-ENV_FILE_PARSER_LLAMA_PARSE_API_KEY = "HINDSIGHT_API_FILE_PARSER_LLAMA_PARSE_API_KEY"
-ENV_FILE_CONVERSION_MAX_BATCH_SIZE_MB = "HINDSIGHT_API_FILE_CONVERSION_MAX_BATCH_SIZE_MB"
-ENV_FILE_CONVERSION_MAX_BATCH_SIZE = "HINDSIGHT_API_FILE_CONVERSION_MAX_BATCH_SIZE"
 # Knowledge banks: multimodal document search (hindsight_api/knowledge/), no LLM anywhere
 ENV_KNOWLEDGE_EMBEDDINGS_PROVIDER = "HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_PROVIDER"
 ENV_KNOWLEDGE_EMBEDDINGS_MODEL = "HINDSIGHT_API_KNOWLEDGE_EMBEDDINGS_MODEL"
@@ -793,7 +788,6 @@ ENV_KNOWLEDGE_STORE_EXTENSION = "HINDSIGHT_API_KNOWLEDGE_STORE_EXTENSION"
 # "settings": {...}}}}), and the one an ingest uses unless its item names another. Server-wide only.
 ENV_INGEST_STRATEGIES = "HINDSIGHT_API_INGEST_STRATEGIES"
 ENV_INGEST_DEFAULT_STRATEGY = "HINDSIGHT_API_INGEST_DEFAULT_STRATEGY"
-ENV_ENABLE_FILE_UPLOAD_API = "HINDSIGHT_API_ENABLE_FILE_UPLOAD_API"
 ENV_FILE_DELETE_AFTER_RETAIN = "HINDSIGHT_API_FILE_DELETE_AFTER_RETAIN"
 ENV_STORE_DOCUMENT_TEXT = "HINDSIGHT_API_STORE_DOCUMENT_TEXT"
 ENV_DEFAULT_TIMEZONE = "HINDSIGHT_API_DEFAULT_TIMEZONE"
@@ -1687,14 +1681,12 @@ DEFAULT_RETAIN_BATCH_POLL_INTERVAL_SECONDS = 60  # Batch API polling interval in
 
 # File storage defaults
 DEFAULT_FILE_STORAGE_TYPE = "native"  # PostgreSQL BYTEA storage
-DEFAULT_FILE_PARSER = "markitdown"  # Default parser fallback chain (comma-separated, e.g. "iris,markitdown")
+DEFAULT_FILE_PARSER = "markitdown"  # Legacy queued-file parser
 DEFAULT_FILE_PARSER_ALLOWLIST = None  # Allowlist of parsers clients may request (None = all registered parsers)
 DEFAULT_FILE_PARSER_MARKITDOWN_OCR_ENABLED = False
 DEFAULT_FILE_PARSER_MARKITDOWN_OCR_PROMPT = """You are a precise OCR transcription engine.
 
 Transcribe only the visible text in the image. Do not describe the image, summarize it, translate it, infer missing content, or add commentary. Preserve the original language, wording, numbers, punctuation, capitalization, and reading order. Reconstruct headings, lists, key-value fields, stamps, and tables as clean Markdown when the layout is clear. If text is unreadable or uncertain, write [unclear] for that span. Return only the extracted Markdown."""
-DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE_MB = 100  # Max total batch size in MB (all files combined)
-DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE = 10  # Max files per batch upload
 # Knowledge banks: one embedder per server, its modalities deciding which media types can be ingested
 # (knowledge/embedders.py). Supported providers are local, openai and text.
 DEFAULT_KNOWLEDGE_EMBEDDINGS_PROVIDER = "local"
@@ -1715,7 +1707,6 @@ DEFAULT_KNOWLEDGE_PDF_BANDS = False
 # Keyword match weight, fused only for documents in the query's language (PDF_GEMMA.md: 0.2 best).
 DEFAULT_KNOWLEDGE_KEYWORD_WEIGHT = 0.2
 DEFAULT_KNOWLEDGE_TEXT_PASSAGE_TOKENS = 128  # structure-aware; best on LegalBench-RAG (CHUNKING.md)
-DEFAULT_ENABLE_FILE_UPLOAD_API = True  # Enable file upload endpoint
 DEFAULT_FILE_DELETE_AFTER_RETAIN = True  # Delete file bytes after retain (saves storage)
 DEFAULT_STORE_DOCUMENT_TEXT = True  # Persist raw source text in documents.original_text / chunks.chunk_text
 DEFAULT_DEFAULT_TIMEZONE = "UTC"  # IANA zone a retain timestamp with no UTC offset is read in
@@ -3360,14 +3351,8 @@ class HindsightConfig:
 
     # File storage (static - server-level only)
     file_storage_type: str  # "native" (PostgreSQL), or an extension-defined backend
-    file_parser: list[str]  # Ordered fallback chain of parsers (e.g. ["iris", "markitdown"])
+    file_parser: list[str]  # Ordered parser names for queued file conversions
     file_parser_allowlist: list[str] | None  # Parsers clients may request (None = all registered)
-    file_parser_iris_token: str | None  # Vectorize API token for iris parser (VECTORIZE_TOKEN)
-    file_parser_iris_org_id: str | None  # Vectorize org ID for iris parser (VECTORIZE_ORG_ID)
-    file_parser_llama_parse_api_key: str | None  # LlamaCloud API key for llama_parse parser
-    file_conversion_max_batch_size_mb: int  # Max total batch size in MB (all files combined)
-    file_conversion_max_batch_size: int  # Max files per request
-    enable_file_upload_api: bool
     file_delete_after_retain: bool
     store_document_text: bool  # When False, store NULL original_text / empty chunk_text
     default_timezone: str  # IANA zone for retain times that carry no UTC offset
@@ -3745,8 +3730,6 @@ class HindsightConfig:
         # File parser credentials
         "file_parser_markitdown_ocr_api_key",
         "file_parser_markitdown_ocr_base_url",
-        "file_parser_iris_token",
-        "file_parser_llama_parse_api_key",
         # Legacy MCP bearer token, checked ahead of the tenant extension's own auth.
         "mcp_auth_token",
         # Decision model keys and endpoints, global and per operation
@@ -3855,11 +3838,6 @@ class HindsightConfig:
         """The pg_trgm threshold the entity probe actually runs at: never below the merge floor,
         since a candidate under it can never be merged and would only cost work (#5367)."""
         return max(self.entity_trgm_similarity_threshold, self.entity_merge_min_similarity)
-
-    @property
-    def file_conversion_max_batch_size_bytes(self) -> int:
-        """Get maximum total batch size in bytes."""
-        return self.file_conversion_max_batch_size_mb * 1024 * 1024
 
     @property
     def retain_attachment_max_size_bytes(self) -> int:
@@ -4826,15 +4804,6 @@ class HindsightConfig:
             file_parser_markitdown_ocr_default_headers=json.loads(
                 os.getenv(ENV_FILE_PARSER_MARKITDOWN_OCR_DEFAULT_HEADERS, "null")
             ),
-            file_parser_iris_token=os.getenv(ENV_FILE_PARSER_IRIS_TOKEN) or None,
-            file_parser_iris_org_id=os.getenv(ENV_FILE_PARSER_IRIS_ORG_ID) or None,
-            file_parser_llama_parse_api_key=os.getenv(ENV_FILE_PARSER_LLAMA_PARSE_API_KEY) or None,
-            file_conversion_max_batch_size_mb=int(
-                os.getenv(ENV_FILE_CONVERSION_MAX_BATCH_SIZE_MB, str(DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE_MB))
-            ),
-            file_conversion_max_batch_size=int(
-                os.getenv(ENV_FILE_CONVERSION_MAX_BATCH_SIZE, str(DEFAULT_FILE_CONVERSION_MAX_BATCH_SIZE))
-            ),
             knowledge_embeddings_provider=os.getenv(
                 ENV_KNOWLEDGE_EMBEDDINGS_PROVIDER, DEFAULT_KNOWLEDGE_EMBEDDINGS_PROVIDER
             ).lower(),
@@ -4882,8 +4851,6 @@ class HindsightConfig:
             ingest_strategies=_parse_ingest_strategies(os.getenv(ENV_INGEST_STRATEGIES)),
             ingest_default_strategy=os.getenv(ENV_INGEST_DEFAULT_STRATEGY) or None,
             knowledge_banks=None,  # per bank only (bank config); no server-wide default
-            enable_file_upload_api=os.getenv(ENV_ENABLE_FILE_UPLOAD_API, str(DEFAULT_ENABLE_FILE_UPLOAD_API)).lower()
-            == "true",
             file_delete_after_retain=os.getenv(
                 ENV_FILE_DELETE_AFTER_RETAIN, str(DEFAULT_FILE_DELETE_AFTER_RETAIN)
             ).lower()

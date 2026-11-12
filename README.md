@@ -25,3 +25,7 @@ PYTHONPATH=hindsight-embed .venv/bin/python -m pytest hindsight-embed/tests
 ```
 
 For direct API development, `./scripts/dev/start.sh` starts the API on loopback. Run `./scripts/hooks/lint.sh` after Python or TypeScript changes.
+
+## Upgrading from earlier fork versions
+
+This version removes file-retain uploads, hosted file parsers, separate knowledge-bank access, and the CLI filesystem mirror. Existing database tables and stored files are not deleted. Before upgrading, finish queued ingestion and export any knowledge-bank material you need using the earlier version; the new API no longer exposes those banks or searches their linked passages. Old knowledge-bank and file-upload enablement settings do not re-enable the removed APIs. Pages and ordinary text memories remain available.

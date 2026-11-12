@@ -2,8 +2,7 @@
 //!
 //! A page is a mental model with document-shaped defaults plus a place in the
 //! tree, so these commands mirror `hindsight mental-model` where the operations
-//! overlap. `hindsight fs` mirrors the same pages read-only onto disk;
-//! these commands are the read/write side.
+//! overlap.
 
 use anyhow::Result;
 
@@ -492,7 +491,7 @@ pub fn export(
                 println!();
                 println!(
                     "{}",
-                    ui::dim("Use --output json to get the file contents, or 'hindsight fs mount' to mirror them to disk.")
+                    ui::dim("Use --output json to get the file contents.")
                 );
             } else {
                 output::print_output(&bundle, output_format)?;

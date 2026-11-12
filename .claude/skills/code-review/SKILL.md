@@ -10,7 +10,7 @@ Review the actual changes and their connected callers, tests and configuration. 
 
 - Both Claude Code and Codex retain, retrieve and inject the correct project bank; linked worktrees share it and separate projects do not.
 - The on-demand daemon uses the fork's source, loopback and local pg0, does not persist inherited provider credentials, and handles a foreign or unavailable service safely.
-- Worker processing, Pages, consolidation, graph and temporal retrieval, document/file ingestion and migrations still work when affected.
+- Worker processing, Pages, consolidation, graph and temporal retrieval, text document storage, retained legacy queue handling and migrations still work when affected.
 - Database queries remain bank-scoped; preserve migration revision IDs and fresh/upgrade paths.
 - No unsupported integrations, deployment paths, stale imports, generated artifacts or secrets are introduced.
 - User-visible changes have focused deterministic tests; model-interpretation claims need real-model evaluation. Report when real-host or provider checks were not run.

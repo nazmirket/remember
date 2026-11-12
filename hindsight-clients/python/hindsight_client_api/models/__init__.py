@@ -97,7 +97,6 @@ from hindsight_client_api.models.extracted_fact_attachment import ExtractedFactA
 from hindsight_client_api.models.extraction_chunk import ExtractionChunk
 from hindsight_client_api.models.features_info import FeaturesInfo
 from hindsight_client_api.models.file_content_block import FileContentBlock
-from hindsight_client_api.models.file_retain_response import FileRetainResponse
 from hindsight_client_api.models.graph_data_response import GraphDataResponse
 from hindsight_client_api.models.http_validation_error import HTTPValidationError
 from hindsight_client_api.models.image_content_block import ImageContentBlock

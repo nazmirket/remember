@@ -121,10 +121,6 @@ enum Commands {
     #[command(subcommand)]
     Audit(AuditCommands),
 
-    /// Mirror a bank's pages as a live local folder of markdown files
-    #[command(subcommand)]
-    Fs(commands::fs::FsCommands),
-
     /// Check API health status
     Health,
 
@@ -661,31 +657,6 @@ enum MemoryCommands {
         /// Deprecated document-level tags (comma-separated). Prefer item-level tags.
         #[arg(long, value_delimiter = ',')]
         document_tags: Option<Vec<String>>,
-    },
-
-    /// Bulk import memories from files (retain)
-    RetainFiles {
-        /// Bank ID
-        bank_id: String,
-
-        /// Path to file or directory
-        path: PathBuf,
-
-        /// Search directories recursively
-        #[arg(short = 'r', long, default_value = "true")]
-        recursive: bool,
-
-        /// Context for all memories
-        #[arg(short = 'c', long)]
-        context: Option<String>,
-
-        /// Queue for background processing
-        #[arg(long)]
-        r#async: bool,
-
-        /// Named retain strategy to use for these files (overrides the bank's default strategy)
-        #[arg(short = 's', long)]
-        strategy: Option<String>,
     },
 
     /// Delete a memory unit
@@ -1524,12 +1495,6 @@ fn run() -> Result<()> {
         Commands::Configure { .. } => unreachable!(), // Handled above
         Commands::Profile(_) => unreachable!(),       // Handled above
 
-        // Filesystem mirror — talks to the API directly (blocking client), so it
-        // uses the resolved endpoint rather than the generated async client.
-        Commands::Fs(fs_cmd) => {
-            commands::fs::dispatch(fs_cmd, &api_url, api_key.as_deref(), output_format)
-        }
-
         // Health, Metrics, and Version
         Commands::Health => commands::health::health(&client, verbose, output_format),
         Commands::Metrics => commands::health::metrics(&client, verbose, output_format),
@@ -1821,24 +1786,6 @@ fn run() -> Result<()> {
                 timestamp,
                 r#async,
                 document_tags,
-                verbose,
-                output_format,
-            ),
-            MemoryCommands::RetainFiles {
-                bank_id,
-                path,
-                recursive,
-                context,
-                r#async,
-                strategy,
-            } => commands::memory::retain_files(
-                &client,
-                &bank_id,
-                path,
-                recursive,
-                context,
-                r#async,
-                strategy,
                 verbose,
                 output_format,
             ),

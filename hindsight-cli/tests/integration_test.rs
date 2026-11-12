@@ -222,3 +222,11 @@ fn test_knowledge_base_is_a_hidden_alias_of_pages() {
     assert!(stdout.contains("pages"));
     assert!(!stdout.contains("knowledge-base"));
 }
+
+#[test]
+fn optional_ingestion_and_fs_commands_are_unavailable() {
+    for args in [&["fs", "--help"][..], &["memory", "retain-files", "--help"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hindsight")).args(args).output().unwrap();
+        assert!(!output.status.success());
+    }
+}

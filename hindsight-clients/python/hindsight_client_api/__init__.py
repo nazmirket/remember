@@ -25,7 +25,6 @@ from hindsight_client_api.api.directives_api import DirectivesApi
 from hindsight_client_api.api.document_transfer_api import DocumentTransferApi
 from hindsight_client_api.api.documents_api import DocumentsApi
 from hindsight_client_api.api.entities_api import EntitiesApi
-from hindsight_client_api.api.files_api import FilesApi
 from hindsight_client_api.api.knowledge_base_api import KnowledgeBaseApi
 from hindsight_client_api.api.llm_traces_api import LLMTracesApi
 from hindsight_client_api.api.memory_api import MemoryApi
@@ -130,7 +129,6 @@ from hindsight_client_api.models.extracted_fact_attachment import ExtractedFactA
 from hindsight_client_api.models.extraction_chunk import ExtractionChunk
 from hindsight_client_api.models.features_info import FeaturesInfo
 from hindsight_client_api.models.file_content_block import FileContentBlock
-from hindsight_client_api.models.file_retain_response import FileRetainResponse
 from hindsight_client_api.models.graph_data_response import GraphDataResponse
 from hindsight_client_api.models.http_validation_error import HTTPValidationError
 from hindsight_client_api.models.image_content_block import ImageContentBlock

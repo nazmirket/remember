@@ -6531,7 +6531,7 @@ class MemoryEngine(MemoryEngineInterface):
         logger.debug(f"File storage initialized ({config.file_storage_type})")
 
         # Initialize parser registry
-        from .parsers import FileParserRegistry, IrisParser, LlamaParseParser, MarkitdownParser
+        from .parsers import FileParserRegistry, MarkitdownParser
 
         self._parser_registry = FileParserRegistry()
         try:
@@ -6548,20 +6548,6 @@ class MemoryEngine(MemoryEngineInterface):
             logger.debug("Registered markitdown parser")
         except ImportError:
             logger.warning("markitdown not available - file parsing disabled")
-        iris_token = config.file_parser_iris_token
-        iris_org_id = config.file_parser_iris_org_id
-        if iris_token and iris_org_id:
-            self._parser_registry.register(IrisParser(token=iris_token, org_id=iris_org_id))
-            logger.debug("Registered iris parser")
-        else:
-            logger.debug("Iris parser not registered (VECTORIZE_TOKEN or VECTORIZE_ORG_ID not set)")
-        llama_parse_key = config.file_parser_llama_parse_api_key
-        if llama_parse_key:
-            self._parser_registry.register(LlamaParseParser(api_key=llama_parse_key))
-            logger.debug("Registered llama_parse parser")
-        else:
-            logger.debug("LlamaParse parser not registered (HINDSIGHT_API_FILE_PARSER_LLAMA_PARSE_API_KEY not set)")
-
         # Initialize webhook manager
         from ..webhooks import WebhookManager
         from ..webhooks.models import WebhookConfig
@@ -9452,11 +9438,6 @@ class MemoryEngine(MemoryEngineInterface):
         # exact text: a stored document vector differs on asymmetric models.
         _query_embedding: list[float] | None = None,
         reranking: RecallReranking = "cross_encoder",
-        # Also search the knowledge banks this bank links (config `knowledge_banks`) and return
-        # their passages as `documents`. Only reflect's recall tool turns it on, and not while it
-        # refreshes a mental model: consolidation and mental models must never read documents
-        # (they would fold the docs into memories). The HTTP recall leaves it off.
-        include_documents: bool = False,
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -9858,11 +9839,6 @@ class MemoryEngine(MemoryEngineInterface):
 
                 if not get_memories().store_owned_for(bank_id):
                     await self._raise_if_bank_deleted(bank_id)
-
-            if include_documents and result is not None:
-                from ..knowledge.service import documents_for_memory_bank
-
-                result.documents = await documents_for_memory_bank(self, bank_id, query, request_context)
 
             # Call post-operation hook for success
             if self._operation_validator and result is not None:
@@ -16259,9 +16235,6 @@ class MemoryEngine(MemoryEngineInterface):
                 include_chunks=effective_recall_include_chunks,
                 created_after=created_after,
                 created_before=created_before,
-                # Linked knowledge banks are read by an interactive reflect only: a mental model
-                # refresh would fold the documents into the bank's own knowledge.
-                include_documents=not is_refresh,
             )
 
         async def expand_fn(memory_ids: list[str], depth: str) -> dict[str, Any]:
@@ -23700,130 +23673,6 @@ class MemoryEngine(MemoryEngineInterface):
         return {
             "operation_id": str(parent_operation_id),
             "items_count": len(contents),
-        }
-
-    async def submit_async_file_retain(
-        self,
-        bank_id: str,
-        file_items: list[dict[str, Any]],
-        document_tags: list[str] | None,
-        request_context: "RequestContext",
-    ) -> dict[str, Any]:
-        """
-        Submit batch file conversion + retain operation.
-
-        Each file is converted to markdown and then retained as a memory.
-        Files are stored in object storage and conversion happens asynchronously.
-
-        Args:
-            bank_id: Bank ID
-            file_items: List of file items, each containing:
-                - file: UploadFile object (FastAPI)
-                - document_id: Document ID
-                - context: Optional context
-                - metadata: Optional metadata dict
-                - tags: Optional tags list
-                - timestamp: Optional timestamp
-                - parser: Ordered list of parser names to try (fallback chain)
-            document_tags: Tags applied to all documents
-            request_context: Request context for authentication
-
-        Returns:
-            dict with operation_id and files_count
-        """
-        await self._authenticate_tenant(request_context)
-        # Same checks as a text retain: the worker that converts and retains these files
-        # runs as internal work, so it would never see the caller's scope.
-        await self._check_retain_writes(
-            bank_id, file_items, request_context, strategy=None, document_tags=document_tags
-        )
-
-        config = get_config()
-
-        # Validate file count
-        if len(file_items) > config.file_conversion_max_batch_size:
-            raise ValueError(f"Too many files. Maximum {config.file_conversion_max_batch_size} files per request.")
-
-        # Read all files and validate total batch size
-        files_data = []
-        total_batch_size = 0
-
-        for item in file_items:
-            file = item["file"]
-            file_data = await file.read()
-            total_batch_size += len(file_data)
-            files_data.append((item, file, file_data))
-
-        # Validate total batch size
-        if total_batch_size > config.file_conversion_max_batch_size_bytes:
-            total_mb = total_batch_size / (1024 * 1024)
-            raise ValueError(
-                f"Total batch size ({total_mb:.1f}MB) exceeds maximum of {config.file_conversion_max_batch_size_mb}MB"
-            )
-
-        # Submit individual operation for each file
-        operation_ids = []
-        for item, file, file_data in files_data:
-            # Generate a per-file storage key that is unique regardless of the
-            # (user-controllable) document_id or filename. Deriving the key from
-            # document_id/filename let two files in one batch collide on the same
-            # key when they shared both; the PG backend's ON CONFLICT DO UPDATE
-            # then overwrote the loser's bytes, and delete-on-conversion of the
-            # first task left the sibling task retrieving a missing key ("File
-            # not found") and failing deterministically on every retry (#3226).
-            # The unguessable uuid segment mirrors the export path convention.
-            storage_key = f"{bank_storage_prefix(bank_id)}files/{uuid.uuid4()}/{file.filename}"
-
-            # Store file in object storage
-            await self._file_storage.store(
-                file_data=file_data,
-                key=storage_key,
-                metadata={
-                    "content_type": file.content_type or "application/octet-stream",
-                    "original_filename": file.filename,
-                    "bank_id": bank_id,
-                    "document_id": item["document_id"],
-                },
-            )
-
-            # Create individual operation and submit task
-            task_payload: dict[str, Any] = {
-                "document_id": item["document_id"],
-                "storage_key": storage_key,
-                "original_filename": file.filename,
-                "content_type": file.content_type or "application/octet-stream",
-                "parser": item["parser"],
-                "context": item.get("context"),
-                "metadata": item.get("metadata", {}),
-                "tags": item.get("tags", []),
-                "document_tags": document_tags or [],
-                "timestamp": item.get("timestamp"),
-            }
-            if item.get("strategy"):
-                task_payload["strategy"] = item["strategy"]
-
-            # Pass tenant_id and api_key_id through task payload
-            if request_context.tenant_id:
-                task_payload["_tenant_id"] = request_context.tenant_id
-            if request_context.api_key_id:
-                task_payload["_api_key_id"] = request_context.api_key_id
-
-            result = await self._submit_async_operation(
-                bank_id=bank_id,
-                operation_type="file_convert_retain",
-                task_type="file_convert_retain",
-                task_payload=task_payload,
-                result_metadata={
-                    "original_filename": file.filename,
-                    "document_id": item["document_id"],
-                },
-                dedupe_by_bank=False,
-            )
-            operation_ids.append(result["operation_id"])
-
-        return {
-            "operation_ids": operation_ids,
-            "files_count": len(file_items),
         }
 
     async def submit_async_consolidation(

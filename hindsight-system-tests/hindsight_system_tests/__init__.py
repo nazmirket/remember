@@ -5,7 +5,6 @@ themselves stay short: they declare what the LLM says, then talk to a real
 server through the public client.
 """
 
-from .knowledge import KnowledgeBanks, UploadFile
 from .reflect import reflect_loop
 from .rulebook import ChatRequest, LLMStub, Stubs
 from .server import (
@@ -21,7 +20,6 @@ from .waiting import wait_until_settled
 __all__ = [
     "ChatRequest",
     "HindsightServer",
-    "KnowledgeBanks",
     "LLMStub",
     "StubServer",
     "Stubs",
@@ -30,6 +28,5 @@ __all__ = [
     "reflect_loop",
     "run_hindsight_admin",
     "start_stub_server",
-    "UploadFile",
     "wait_until_settled",
 ]

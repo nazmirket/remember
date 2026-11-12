@@ -98,31 +98,7 @@ def disabled_media(monkeypatch):
     clear_config_cache()
 
 
-async def test_a_disabled_media_type_is_refused_whatever_the_embedder(api_client, kb, disabled_media):  # noqa: F811
-    disabled_media("image, VIDEO")
-    r = await _upload(api_client, kb, [("p.png", PNG, "image/png")])
-    assert r.status_code == 415 and "HINDSIGHT_API_KNOWLEDGE_DISABLED_MEDIA_TYPES" in r.text
-    described = (await api_client.get(f"{KB}/config")).json()["media_types"]
-    assert "image" not in described and "video" not in described and "document" in described
-    r = await api_client.post(f"{KB}/{kb}/ingest", json={"items": [{"text": "still fine"}]})
-    assert r.is_success, r.text
-
-
 def test_an_unknown_disabled_media_type_is_a_startup_error(disabled_media):
     with pytest.raises(ValueError, match="unknown media types pictures"):
         disabled_media("pictures")
         HindsightConfig.from_env()
-
-
-async def test_a_text_only_embedder_ingests_pdfs_from_their_text_layer(api_client, kb, fake_embedder):  # noqa: F811
-    fake_embedder.modalities = frozenset({"text"})
-    r = await _upload(
-        api_client, kb, [("keys.pdf", _text_pdf("Rotate every key"), "application/pdf")], [{"document_id": "p"}]
-    )
-    assert r.is_success, r.text
-    detail = (await api_client.get(f"{KB}/{kb}/documents/p")).json()
-    assert detail["status"] == "ready" and detail["passages"][0]["page"] == 1
-    # Every vector of the page was a text one: the embedder was never handed an image.
-    assert all(i.modality == "text" for call in fake_embedder.calls for i in call)
-    described = (await api_client.get(f"{KB}/config")).json()["media_types"]
-    assert described == ["document", "text"]

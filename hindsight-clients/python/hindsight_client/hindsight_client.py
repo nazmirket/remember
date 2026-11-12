@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from importlib import metadata
-from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -54,7 +53,6 @@ from hindsight_client_api.api import (
     document_transfer_api,
     documents_api,
     entities_api,
-    files_api,
     knowledge_base_api,  # deprecated alias, remove in 2.x
     memory_api,
     mental_models_api,
@@ -70,7 +68,6 @@ from hindsight_client_api.models import (
     retain_request,
 )
 from hindsight_client_api.models.bank_profile_response import BankProfileResponse
-from hindsight_client_api.models.file_retain_response import FileRetainResponse
 from hindsight_client_api.models.list_memory_units_response import ListMemoryUnitsResponse
 from hindsight_client_api.models.recall_response import RecallResponse
 from hindsight_client_api.models.reflect_include_options import ReflectIncludeOptions
@@ -274,7 +271,6 @@ class Hindsight:
         - ``client.directives``: Directive management (DirectivesApi)
         - ``client.operations``: Async operation tracking (OperationsApi)
         - ``client.webhooks``: Webhook management (WebhooksApi)
-        - ``client.files``: File upload (FilesApi)
         - ``client.monitoring``: Health/version checks (MonitoringApi)
     """
 
@@ -327,7 +323,6 @@ class Hindsight:
         # Deprecated alias (old paths), backs the `knowledge_base` property. Remove in 2.x.
         self._knowledge_base_api = knowledge_base_api.KnowledgeBaseApi(self._api_client)
         self._directives_api = directives_api.DirectivesApi(self._api_client)
-        self._files_api = files_api.FilesApi(self._api_client)
         self._documents_api = documents_api.DocumentsApi(self._api_client)
         self._entities_api = entities_api.EntitiesApi(self._api_client)
         self._operations_api = operations_api.OperationsApi(self._api_client)
@@ -344,7 +339,7 @@ class Hindsight:
         """Temporarily suppress retains in the current execution context.
 
         Recall and reflect are unaffected, while ``retain``, ``retain_batch``
-        and ``retain_files`` (and their async variants) send no request and
+        (and their async variants) send no request and
         report an empty result — ``items_count=0`` and no operation IDs. This
         is useful for evaluation runs, replaying a transcript against a
         populated bank, or any session that must read a bank without adding to
@@ -426,11 +421,6 @@ class Hindsight:
     def webhooks(self) -> webhooks_api.WebhooksApi:
         """Low-level Webhooks API — create, list, update, delete webhooks and deliveries."""
         return self._webhooks_api
-
-    @property
-    def files(self) -> files_api.FilesApi:
-        """Low-level Files API — upload and retain files."""
-        return self._files_api
 
     @property
     def monitoring(self) -> monitoring_api.MonitoringApi:
@@ -601,67 +591,6 @@ class Hindsight:
         if retain_async and operation_id is not None:
             batch_kwargs["operation_id"] = operation_id
         return _run_async(self.aretain_batch(**batch_kwargs))
-
-    def retain_files(
-        self,
-        bank_id: str,
-        files: list[str | Path],
-        context: str | None = None,
-        files_metadata: list[dict[str, Any]] | None = None,
-    ) -> FileRetainResponse:
-        """
-        Upload files and retain their contents as memories (sync wrapper — prefer :meth:`aretain_files` in async code).
-
-        See :meth:`aretain_files` for the full argument and return documentation.
-        """
-        return _run_async(
-            self.aretain_files(
-                bank_id=bank_id,
-                files=files,
-                context=context,
-                files_metadata=files_metadata,
-            )
-        )
-
-    async def aretain_files(
-        self,
-        bank_id: str,
-        files: list[str | Path],
-        context: str | None = None,
-        files_metadata: list[dict[str, Any]] | None = None,
-    ) -> FileRetainResponse:
-        """
-        Upload files and retain their contents as memories (async — preferred over :meth:`retain_files`).
-
-        Files are automatically converted to text (PDF, DOCX, images via OCR, audio via
-        transcription, and more) and ingested as memories. Processing is always asynchronous
-        — use the returned operation IDs to track progress.
-
-        Args:
-            bank_id: The memory bank ID
-            files: List of file paths to upload
-            context: Optional context description applied to all files
-            files_metadata: Optional per-file metadata list. If provided, must match the
-                length of `files`. Each entry can have: context, document_id, tags, metadata.
-
-        Returns:
-            FileRetainResponse with operation_ids for tracking progress
-        """
-        if self._retain_suspended.get():
-            return FileRetainResponse(operation_ids=[])
-
-        file_data = []
-        for file_path in files:
-            path = Path(file_path)
-            file_data.append((path.name, await asyncio.to_thread(path.read_bytes)))
-
-        meta = files_metadata or [{"context": context} if context else {} for _ in files]
-
-        request_body = json.dumps({"files_metadata": meta})
-
-        return await self._files_api.file_retain(
-            bank_id=bank_id, files=file_data, request=request_body, _request_timeout=self._timeout
-        )
 
     def recall(
         self,
@@ -3098,8 +3027,6 @@ class Hindsight:
         disposition_empathy: int | None = None,
         # MCP settings
         mcp_enabled_tools: list[str] | None = None,
-        # Knowledge banks linked to this memory bank (recall/reflect return their passages)
-        knowledge_banks: list[str] | None = None,
         # Gemini safety settings
         llm_gemini_safety_settings: list[dict[str, str]] | None = None,
         # Security / audit
@@ -3172,7 +3099,6 @@ class Hindsight:
                 disposition_literalism=disposition_literalism,
                 disposition_empathy=disposition_empathy,
                 mcp_enabled_tools=mcp_enabled_tools,
-                knowledge_banks=knowledge_banks,
                 llm_gemini_safety_settings=llm_gemini_safety_settings,
                 memory_defense=memory_defense,
                 audit_log_enabled=audit_log_enabled,
@@ -3248,8 +3174,6 @@ class Hindsight:
         disposition_empathy: int | None = None,
         # MCP settings
         mcp_enabled_tools: list[str] | None = None,
-        # Knowledge banks linked to this memory bank (recall/reflect return their passages)
-        knowledge_banks: list[str] | None = None,
         # Gemini safety settings
         llm_gemini_safety_settings: list[dict[str, str]] | None = None,
         # Security / audit
@@ -3344,8 +3268,6 @@ class Hindsight:
             disposition_literalism: How literally to interpret information (1=flexible, 5=literal).
             disposition_empathy: How much to consider emotional context (1=detached, 5=empathetic).
             mcp_enabled_tools: List of MCP tool names to enable for this bank.
-            knowledge_banks: Knowledge banks linked to this bank: reflect also searches them and treats
-                their passages as authoritative. Recall is unchanged.
             llm_gemini_safety_settings: Gemini/VertexAI safety overrides, as a list of
                 ``{"category": ..., "threshold": ...}`` dicts (the shape the provider takes).
             memory_defense: Memory-defense (prompt-injection / secret redaction) settings.
@@ -3419,7 +3341,6 @@ class Hindsight:
                 "disposition_literalism": disposition_literalism,
                 "disposition_empathy": disposition_empathy,
                 "mcp_enabled_tools": mcp_enabled_tools,
-                "knowledge_banks": knowledge_banks,
                 "llm_gemini_safety_settings": llm_gemini_safety_settings,
                 "memory_defense": memory_defense,
                 "audit_log_enabled": audit_log_enabled,

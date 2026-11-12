@@ -22,8 +22,6 @@ def _make_client():
     client._memory_api = MagicMock()
     client._memory_api.retain_memories = AsyncMock(return_value=MagicMock())
     client._memory_api.recall_memories = AsyncMock(return_value=MagicMock())
-    client._files_api = MagicMock()
-    client._files_api.file_retain = AsyncMock(return_value=MagicMock())
     return client
 
 
@@ -47,18 +45,6 @@ def test_retain_batch_is_suppressed_while_suspended():
 
     assert client._memory_api.retain_memories.await_count == 0
     assert response.items_count == 0
-
-
-def test_retain_files_is_suppressed_while_suspended(tmp_path):
-    client = _make_client()
-    sample = tmp_path / "note.txt"
-    sample.write_text("hello")
-
-    with client.suspend_retains():
-        response = client.retain_files(BANK, [sample])
-
-    assert client._files_api.file_retain.await_count == 0
-    assert response.operation_ids == []
 
 
 def test_recall_still_reaches_the_api_while_suspended():

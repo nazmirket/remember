@@ -8376,75 +8376,6 @@
         }
       }
     },
-    "/v1/default/banks/{bank_id}/files/retain": {
-      "post": {
-        "tags": [
-          "Files"
-        ],
-        "summary": "Convert files to memories",
-        "description": "Upload files (PDF, DOCX, etc.), convert them to markdown, and retain as memories.\n\nThis endpoint handles file upload, conversion, and memory creation in a single operation.\n\n**Features:**\n- Supports PDF, DOCX, PPTX, XLSX, images (parser-dependent OCR), audio (with transcription)\n- Automatic file-to-markdown conversion using pluggable parsers\n- Files stored in PostgreSQL by default or a configured storage extension\n- Each file becomes a separate document with optional metadata/tags\n- Always processes asynchronously \u2014 returns operation IDs immediately\n\n**The system automatically:**\n1. Stores uploaded files in object storage\n2. Converts files to markdown\n3. Creates document records with file metadata\n4. Extracts facts and creates memory units (same as regular retain)\n\nUse the operations endpoint to monitor progress.\n\n**Request format:** multipart/form-data with:\n- `files`: One or more files to upload\n- `request`: JSON string with FileRetainRequest model\n\n**Parser selection:**\n- Set `parser` in the request body to override the server default for all files.\n- Set `parser` inside a `files_metadata` entry for per-file control.\n- Pass a list (e.g. `['iris', 'markitdown']`) to define an ordered fallback chain \u2014 each parser is tried in sequence until one succeeds.\n- Falls back to the server default (`HINDSIGHT_API_FILE_PARSER`) if not specified.\n- Only parsers enabled on the server may be requested; others return HTTP 400.",
-        "operationId": "file_retain",
-        "parameters": [
-          {
-            "name": "bank_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Bank Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_file_retain"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FileRetainResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/default/banks/{bank_id}/audit-logs": {
       "get": {
         "tags": [
@@ -11190,30 +11121,6 @@
         ],
         "title": "Base64AttachmentSource",
         "description": "Inline attachment bytes, base64-encoded.\n\nThe only source type in this version. ``url`` (server-side fetch) and\n``blob_id`` (pre-uploaded handle) are the natural next ones, which is why this\nis modelled as a discriminated union on ``type`` rather than as bare fields."
-      },
-      "Body_file_retain": {
-        "properties": {
-          "files": {
-            "items": {
-              "type": "string",
-              "format": "binary"
-            },
-            "type": "array",
-            "title": "Files",
-            "description": "Files to upload and convert"
-          },
-          "request": {
-            "type": "string",
-            "title": "Request",
-            "description": "JSON string with FileRetainRequest model"
-          }
-        },
-        "type": "object",
-        "required": [
-          "files",
-          "request"
-        ],
-        "title": "Body_file_retain"
       },
       "Body_import_bank_transfer": {
         "properties": {
@@ -13963,31 +13870,6 @@
         ],
         "title": "FileContentBlock",
         "description": "A non-image attachment \u2014 a PDF, a spreadsheet \u2014 in its input position.\n\nThis stays distinct from ``image`` because providers use different request\nparts for images and documents; retaining the caller's kind avoids guessing."
-      },
-      "FileRetainResponse": {
-        "properties": {
-          "operation_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Operation Ids",
-            "description": "Operation IDs for tracking file conversion operations. Use GET /v1/default/banks/{bank_id}/operations to list operations."
-          }
-        },
-        "type": "object",
-        "required": [
-          "operation_ids"
-        ],
-        "title": "FileRetainResponse",
-        "description": "Response model for file upload endpoint.",
-        "example": {
-          "operation_ids": [
-            "550e8400-e29b-41d4-a716-446655440000",
-            "550e8400-e29b-41d4-a716-446655440001",
-            "550e8400-e29b-41d4-a716-446655440002"
-          ]
-        }
       },
       "GraphDataResponse": {
         "properties": {
@@ -21153,7 +21035,7 @@
             "bank_llm_health": true,
             "document_export_api": true,
             "document_import_api": true,
-            "file_upload_api": true,
+            "file_upload_api": false,
             "knowledge_banks": false,
             "llm_trace": false,
             "mcp": true,

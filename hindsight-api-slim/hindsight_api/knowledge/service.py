@@ -21,7 +21,7 @@ import time
 import uuid
 import weakref
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,7 +31,6 @@ import asyncpg
 from ..config import get_config
 from ..engine import bank_aliases
 from ..engine.db_utils import acquire_with_retry
-from ..engine.response_models import KnowledgeDocumentHit
 from ..engine.retain import bank_utils
 from ..engine.schema import fq_table
 from ..engine.storage import bank_storage_prefix, key_segment
@@ -43,7 +42,6 @@ from ..extensions.operation_validator import (
     KnowledgeBankReadOperation,
     KnowledgeBankWriteContext,
     KnowledgeBankWriteOperation,
-    OperationValidationError,
 )
 from . import ingest_strategy, media
 from .embedders import (
@@ -87,7 +85,6 @@ _FILE_SAVE_CONCURRENCY = 16
 
 #: Passages reflect's recall tool reads from a memory bank's linked knowledge banks. Fixed: a per-bank
 #: setting was dropped before launch (nothing tuned it).
-LINKED_RECALL_TOP_K = 5
 
 
 class KnowledgeBankError(Exception):
@@ -280,12 +277,6 @@ class _Waiting:
 
     doc: _InFlight
     draft: media.PassageDraft
-
-
-@dataclass
-class LinkedHit:
-    bank_id: str
-    hit: SearchHit
 
 
 # The splitter a media type's typical file goes through (a PDF for "document").
@@ -1229,83 +1220,6 @@ class KnowledgeService:
             item.context_first = passages[0].index if passages else item.context_first
             item.context_last = passages[-1].index if passages else item.context_last
         return items
-
-    async def search_linked(
-        self, bank_ids: list[str], query: str, top_k: int, request_context: RequestContext
-    ) -> list[LinkedHit]:
-        """Search the knowledge banks a memory bank links, best passages first across all of them."""
-        await self._ready(request_context)
-        hits: list[LinkedHit] = []
-        vector: list[float] | None = None
-        for bank_id in bank_ids:
-            try:
-                await self._authorize(bank_id, KnowledgeBankReadOperation.SEARCH_KNOWLEDGE_BANK, request_context)
-            except OperationValidationError as exc:
-                # The memory bank links it, but this caller may not read it: the reflect goes on without it.
-                logger.info(f"Linked knowledge bank '{bank_id}' refused for this caller ({exc.reason}); skipped")
-                continue
-            if await self._kind_of(bank_id) != KIND:
-                logger.warning(f"Linked knowledge bank '{bank_id}' does not exist; skipped")
-                continue
-            if vector is None:
-                vector = await self.embedder.embed_query(query)
-            for hit in await self.store.search(
-                bank_id,
-                vector,
-                top_k=top_k,
-                filters=SearchFilters(),
-                # no keyword arm: fused scores are rescaled per bank and could not be ranked across banks
-                text_weight=get_config().knowledge_pdf_text_weight,
-            ):
-                hits.append(LinkedHit(bank_id=bank_id, hit=hit))
-        hits.sort(key=lambda linked: linked.hit.score, reverse=True)
-        return hits[:top_k]
-
-
-async def documents_for_memory_bank(
-    engine: MemoryEngine, bank_id: str, query: str, request_context: RequestContext
-) -> list[KnowledgeDocumentHit] | None:
-    """The linked knowledge banks' best passages for reflect's recall tool, or None when none are linked.
-
-    A failure here never fails the reflect: the memories are still the answer, without the docs.
-    """
-    if not get_config().enable_knowledge_banks:
-        return None
-    config = await engine._config_resolver.get_bank_config(bank_id, request_context)
-    linked = [b for b in (config.get("knowledge_banks") or []) if b != bank_id]
-    if not linked or not (query or "").strip():
-        return None
-    # Reflect's recall runs as an internal operation, but the linked banks are read on the caller's
-    # behalf: the validator must see the caller, not a background job it would let through.
-    caller = replace(request_context, internal=False)
-    try:
-        hits = await get_knowledge_service(engine).search_linked(linked, query, LINKED_RECALL_TOP_K, caller)
-    except Exception as exc:
-        logger.warning(f"Knowledge search for memory bank '{bank_id}' failed: {exc!r}")
-        return []
-    from .routes import search_result
-
-    out = []
-    for linked in hits:
-        r = search_result(linked.bank_id, linked.hit)
-        out.append(
-            KnowledgeDocumentHit(
-                bank_id=linked.bank_id,
-                document_id=r.document_id,
-                passage_index=r.index,
-                filename=r.filename,
-                media_type=r.media_type,
-                text=r.text,
-                page=r.page,
-                start_ms=r.start_ms,
-                end_ms=r.end_ms,
-                score=r.score,
-                passage_url=r.passage_url,
-                document_url=r.document_url,
-                tags=r.tags,
-            )
-        )
-    return out
 
 
 def _title_hint(document: KnowledgeDocument) -> str | None:
