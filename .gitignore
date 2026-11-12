@@ -6,12 +6,12 @@ dist/
 wheels/
 *.egg-info
 # Release builds stage the canonical root license in each package context.
-/hindsight-clients/python/LICENSE
-/hindsight-api-slim/LICENSE
-/hindsight-api/LICENSE
-/hindsight-all/LICENSE
-/hindsight-all-slim/LICENSE
-/hindsight-embed/LICENSE
+/remember-clients/python/LICENSE
+/remember-api-slim/LICENSE
+/remember-api/LICENSE
+/remember-all/LICENSE
+/remember-all-slim/LICENSE
+/remember-embed/LICENSE
 .mcp.json
 .playwright-mcp/
 .osgrep
@@ -54,24 +54,24 @@ logs/
 .sesskey
 
 # Generated docs files
-hindsight-docs/static/llms-full.txt
+remember-docs/static/llms-full.txt
 
 
-hindsight-dev/benchmarks/locomo/results/
-hindsight-dev/benchmarks/longmemeval/results/
-hindsight-dev/benchmarks/consolidation/results/
-hindsight-dev/benchmarks/perf/results/
-hindsight-dev/benchmarks/results/
+remember-dev/benchmarks/locomo/results/
+remember-dev/benchmarks/longmemeval/results/
+remember-dev/benchmarks/consolidation/results/
+remember-dev/benchmarks/perf/results/
+remember-dev/benchmarks/results/
 benchmarks/results/
-hindsight-cli/target
-hindsight-clients/rust/target
+remember-cli/target
+remember-clients/rust/target
 .claude/*
 !.claude/skills/
 whats-next.md
 TASK.md
 # Parked / draft integrations that aren't ready to ship
-hindsight-integrations/_drafts/
-# Changelog is now tracked in hindsight-docs/src/pages/changelog.md
+remember-integrations/_drafts/
+# Changelog is now tracked in remember-docs/src/pages/changelog.md
 # CHANGELOG.md
 
 blog-post*

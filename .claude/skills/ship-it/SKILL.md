@@ -40,15 +40,15 @@ Everything else (must fix, should fix, nits) is not a blocker: fix it all.
 ## 0c. Track everything you start (applies at every step)
 
 Whatever you launch to verify the PR — API, worker, control plane, docs server, a pg0 instance —
-you must stop yourself at the end (step 7), without touching anyone else's. Other Hindsight
+you must stop yourself at the end (step 7), without touching anyone else's. Other Remember
 worktrees, servers and pytest runs share this machine.
 
 - Start background processes so you know their PID (`run_in_background`, or `cmd & echo $!`) and
   write each one down. Note the ports you picked.
 - Need a database? Give it a **new, unique pg0 instance name** (e.g.
-  `HINDSIGHT_API_DATABASE_URL=pg0://ship-it-pr-<N>`) and write down that you created it. If you reuse
+  `REMEMBER_API_DATABASE_URL=pg0://ship-it-pr-<N>`) and write down that you created it. If you reuse
   an instance that already existed (check `pg0 list` first), write down that it is **shared**.
-- Never `pkill -f hindsight`, `pkill -f pytest`, `killall`, or kill by port without checking the
+- Never `pkill -f remember`, `pkill -f pytest`, `killall`, or kill by port without checking the
   PID is one of yours. Those hit other sessions.
 
 ## 1. Load the PR

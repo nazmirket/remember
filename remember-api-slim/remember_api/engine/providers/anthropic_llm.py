@@ -1,0 +1,743 @@
+"""
+Anthropic LLM provider using the Anthropic Python SDK.
+
+This provider enables using Claude models from Anthropic with support for:
+- Structured JSON output (native ``output_config.format``)
+- Extended thinking mode
+- Retry logic with exponential backoff
+"""
+
+import asyncio
+import json
+import logging
+import re
+import time
+from contextlib import AbstractAsyncContextManager, nullcontext
+from typing import Any, Callable, cast
+
+from remember_api.engine.llm_interface import (
+    LLMInterface,
+    ProviderContentPolicyError,
+)
+from remember_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
+from remember_api.engine.llm_transport import build_sdk_timeout, describe_llm_error
+from remember_api.engine.providers.llm_debug import dump_request_on_4xx
+from remember_api.engine.remote_retry import jittered_backoff
+from remember_api.engine.response_models import (
+    BatchRequest,
+    BatchRequestCounts,
+    BatchResult,
+    BatchStatus,
+    BatchSubmission,
+    TokenUsage,
+)
+from remember_api.engine.structured_output import _SUBSCHEMA_NAME_MAPS, provider_json_schema, strict_json_schema
+from remember_api.metrics import get_metrics_collector
+from remember_api.provider_auth import requires_api_key
+from remember_api.worker.stage import set_stage
+
+from ..response_models import LLMCallResult
+
+logger = logging.getLogger(__name__)
+
+
+_REFUSAL_STOP_REASONS = ("refusal", "content_filter")
+
+
+def _rejects_output_format(error: Exception) -> bool:
+    """True for the 400 an endpoint sends when it does not take ``output_config`` at all (a gateway).
+
+    Not for a schema it takes but refuses a keyword of (``output_config.format.schema: ...``):
+    that is the schema's problem, and falling back for good would drop constrained decoding
+    from every later call.
+    """
+    message = str(error)
+    return "output_config" in message and "output_config.format.schema" not in message
+
+
+#: Keywords Anthropic's native structured output refuses with a 400 ("For 'array' type,
+#: property 'maxItems' is not supported"). The forced tool it replaced took them. Dropping
+#: them only loosens the constraint: the reply is still validated against the full model.
+_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset({"maxItems", "minLength", "maxLength"})
+
+
+def _for_native_output(node: Any) -> Any:
+    """``node`` without the keywords native structured output refuses (``minItems`` above 1 too)."""
+    if isinstance(node, dict):
+        return {
+            # The keys of a name map (``properties`` and friends) are names, not keywords.
+            key: (
+                {name: _for_native_output(sub) for name, sub in value.items()}
+                if key in _SUBSCHEMA_NAME_MAPS and isinstance(value, dict)
+                else _for_native_output(value)
+            )
+            for key, value in node.items()
+            if key not in _UNSUPPORTED_SCHEMA_KEYWORDS and not (key == "minItems" and value not in (0, 1))
+        }
+    if isinstance(node, list):
+        return [_for_native_output(item) for item in node]
+    return node
+
+
+def _raise_on_refusal(response: Any) -> None:
+    """Fail fast when Anthropic refused the request (HTTP 200, empty body).
+
+    Without this the empty body is parsed as invalid JSON and retried, paying
+    for the same refusal again and again (#5201).
+    """
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason in _REFUSAL_STOP_REASONS:
+        raise ProviderContentPolicyError(f"Anthropic refused the request (stop_reason={stop_reason}); not retrying")
+
+
+def _usage_from_anthropic_response(response: Any) -> LLMResponseUsage:
+    """Extract input/output/cached token counts from an Anthropic usage block.
+
+    Anthropic counts cache reads and writes apart from ``input_tokens``; the
+    ``TokenUsage`` contract counts them in it, with reads also in ``cached_tokens``.
+    """
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return LLMResponseUsage()
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    return LLMResponseUsage(
+        input_tokens=(usage.input_tokens or 0) + cache_read + cache_write,
+        output_tokens=usage.output_tokens or 0,
+        cached_tokens=cache_read,
+    )
+
+
+_EPHEMERAL_CACHE = {"type": "ephemeral"}
+
+# The Messages API *requires* ``max_tokens``, so there is no "uncapped" transport
+# option here the way there is on OpenAI/Gemini: when a caller passes no cap we
+# still have to send a number. 4096 (the old value) silently truncated long
+# completions whose caller deliberately left the cap open -- reflect's tool-call
+# loop cut off mid-``done`` payload and lost the answer field (#4437), the same
+# class of bug as #2668 on the consolidation path.
+# ponytail: one flat number instead of a per-model table. Every current Claude
+# model caps at 64K output or more; a model with a lower ceiling gets an explicit
+# 400 from the API (not a silent truncation) and the operator can set the
+# scope's max_completion_tokens config.
+_DEFAULT_MAX_TOKENS = 64000
+
+
+def _cached_system_blocks(system_prompt: str | None, schema_msg: str | None = None) -> list[dict[str, Any]]:
+    """Render the system prompt as a block list with cache_control markers.
+
+    Anthropic prompt caching is a prefix match: marking the system block
+    caches tools + system together. The system prompt is stable per scope —
+    fact extraction reuses it across every chunk, reflect and consolidation
+    keep their stable instructions there — so repeat calls read it at ~10% of
+    the base input price. Markers below the model's minimum cacheable prefix
+    are silently ignored (no write premium), so marking is safe
+    unconditionally. This is the "inline-marker provider" strategy that
+    ``LLMInterface.get_or_create_cached_prefix`` documents for Anthropic.
+
+    A prompt-injected response schema goes in its own second block and
+    marker rather than being appended to the first: consolidation builds its
+    schema per batch (it enumerates the batch's fact ids), and an appended
+    schema changed the cached prefix on every call, so the stable
+    instructions in front of it were never read back (#6187). A fixed schema
+    still caches through the second marker. 2 of the 4 allowed breakpoints.
+    """
+    return [
+        {"type": "text", "text": text, "cache_control": _EPHEMERAL_CACHE}
+        for text in (system_prompt, schema_msg)
+        if text
+    ]
+
+
+#: ``data:<media type>;base64,<payload>`` — the OpenAI-style image part's URL form.
+_DATA_URI_RE = re.compile(r"^data:(?P<media_type>[\w.+-]+/[\w.+-]+);base64,(?P<data>.*)$", re.DOTALL)
+
+
+def _to_anthropic_content(content: Any) -> Any:
+    """Translate an OpenAI-style content-part list into Anthropic's block shape.
+
+    Retain assembles multimodal messages in the OpenAI part vocabulary — one
+    canonical wire shape, converted per provider here — so an inline image
+    reaches Claude as a native ``image`` block rather than as a data URI the
+    model would read as literal text.
+
+    A plain string, which is what every text-only call sends, passes straight
+    through untouched.
+    """
+    if not isinstance(content, list):
+        return content
+
+    blocks: list[Any] = []
+    for part in content:
+        if not isinstance(part, dict):
+            blocks.append(part)
+            continue
+        kind = part.get("type")
+        if kind == "image_url":
+            url = (part.get("image_url") or {}).get("url", "")
+            match = _DATA_URI_RE.match(url)
+            if match is None:
+                # Anthropic can fetch a URL image itself, so a non-data URI is
+                # passed on as a url source rather than dropped.
+                blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+                continue
+            blocks.append(_anthropic_source_block("image", match))
+        elif kind == "file":
+            # Non-image attachments (PDFs) are a *document* block for Anthropic,
+            # not an image one — the API rejects a PDF sent as an image source.
+            url = (part.get("file") or {}).get("file_data", "")
+            match = _DATA_URI_RE.match(url)
+            if match is None:
+                continue
+            blocks.append(_anthropic_source_block("document", match))
+        else:
+            blocks.append(part)
+    return blocks
+
+
+def _anthropic_source_block(block_type: str, match: "re.Match[str]") -> dict[str, Any]:
+    """One base64 source block — image or document — from a parsed data URI."""
+    return {
+        "type": block_type,
+        "source": {
+            "type": "base64",
+            "media_type": match.group("media_type"),
+            "data": match.group("data"),
+        },
+    }
+
+
+# Fallback per-request timeout when the caller resolved none (direct
+# construction, tests). Configured deployments pass one down.
+_DEFAULT_ANTHROPIC_TIMEOUT = 300.0
+
+
+class AnthropicLLM(LLMInterface):
+    """
+    LLM provider using Anthropic's Claude models.
+
+    Supports structured output and extended thinking mode.
+    Handles format conversion between OpenAI-style messages and Anthropic's format.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        reasoning_effort: str | None = None,
+        timeout: float | None = None,
+        default_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        """
+        Initialize Anthropic LLM provider.
+
+        Args:
+            provider: Provider name (should be "anthropic").
+            api_key: Anthropic API key.
+            base_url: Base URL for the API (optional, uses Anthropic default if empty).
+            model: Model name (e.g., "claude-sonnet-4-20250514").
+            reasoning_effort: Reasoning effort level (not used by Anthropic).
+            timeout: Per-request timeout in seconds, resolved by the caller from
+                ``llm_timeout`` / the per-operation override. ``None`` (direct
+                construction, tests) falls back to ``_DEFAULT_ANTHROPIC_TIMEOUT``.
+            default_headers: Optional custom headers passed as ``default_headers`` to
+                the Anthropic SDK client. Used by operators routing through proxies
+                or request-tracing middleware. Sourced from ``llm_default_headers`` in
+                ``RememberConfig`` (env: ``REMEMBER_API_LLM_DEFAULT_HEADERS``).
+            extra_body: Extra request-body params (e.g. ``{"temperature": 0.2,
+                "top_p": 0.9, "top_k": 40}``) passed via the Anthropic SDK's
+                ``extra_body`` so they merge into the JSON sent to the Messages API.
+                Sourced from ``llm_extra_body`` (env: ``REMEMBER_API_LLM_EXTRA_BODY``).
+            **kwargs: Additional provider-specific parameters.
+        """
+        super().__init__(provider, api_key, base_url, model, reasoning_effort, timeout=timeout, **kwargs)
+        self._warn_reasoning_effort_unsupported()
+
+        if not self.api_key and requires_api_key(provider):
+            raise ValueError("API key is required for Anthropic provider")
+
+        # User-configured extra body params (merged into every Messages API call)
+        self._extra_body = extra_body or {}
+
+        # Set once the endpoint rejects ``output_config`` (a gateway that does not forward it),
+        # so later strict structured output puts the schema in the prompt, up front, instead of
+        # paying a 400 each time.
+        self._output_format_rejected = False
+
+        # Import and initialize Anthropic client
+        try:
+            from anthropic import AsyncAnthropic, Timeout
+
+            # SDK retries disabled — wrapper-level retry loop in ``call`` handles
+            # backoff (mirrors ``OpenAICompatibleLLM`` so the two providers behave
+            # consistently).
+            client_kwargs: dict[str, Any] = {"max_retries": 0}
+            # No key: the SDK resolves credentials itself (Workload Identity Federation).
+            # An explicit api_key would outrank that, so only pass one when set.
+            if self.api_key:
+                client_kwargs["api_key"] = self.api_key
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            # Per-phase so the connect leg is capped independently (issue #3881). Built
+            # with the SDK's own Timeout: anthropic 1.x runs on httpx2 and rejects an
+            # httpx.Timeout, or on 1.0.x fails every request with it (issue #4683).
+            client_kwargs["timeout"] = build_sdk_timeout(self.timeout or _DEFAULT_ANTHROPIC_TIMEOUT, Timeout)
+            if default_headers:
+                client_kwargs["default_headers"] = default_headers
+
+            self._client = AsyncAnthropic(**client_kwargs)
+            logger.info(f"Anthropic client initialized for model: {self.model}")
+        except ImportError as e:
+            raise RuntimeError("Anthropic SDK not installed. Run: uv add anthropic or pip install anthropic") from e
+
+    async def verify_connection(self) -> None:
+        """
+        Verify that the Anthropic provider is configured correctly by making a simple test call.
+
+        Raises:
+            RuntimeError: If the connection test fails.
+        """
+        try:
+            test_messages = [{"role": "user", "content": "Say 'ok'"}]
+            await self.call(
+                messages=test_messages,
+                max_completion_tokens=10,
+                scope="verification",
+                max_retries=0,
+            )
+            logger.info("Anthropic connection verified successfully")
+        except Exception as e:
+            logger.error(f"Anthropic connection verification failed: {e}")
+            raise RuntimeError(f"Failed to verify Anthropic connection: {e}") from e
+
+    async def call(
+        self,
+        messages: list[dict[str, str]],
+        response_format: Any | None = None,
+        max_completion_tokens: int | None = None,
+        temperature: float | None = None,
+        scope: str = "memory",
+        max_retries: int = 10,
+        initial_backoff: float = 1.0,
+        max_backoff: float = 60.0,
+        skip_validation: bool = False,
+        strict_schema: bool = False,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
+    ) -> LLMCallResult:
+        """
+        Make an LLM API call with retry logic.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+            response_format: Optional Pydantic model for structured output.
+            max_completion_tokens: Maximum tokens in response.
+            temperature: Sampling temperature (0.0-2.0).
+            scope: Scope identifier for tracking.
+            max_retries: Maximum retry attempts.
+            initial_backoff: Initial backoff time in seconds.
+            max_backoff: Maximum backoff time in seconds.
+            skip_validation: Return raw JSON without Pydantic validation.
+            strict_schema: Constrain the reply with Anthropic's native structured output
+                (``output_config``, issue #1002). When False, falls back to
+                schema-in-prompt + JSON parse.
+
+        Returns:
+
+        Raises:
+            OutputTooLongError: If output exceeds token limits.
+            Exception: Re-raises API errors after retries exhausted.
+        """
+        from anthropic import APIConnectionError, APIStatusError, RateLimitError
+
+        start_time = time.perf_counter()
+
+        # Convert OpenAI-style messages to Anthropic format
+        system_prompt = None
+        anthropic_messages = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if role == "system":
+                if system_prompt:
+                    system_prompt += "\n\n" + content
+                else:
+                    system_prompt = content
+            else:
+                anthropic_messages.append({"role": role, "content": _to_anthropic_content(content)})
+
+        # Structured output: with strict_schema, Anthropic's native structured output
+        # (``output_config.format``) constrains the reply to the schema, which ends the
+        # invalid-JSON retry storm (issue #1002). It replaced a single forced ``tool_use``
+        # tool: Claude Opus/Sonnet 5.5 reject a forced tool_choice (#5738), so on those the
+        # schema was only ever asked for in the prompt, and Remember sends no tools at all
+        # now (see providers/tools_via_schema.py). Without strict_schema, or on an endpoint
+        # that does not take output_config, the schema goes in the prompt and the reply is parsed.
+        schema = None
+        schema_msg = None
+        use_native_format = False
+        if response_format is not None and hasattr(response_format, "model_json_schema"):
+            if strict_schema and not self._output_format_rejected:
+                use_native_format = True
+                schema = _for_native_output(strict_json_schema(response_format))
+            else:
+                schema = provider_json_schema(response_format)
+                schema_msg = f"You must respond with valid JSON matching this schema:\n{json.dumps(schema, indent=2, ensure_ascii=False)}"
+
+        # Prepare parameters
+        call_params: dict[str, Any] = {
+            "model": self.model,
+            "messages": anthropic_messages,
+            "max_tokens": max_completion_tokens if max_completion_tokens is not None else _DEFAULT_MAX_TOKENS,
+        }
+
+        if system_prompt or schema_msg:
+            # One-shot calls share only the system prompt with each other, so
+            # it is the cache breakpoint on this path; a prompt-injected schema
+            # gets its own, so a per-request schema can't break the first.
+            call_params["system"] = _cached_system_blocks(system_prompt, schema_msg)
+
+        if use_native_format:
+            call_params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+
+        if self._extra_body:
+            call_params["extra_body"] = self._extra_body
+
+        # opencode-go's /v1/messages requires x-opencode-session (#4071), reached
+        # via provider=anthropic + an opencode.ai base URL; the host check decides.
+
+        last_exception = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                async with attempt_context() if attempt_context is not None else nullcontext():
+                    set_stage(f"llm.{self.provider}.{scope}.attempt={attempt + 1}/{max_retries + 1}")
+                    # Wall-clock cap: the SDK's timeout is per phase and its read timeout restarts
+                    # on every byte, so an upstream trickling keep-alive whitespace never trips it
+                    # and the call pins its worker slot forever (#4763).
+                    response = await asyncio.wait_for(
+                        self._request_client().messages.create(**call_params),
+                        timeout=self.timeout or _DEFAULT_ANTHROPIC_TIMEOUT,
+                    )
+                # Stash usage before parse/validate, which may raise locally
+                # even though the provider charged for these tokens (#2387).
+                stash_response_usage(_usage_from_anthropic_response(response))
+                _raise_on_refusal(response)
+
+                # Anthropic response content is a list of blocks
+                content = ""
+                for block in response.content:
+                    if block.type == "text":
+                        content += block.text
+
+                if response_format is not None:
+                    # Models may wrap JSON in markdown code blocks
+                    clean_content = content
+                    if "```json" in content:
+                        clean_content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        clean_content = content.split("```")[1].split("```")[0].strip()
+
+                    try:
+                        json_data = json.loads(clean_content)
+                    except json.JSONDecodeError:
+                        # Fallback to parsing raw content if markdown stripping failed
+                        json_data = json.loads(content)
+
+                    if skip_validation:
+                        result = json_data
+                    else:
+                        result = response_format.model_validate(json_data)
+                else:
+                    result = content
+
+                # Record metrics and log slow calls
+                duration = time.perf_counter() - start_time
+                response_usage = _usage_from_anthropic_response(response)
+                input_tokens = response_usage.input_tokens
+                output_tokens = response_usage.output_tokens
+                total_tokens = input_tokens + output_tokens
+                cached_tokens = response_usage.cached_tokens
+
+                # Record LLM metrics
+                metrics = get_metrics_collector()
+                metrics.record_llm_call(
+                    provider=self.provider,
+                    model=self.model,
+                    scope=scope,
+                    duration=duration,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    success=True,
+                    cached_input_tokens=cached_tokens,
+                )
+
+                # Record trace span
+                from remember_api.tracing import _serialize_for_span, get_span_recorder
+
+                finish_reason = response.stop_reason if hasattr(response, "stop_reason") else None
+                span_recorder = get_span_recorder()
+                span_recorder.record_llm_call(
+                    provider=self.provider,
+                    model=self.model,
+                    scope=scope,
+                    messages=messages,
+                    response_content=_serialize_for_span(result),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration=duration,
+                    finish_reason=finish_reason,
+                    error=None,
+                    cached_tokens=cached_tokens,
+                )
+
+                # Log slow calls
+                if duration > 10.0:
+                    logger.info(
+                        f"slow llm call: scope={scope}, model={self.provider}/{self.model}, "
+                        f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
+                        f"time={duration:.3f}s"
+                    )
+
+                token_usage = TokenUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    cached_tokens=cached_tokens,
+                )
+                return LLMCallResult(content=result, usage=token_usage)
+
+            except json.JSONDecodeError as e:
+                last_exception = e
+                if attempt < max_retries:
+                    logger.warning("Anthropic returned invalid JSON, retrying...")
+                    backoff = min(initial_backoff * (2**attempt), max_backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+                else:
+                    logger.error(f"Anthropic returned invalid JSON after {max_retries + 1} attempts")
+                    raise
+
+            except (APIConnectionError, RateLimitError, APIStatusError, TimeoutError) as e:
+                # Fast fail on 401/403
+                if isinstance(e, APIStatusError) and e.status_code in (401, 403):
+                    logger.error(f"Anthropic auth error (HTTP {e.status_code}), not retrying: {str(e)}")
+                    raise
+                if use_native_format and isinstance(e, APIStatusError) and _rejects_output_format(e):
+                    logger.warning(
+                        f"{self.provider}/{self.model} rejects output_config; structured output "
+                        f"falls back to schema-in-prompt from now on: {describe_llm_error(e)}"
+                    )
+                    self._output_format_rejected = True
+                    return await self.call(
+                        messages,
+                        response_format=response_format,
+                        max_completion_tokens=max_completion_tokens,
+                        temperature=temperature,
+                        scope=scope,
+                        max_retries=max_retries,
+                        initial_backoff=initial_backoff,
+                        max_backoff=max_backoff,
+                        skip_validation=skip_validation,
+                        strict_schema=strict_schema,
+                        attempt_context=attempt_context,
+                    )
+
+                # Diagnostic dump (opt-in) of the exact request behind any 4xx.
+                dump_request_on_4xx(scope=scope, provider=self.provider, model=self.model, err=e, request=call_params)
+
+                last_exception = e
+                if attempt < max_retries:
+                    # Check if it's a rate limit or server error
+                    should_retry = isinstance(e, (APIConnectionError, RateLimitError, TimeoutError)) or (
+                        isinstance(e, APIStatusError) and e.status_code >= 500
+                    )
+
+                    if should_retry:
+                        await asyncio.sleep(jittered_backoff(attempt, initial_backoff, max_backoff))
+                        continue
+
+                logger.error(f"Anthropic API error after {max_retries + 1} attempts: {describe_llm_error(e)}")
+                raise
+
+            except ProviderContentPolicyError:
+                # An expected, permanent outcome — not an "unexpected error" worth an error log.
+                raise
+
+            except Exception as e:
+                logger.error(f"Unexpected error during Anthropic call: {type(e).__name__}: {str(e)}")
+                raise
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Anthropic call failed after all retries")
+
+    def supports_vision(self) -> bool:
+        """Every Claude model this provider can reach accepts image blocks."""
+        return True
+
+    # ── Message Batches API (50% token discount) ─────────────────────────────
+
+    async def supports_batch_api(self) -> bool:
+        """Anthropic supports batch operations via the Message Batches API."""
+        return True
+
+    @staticmethod
+    def _map_batch_status(processing_status: str) -> str:
+        """Map Anthropic ``processing_status`` onto the OpenAI vocabulary.
+
+        The engine's poll loop breaks on "completed" and hard-fails on
+        "failed"/"expired"/"cancelled"; anything else keeps polling. Anthropic
+        batches only end as "ended" (per-request failures surface in the
+        results, mirroring OpenAI's "completed"-with-errors semantics), so
+        "ended" maps to "completed" and the non-terminal states pass through.
+        """
+        return "completed" if processing_status == "ended" else processing_status
+
+    def _translate_batch_body(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Translate one OpenAI-shaped request body into Messages API params.
+
+        Mirrors the conversion rules of ``call()``: system messages fold into
+        the ``system`` param; ``max_completion_tokens`` becomes ``max_tokens``
+        (default ``_DEFAULT_MAX_TOKENS``); ``temperature`` is dropped (the sync path never sends
+        it either — current Claude models reject non-default sampling params);
+        an OpenAI ``response_format`` json_schema becomes ``output_config`` when strict
+        (native structured output, issue #1002), else the schema is injected into the
+        system prompt (as its own system block, see ``_cached_system_blocks``).
+
+        The system prompt carries the same cache_control markers as the sync
+        one-shot path (system only, nothing on messages): every request in a retain batch
+        shares the fact-extraction system prompt, so the first item's cache
+        write serves the remaining items as best-effort reads — and the
+        cache-read discount stacks with the 50% batch discount.
+        """
+        system_prompt: str | None = None
+        messages: list[dict[str, Any]] = []
+        for msg in body.get("messages", []):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                system_prompt = (system_prompt + "\n\n" + content) if system_prompt else content
+            else:
+                messages.append({"role": role, "content": content})
+
+        params: dict[str, Any] = {
+            "model": body.get("model") or self.model,
+            "messages": messages,
+            "max_tokens": body.get("max_completion_tokens") or _DEFAULT_MAX_TOKENS,
+        }
+
+        json_schema = (body.get("response_format") or {}).get("json_schema") or {}
+        schema = json_schema.get("schema")
+        schema_msg = None
+        if schema is not None:
+            if json_schema.get("strict"):
+                params["output_config"] = {"format": {"type": "json_schema", "schema": _for_native_output(schema)}}
+            else:
+                schema_msg = "You must respond with valid JSON matching this schema:\n" + json.dumps(
+                    schema, indent=2, ensure_ascii=False
+                )
+
+        if system_prompt or schema_msg:
+            params["system"] = _cached_system_blocks(system_prompt, schema_msg)
+
+        # Batch params ARE the raw Messages body, so operator-configured extra
+        # body params merge directly (the sync path routes them through the
+        # SDK's extra_body, which does the same merge server-side).
+        if self._extra_body:
+            params.update(self._extra_body)
+
+        return params
+
+    @staticmethod
+    def _translate_batch_message(custom_id: str, message: Any) -> BatchResult:
+        """An Anthropic Message from a succeeded batch entry as a BatchResult."""
+        usage = _usage_from_anthropic_response(message)
+        return BatchResult(
+            custom_id=custom_id,
+            content="".join(block.text for block in message.content if block.type == "text"),
+            usage=TokenUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.input_tokens + usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+            ),
+        )
+
+    async def submit_batch(self, requests: list[BatchRequest]) -> BatchSubmission:
+        """Submit a batch of requests to the Message Batches API."""
+        batch_requests = [
+            {"custom_id": req.custom_id, "params": self._translate_batch_body(req.body)} for req in requests
+        ]
+
+        logger.info(f"Submitting Anthropic message batch with {len(batch_requests)} requests")
+        # The SDK types each request as a TypedDict; these are built as plain dicts with the
+        # same keys just above.
+        batch = await self._client.messages.batches.create(requests=cast("list", batch_requests))
+        logger.info(f"Anthropic batch submitted: {batch.id}, status={batch.processing_status}")
+
+        return BatchSubmission(batch_id=batch.id, status=self._map_batch_status(batch.processing_status))
+
+    async def get_batch_status(self, batch_id: str) -> BatchStatus:
+        """Get batch status in the shape the engine's poll loop expects."""
+        batch = await self._client.messages.batches.retrieve(batch_id)
+
+        counts = batch.request_counts
+        processing = getattr(counts, "processing", 0) or 0
+        succeeded = getattr(counts, "succeeded", 0) or 0
+        errored = getattr(counts, "errored", 0) or 0
+        canceled = getattr(counts, "canceled", 0) or 0
+        expired = getattr(counts, "expired", 0) or 0
+        resolved = succeeded + errored + canceled + expired
+
+        return BatchStatus(
+            batch_id=batch.id,
+            status=self._map_batch_status(batch.processing_status),
+            request_counts=BatchRequestCounts(total=processing + resolved, completed=resolved, failed=errored),
+        )
+
+    async def retrieve_batch_results(self, batch_id: str) -> list[BatchResult]:
+        """Retrieve completed batch results; errored/canceled/expired entries carry ``error``."""
+        batch = await self._client.messages.batches.retrieve(batch_id)
+        if batch.processing_status != "ended":
+            raise ValueError(f"Batch {batch_id} is not completed yet (status: {batch.processing_status})")
+
+        decoder = await self._client.messages.batches.results(batch_id)
+        results: list[BatchResult] = []
+        async for entry in decoder:
+            outcome = entry.result
+            if outcome.type == "succeeded":
+                results.append(self._translate_batch_message(entry.custom_id, outcome.message))
+            else:
+                error = getattr(outcome, "error", None)
+                if error is not None:
+                    detail = f"{getattr(error, 'type', 'error')}: {getattr(error, 'message', error)}"
+                else:
+                    detail = f"batch request {outcome.type}"
+                results.append(BatchResult(custom_id=entry.custom_id, error=detail))
+
+        logger.info(f"Retrieved {len(results)} results for Anthropic batch {batch_id}")
+        return results
+
+    async def cleanup(self) -> None:
+        """Clean up resources (close Anthropic client connections)."""
+        if hasattr(self, "_client") and self._client:
+            await self._client.close()
+
+    def supports_request_overrides(self) -> bool:
+        return True
+
+    def _request_client(self) -> Any:
+        """The SDK client for one call, with the credentials an LLM request extension chose."""
+        # Lazy: importing the extensions package here would be circular.
+        from remember_api.extensions.llm_request import request_client
+
+        return request_client(self._client)
+
+    def supports_attempt_scoped_concurrency(self) -> bool:
+        return True

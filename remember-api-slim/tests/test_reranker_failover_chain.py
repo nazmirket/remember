@@ -1,0 +1,355 @@
+"""
+Reranker failover chain: REMEMBER_API_RERANKER_<n>_* members.
+
+Covers issue #3168: an unreachable reranker took the whole recall down with a 500
+because the stage was a hard dependency. A chain of indexed members lets the
+refinement degrade — typically to a trailing `rrf` member, which is the same
+neutral-score ordering you get with no reranker configured at all.
+"""
+
+import os
+from unittest.mock import patch
+
+import pytest
+
+from remember_api.config import RememberConfig
+from remember_api.engine.cross_encoder import (
+    CrossEncoderModel,
+    MultiCrossEncoder,
+    RemoteTEICrossEncoder,
+    RerankTimeoutError,
+    RRFPassthroughCrossEncoder,
+    create_cross_encoder,
+    create_cross_encoder_from_env,
+    recall_log_id,
+)
+
+PAIRS = [("q", "doc a"), ("q", "doc b")]
+
+
+class _FakeCrossEncoder(CrossEncoderModel):
+    """Scriptable member: records calls, optionally fails init and/or predict."""
+
+    def __init__(
+        self,
+        name: str,
+        scores: list[float] | None = None,
+        init_error: Exception | None = None,
+        predict_error: Exception | None = None,
+    ) -> None:
+        self._name = name
+        self._scores = scores
+        self._init_error = init_error
+        self._predict_error = predict_error
+        self.init_calls = 0
+        self.predict_calls = 0
+
+    @property
+    def provider_name(self) -> str:
+        return self._name
+
+    async def initialize(self) -> None:
+        self.init_calls += 1
+        if self._init_error is not None:
+            raise self._init_error
+
+    async def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        self.predict_calls += 1
+        if self._predict_error is not None:
+            raise self._predict_error
+        assert self._scores is not None
+        return self._scores
+
+
+# ── env parsing ────────────────────────────────────────────────────────────────
+
+
+def test_no_indexed_members_by_default():
+    """The default config has no fallback members — behaviour is unchanged."""
+    with patch.dict(os.environ, {}, clear=False):
+        config = RememberConfig.from_env()
+    assert config.reranker_members == []
+    assert len(config.reranker_chain()) == 1
+
+
+def test_indexed_members_are_parsed_in_order_and_stop_at_a_gap():
+    """Members must be contiguous from 1; scanning stops at the first missing index."""
+    env = {
+        "REMEMBER_API_RERANKER_1_PROVIDER": "tei",
+        "REMEMBER_API_RERANKER_1_TEI_URL": "http://backup:8080",
+        "REMEMBER_API_RERANKER_2_PROVIDER": "rrf",
+        # index 3 missing on purpose
+        "REMEMBER_API_RERANKER_4_PROVIDER": "cohere",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        config = RememberConfig.from_env()
+
+    assert [m.provider for m in config.reranker_members] == ["tei", "rrf"]
+    assert [m.index for m in config.reranker_members] == [1, 2]
+
+
+def test_indexed_member_reads_its_own_provider_settings():
+    """Every setting of member n carries the same index."""
+    env = {
+        "REMEMBER_API_RERANKER_1_PROVIDER": "tei",
+        "REMEMBER_API_RERANKER_1_TEI_URL": "http://backup:8080",
+        "REMEMBER_API_RERANKER_1_TEI_BATCH_SIZE": "7",
+        "REMEMBER_API_RERANKER_1_TEI_HTTP_TIMEOUT": "2.5",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        member = RememberConfig.from_env().reranker_members[0]
+
+    assert member.tei_url == "http://backup:8080"
+    assert member.tei_batch_size == 7
+    assert member.tei_http_timeout == 2.5
+
+
+def test_indexed_member_inherits_nothing_from_the_primary():
+    """An indexed member is read in isolation from the primary."""
+    from remember_api.config import DEFAULT_RERANKER_TYPESAFE_BASE_URL, DEFAULT_RERANKER_TYPESAFE_MODEL
+
+    env = {
+        "REMEMBER_API_RERANKER_PROVIDER": "typesafe",
+        "REMEMBER_API_RERANKER_TYPESAFE_API_KEY": "primary-key",
+        "REMEMBER_API_RERANKER_TYPESAFE_MODEL": "primary-model",
+        "REMEMBER_API_RERANKER_TYPESAFE_BASE_URL": "http://primary/rerank",
+        "REMEMBER_API_RERANKER_1_PROVIDER": "typesafe",
+        "REMEMBER_API_RERANKER_1_TYPESAFE_API_KEY": "member-key",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        member = RememberConfig.from_env().reranker_members[0]
+
+    assert member.typesafe_api_key == "member-key"
+    assert member.typesafe_base_url == DEFAULT_RERANKER_TYPESAFE_BASE_URL
+    assert member.typesafe_model == DEFAULT_RERANKER_TYPESAFE_MODEL
+
+
+def test_member_with_a_bad_numeric_setting_fails_fast():
+    env = {
+        "REMEMBER_API_RERANKER_1_PROVIDER": "tei",
+        "REMEMBER_API_RERANKER_1_TEI_BATCH_SIZE": "lots",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        with pytest.raises(ValueError, match="REMEMBER_API_RERANKER_1_TEI_BATCH_SIZE"):
+            RememberConfig.from_env()
+
+
+# ── chain construction ─────────────────────────────────────────────────────────
+
+
+def test_factory_builds_the_chain_through_the_real_config_proxy():
+    """The production path reads the chain via get_config()'s static proxy."""
+    from remember_api.config import clear_config_cache
+
+    env = {
+        "REMEMBER_API_RERANKER_PROVIDER": "rrf",
+        "REMEMBER_API_RERANKER_1_PROVIDER": "rrf",
+    }
+    try:
+        with patch.dict(os.environ, env, clear=False):
+            clear_config_cache()
+            encoder = create_cross_encoder_from_env()
+    finally:
+        clear_config_cache()
+
+    assert isinstance(encoder, MultiCrossEncoder)
+
+
+def test_missing_member_setting_names_the_indexed_env_var():
+    """A chain misconfiguration points at the exact indexed variable."""
+    env = {
+        "REMEMBER_API_RERANKER_1_PROVIDER": "tei",  # no _1_TEI_URL
+    }
+    with patch.dict(os.environ, env, clear=False):
+        member = RememberConfig.from_env().reranker_members[0]
+
+    with pytest.raises(ValueError, match="REMEMBER_API_RERANKER_1_TEI_URL"):
+        create_cross_encoder(member)
+
+
+def test_multi_requires_at_least_two_members():
+    with pytest.raises(ValueError, match="at least two members"):
+        MultiCrossEncoder([RRFPassthroughCrossEncoder()])
+
+
+# ── failover ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_healthy_primary_serves_and_no_fallback_is_touched():
+    primary = _FakeCrossEncoder("primary", scores=[0.9, 0.1])
+    fallback = _FakeCrossEncoder("fallback", scores=[0.5, 0.5])
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    assert await chain.predict(PAIRS) == [0.9, 0.1]
+    assert fallback.predict_calls == 0
+    assert chain.provider_name == "primary"
+
+
+@pytest.mark.asyncio
+async def test_unreachable_primary_falls_over_to_the_next_member():
+    """The issue's case: recall keeps its answer instead of raising."""
+    primary = _FakeCrossEncoder("primary", predict_error=TimeoutError("connect timeout"))
+    fallback = RRFPassthroughCrossEncoder()
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    scores = await chain.predict(PAIRS)
+
+    assert scores == [0.5, 0.5]  # neutral — the fusion order survives
+    assert chain.provider_name == "rrf"  # reported as passthrough for downstream scoring
+
+
+@pytest.mark.asyncio
+async def test_failover_warning_names_the_recall(caplog):
+    """The warning carries the recall id, so it joins that recall's log lines (#6072)."""
+    chain = MultiCrossEncoder(
+        [_FakeCrossEncoder("primary", predict_error=TimeoutError("boom")), RRFPassthroughCrossEncoder()]
+    )
+    await chain.initialize()
+    token = recall_log_id.set("bank1234-42-abc123")
+    try:
+        await chain.predict(PAIRS)
+    finally:
+        recall_log_id.reset(token)
+
+    assert "[RECALL bank1234-42-abc123] Reranker member 0 (primary) failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wrong_length_scores_fail_over():
+    """A member that answers with the wrong number of scores is unusable, not fatal."""
+    primary = _FakeCrossEncoder("primary", scores=[0.9])  # one score for two pairs
+    fallback = _FakeCrossEncoder("fallback", scores=[0.4, 0.6])
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    assert await chain.predict(PAIRS) == [0.4, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_all_members_failing_raises_the_last_error():
+    primary = _FakeCrossEncoder("primary", predict_error=TimeoutError("connect timeout"))
+    fallback = _FakeCrossEncoder("fallback", predict_error=RuntimeError("404 Not Found"))
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    with pytest.raises(RuntimeError, match="404 Not Found"):
+        await chain.predict(PAIRS)
+
+
+@pytest.mark.asyncio
+async def test_a_member_that_fails_to_initialize_is_not_fatal():
+    """Startup tolerates a member that is down, and retries it once its cooldown ends."""
+    primary = _FakeCrossEncoder("primary", scores=[0.9, 0.1], init_error=ConnectionError("refused"))
+    fallback = _FakeCrossEncoder("fallback", scores=[0.4, 0.6])
+    chain = MultiCrossEncoder([primary, fallback])
+
+    await chain.initialize()  # must not raise
+
+    assert primary.init_calls == 1
+    assert await chain.predict(PAIRS) == [0.4, 0.6]
+    assert primary.init_calls == 1  # benched: not retried inside the cooldown
+
+    with patch(
+        "remember_api.engine.cross_encoder.time.monotonic",
+        lambda: 1e12,  # far past the cooldown
+    ):
+        assert await chain.predict(PAIRS) == [0.4, 0.6]
+    assert primary.init_calls == 2  # retried on use, then failed over again
+
+
+@pytest.mark.asyncio
+async def test_members_initialize_once_when_healthy():
+    primary = _FakeCrossEncoder("primary", scores=[0.9, 0.1])
+    fallback = _FakeCrossEncoder("fallback", scores=[0.4, 0.6])
+    chain = MultiCrossEncoder([primary, fallback])
+
+    await chain.initialize()
+    await chain.predict(PAIRS)
+    await chain.predict(PAIRS)
+
+    assert primary.init_calls == 1
+    assert fallback.init_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_chain_handles_its_own_blocking_member_init():
+    """MultiCrossEncoder offloads local members itself, so callers never thread it."""
+    chain = MultiCrossEncoder([RRFPassthroughCrossEncoder(), RRFPassthroughCrossEncoder()])
+    assert chain.blocking_init is False
+
+
+@pytest.mark.asyncio
+async def test_local_rerank_timeout_falls_over_to_the_next_member():
+    """A local member that exhausts its wall-clock budget (#4696) is a member
+    failure like any other: the chain tries the next one rather than returning
+    the partial scores."""
+    slow_local = _FakeCrossEncoder(
+        "local",
+        predict_error=RerankTimeoutError([0.9, None], timeout=300.0, model_name="big-reranker"),
+    )
+    backup = _FakeCrossEncoder("cohere", scores=[0.2, 0.8])
+    chain = MultiCrossEncoder([slow_local, backup])
+    await chain.initialize()
+
+    assert await chain.predict(PAIRS) == [0.2, 0.8]
+    assert backup.predict_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_rerank_timeout_surfaces_when_it_is_the_last_member():
+    """With no member left to try, the timeout reaches the caller with its partial
+    scores intact — that is what lets rerank() keep the unscored tail in RRF order."""
+    exc = RerankTimeoutError([0.9, None], timeout=300.0, model_name="big-reranker")
+    chain = MultiCrossEncoder(
+        [_FakeCrossEncoder("cohere", predict_error=RuntimeError("down")), _FakeCrossEncoder("local", predict_error=exc)]
+    )
+    await chain.initialize()
+
+    with pytest.raises(RerankTimeoutError) as excinfo:
+        await chain.predict(PAIRS)
+    assert excinfo.value.scores == [0.9, None]
+
+
+# ── cooldown (issue #6074) ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_failed_member_is_skipped_until_its_cooldown_ends():
+    """A dead primary costs one request per cooldown, not every recall."""
+    primary = _FakeCrossEncoder("primary", predict_error=TimeoutError("connect timeout"))
+    fallback = _FakeCrossEncoder("fallback", scores=[0.5, 0.5])
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    clock = [1000.0]
+    with patch("remember_api.engine.cross_encoder.time.monotonic", lambda: clock[0]):
+        await chain.predict(PAIRS)
+        await chain.predict(PAIRS)
+        assert primary.predict_calls == 1  # second request went straight to the fallback
+
+        # Cooldown over and the primary is back: the next request probes and uses it.
+        clock[0] += MultiCrossEncoder.MEMBER_COOLDOWN_SECONDS + 1
+        primary._predict_error = None
+        primary._scores = [0.9, 0.1]
+        assert await chain.predict(PAIRS) == [0.9, 0.1]
+        assert await chain.predict(PAIRS) == [0.9, 0.1]
+        assert primary.predict_calls == 3
+        assert fallback.predict_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_benched_members_are_still_tried_when_everything_else_fails():
+    """Benching reorders the chain; it never removes the last chance to answer."""
+    primary = _FakeCrossEncoder("primary", predict_error=TimeoutError("connect timeout"))
+    fallback = _FakeCrossEncoder("fallback", predict_error=RuntimeError("down"))
+    chain = MultiCrossEncoder([primary, fallback])
+    await chain.initialize()
+
+    with pytest.raises(RuntimeError):
+        await chain.predict(PAIRS)
+    primary._predict_error = None
+    primary._scores = [0.9, 0.1]
+    assert await chain.predict(PAIRS) == [0.9, 0.1]

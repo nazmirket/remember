@@ -65,7 +65,7 @@ prettier_cmd() {
 # The two git lookups run side by side: each can take a second to start on macOS.
 # (Integrations used to be compared against HEAD only, and everything else was
 # always linted.)
-INTEGRATIONS_DIR="$REPO_ROOT/hindsight-integrations"
+INTEGRATIONS_DIR="$REPO_ROOT/remember-integrations"
 if [ -n "$CI" ] || [ -n "$LINT_ALL" ] || [ -n "$LINT_ALL_INTEGRATIONS" ]; then
     LINT_ALL=1
 else
@@ -105,10 +105,10 @@ if changed uv.lock package-lock.json pyproject.toml package.json .python-version
     LINT_ALL=1
 fi
 
-# The Python packages import each other (hindsight-dev and hindsight-embed use
-# hindsight_api), so a change to any of them type-checks all three.
-PYTHON_PACKAGES=(hindsight-api-slim/ hindsight-dev/ hindsight-embed/ hindsight-clients/python/)
-if changed "${PYTHON_PACKAGES[@]}" hindsight-integrations/; then
+# The Python packages import each other (remember-dev and remember-embed use
+# remember_api), so a change to any of them type-checks all three.
+PYTHON_PACKAGES=(remember-api-slim/ remember-dev/ remember-embed/ remember-clients/python/)
+if changed "${PYTHON_PACKAGES[@]}" remember-integrations/; then
     echo "  Syncing Python dependencies..."
     # Run uv sync first so the environment is complete before the tools run.
     # Keep pre-commit from rewriting uv.lock. Dependency changes should update
@@ -126,28 +126,28 @@ echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
 if changed "${PYTHON_PACKAGES[@]}"; then
-    # Python hindsight-api-slim tasks
-    run_task "ruff-api-check" "$REPO_ROOT/hindsight-api-slim" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-api-format" "$REPO_ROOT/hindsight-api-slim" "$VENV_BIN/ruff format ."
-    run_task "ty-api" "$REPO_ROOT/hindsight-api-slim" "$VENV_BIN/ty check hindsight_api"
+    # Python remember-api-slim tasks
+    run_task "ruff-api-check" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-api-format" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ruff format ."
+    run_task "ty-api" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ty check remember_api"
 
-    # Python hindsight-dev tasks
-    run_task "ruff-dev-check" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-dev-format" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ruff format ."
-    run_task "ty-dev" "$REPO_ROOT/hindsight-dev" "$VENV_BIN/ty check hindsight_dev"
+    # Python remember-dev tasks
+    run_task "ruff-dev-check" "$REPO_ROOT/remember-dev" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-dev-format" "$REPO_ROOT/remember-dev" "$VENV_BIN/ruff format ."
+    run_task "ty-dev" "$REPO_ROOT/remember-dev" "$VENV_BIN/ty check remember_dev"
 
-    # Python hindsight-embed tasks
-    run_task "ruff-embed-check" "$REPO_ROOT/hindsight-embed" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-embed-format" "$REPO_ROOT/hindsight-embed" "$VENV_BIN/ruff format ."
-    run_task "ty-embed" "$REPO_ROOT/hindsight-embed" "$VENV_BIN/ty check hindsight_embed"
+    # Python remember-embed tasks
+    run_task "ruff-embed-check" "$REPO_ROOT/remember-embed" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-embed-format" "$REPO_ROOT/remember-embed" "$VENV_BIN/ruff format ."
+    run_task "ty-embed" "$REPO_ROOT/remember-embed" "$VENV_BIN/ty check remember_embed"
 fi
 
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
-if [ -d "$INTEGRATIONS_DIR" ] && changed hindsight-integrations/; then
+if [ -d "$INTEGRATIONS_DIR" ] && changed remember-integrations/; then
     for dir in "$INTEGRATIONS_DIR"/*/; do
         dir="${dir%/}"
         name="${dir##*/}"
-        changed "hindsight-integrations/$name/" || continue
+        changed "remember-integrations/$name/" || continue
 
         if [ -f "$dir/pyproject.toml" ]; then
             run_task "ruff-int-$name-check" "$dir" "$VENV_BIN/ruff check --fix --config $REPO_ROOT/ruff.toml ."

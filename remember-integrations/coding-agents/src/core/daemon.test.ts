@@ -1,0 +1,328 @@
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveConfig } from "./config";
+import { execFileSync } from "node:child_process";
+import {
+  daemonEnv,
+  detectLlm,
+  ensureDaemon,
+  isRememberCheckout,
+  startDaemonDetached,
+} from "./daemon";
+
+// A daemon-mode ensure has to clear `preflightDaemon`, which shells out to `uv`.
+// Neither is guaranteed on a test runner, so stub the subprocess layer; every
+// other use of it in daemon.ts sits behind an explicitly injected spawn.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFileSync: vi.fn(() => "") };
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("connection modes", () => {
+  it("daemon mode derives the URL from apiPort", () => {
+    // Resolving here (rather than at each client construction) is what lets the eight existing
+    // call sites stay untouched.
+    const cfg = resolveConfig({ serverMode: "daemon" });
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
+  });
+
+  it("uses a custom daemon port", () => {
+    expect(resolveConfig({ serverMode: "daemon", apiPort: 9999 }).apiUrl).toBe(
+      "http://127.0.0.1:9999"
+    );
+  });
+
+  it.each([
+    { serverMode: "cloud" as const },
+    { serverMode: "self-hosted" as const },
+    { apiUrl: "https://example.com" },
+  ])("rejects remote memory service settings", (raw) => {
+    expect(() => resolveConfig(raw)).toThrow("Only the local daemon is supported");
+  });
+
+  it("defaults to the local daemon and disables upstream automatic updates", () => {
+    const cfg = resolveConfig({});
+    expect(cfg.serverMode).toBe("daemon");
+    expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
+  });
+
+  // 9077, not remember-all's 8888: 8888 is the conventional port for a server the user runs, and
+  // a daemon must never squat on it.
+  it("defaults the daemon port to 9077", () => {
+    expect(resolveConfig({ serverMode: "daemon" }).apiPort).toBe(9077);
+  });
+});
+
+describe("detectLlm", () => {
+  it("prefers an explicit provider, including one it knows nothing about", () => {
+    const llm = detectLlm({
+      REMEMBER_API_LLM_PROVIDER: "ollama",
+      OPENAI_API_KEY: "sk-ignored",
+    } as NodeJS.ProcessEnv);
+    expect(llm?.provider).toBe("ollama");
+  });
+
+  it("uses the configured Remember provider and key", () => {
+    const llm = detectLlm({
+      REMEMBER_API_LLM_PROVIDER: "ollama",
+      REMEMBER_API_LLM_API_KEY: "new",
+    });
+    expect(llm).toMatchObject({
+      provider: "ollama",
+      apiKey: "new",
+      source: "REMEMBER_API_LLM_PROVIDER",
+    });
+  });
+
+  it("falls back to a well-known key env", () => {
+    const llm = detectLlm({ ANTHROPIC_API_KEY: "sk-ant" } as NodeJS.ProcessEnv);
+    expect(llm?.provider).toBe("anthropic");
+    expect(llm?.apiKey).toBe("sk-ant");
+  });
+
+  it("ignores a blank key", () => {
+    const llm = detectLlm({ OPENAI_API_KEY: "   " } as NodeJS.ProcessEnv);
+    expect(llm?.provider).not.toBe("openai");
+  });
+
+  it("uses Codex when Claude Code and API keys are unavailable", () => {
+    vi.mocked(execFileSync).mockImplementationOnce(() => {
+      throw new Error("claude not found");
+    });
+    expect(detectLlm({} as NodeJS.ProcessEnv)?.provider).toBe("openai-codex");
+  });
+});
+
+describe("daemonEnv", () => {
+  const cfg = resolveConfig({ serverMode: "daemon", daemonIdleTimeout: 42 });
+
+  it("passes the idle timeout through under the daemon's own env name", () => {
+    expect(daemonEnv(cfg, {} as NodeJS.ProcessEnv).REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT).toBe("42");
+  });
+
+  // It used to send 300 whether or not anyone asked, quietly retiring a SHARED daemon out from
+  // under an idle session — while every other Remember integration ships 0 (never exits).
+  it("says nothing about the idle timeout when it is unset, leaving the daemon its own default", () => {
+    const env = daemonEnv(resolveConfig({ serverMode: "daemon" }), {} as NodeJS.ProcessEnv);
+    expect(env).not.toHaveProperty("REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT");
+  });
+
+  // Forwarding the whole REMEMBER_API_* namespace means a new server-side knob needs no change
+  // here to reach the daemon.
+  it("forwards arbitrary REMEMBER_API_* settings", () => {
+    const env = daemonEnv(cfg, {
+      REMEMBER_API_EMBEDDINGS_PROVIDER: "tei",
+      UNRELATED: "no",
+    } as NodeJS.ProcessEnv);
+    expect(env.REMEMBER_API_EMBEDDINGS_PROVIDER).toBe("tei");
+    expect(env.UNRELATED).toBeUndefined();
+  });
+
+  it("forces both identity prefixes to local host and the same profile database", () => {
+    const env = daemonEnv(cfg, {
+      REMEMBER_API_HOST: "0.0.0.0",
+      REMEMBER_API_DATABASE_URL: "postgresql://remote/db",
+    });
+    expect(env.REMEMBER_API_HOST).toBe("127.0.0.1");
+    expect(env.REMEMBER_API_DATABASE_URL).toBe(env.REMEMBER_API_DATABASE_URL);
+    expect(env.REMEMBER_API_DATABASE_URL).toMatch(/^pg0:\/\//);
+  });
+
+  it("binds locally even when the inherited environment requests a public host", () => {
+    expect(daemonEnv(cfg, { REMEMBER_API_HOST: "0.0.0.0" }).REMEMBER_API_HOST).toBe("127.0.0.1");
+  });
+});
+
+describe("Remember checkout", () => {
+  it("requires both the embed package and the sibling API source", () => {
+    const root = mkdtempSync(join(tmpdir(), "remember-fork-"));
+    try {
+      const embed = join(root, "remember-embed");
+      mkdirSync(embed);
+      writeFileSync(join(embed, "pyproject.toml"), "");
+      expect(isRememberCheckout(undefined)).toBe(false);
+      expect(isRememberCheckout(embed)).toBe(false);
+      mkdirSync(join(root, "remember-api-slim"));
+      writeFileSync(join(root, "remember-api-slim", "pyproject.toml"), "");
+      expect(isRememberCheckout(embed)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ensureDaemon", () => {
+  /**
+   * The persistent-plugin hosts (dsh, opencode) fire several ensure points in the same tick: a
+   * SessionStart per session plus a Stop per finished turn. All of them see the same dead port, so
+   * without a shared guard each spawns its own starter, and the starters that lose the profile's
+   * file lock sit there for the full 300 s budget before failing (#1155, #3100). Collapsing the
+   * burst onto one spawn is the whole point of the guard.
+   */
+  it("collapses a concurrent burst onto a single start", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(new Error("ECONNREFUSED")))
+    );
+    const child = { on: vi.fn(), unref: vi.fn() };
+    const spawnFn = vi.fn(() => child);
+    const cfg = resolveConfig({ serverMode: "daemon" });
+
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        ensureDaemon(cfg, "dsh", {
+          waitMs: 0,
+          spawnFn: spawnFn as unknown as typeof import("node:child_process").spawn,
+        })
+      )
+    );
+
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+  });
+
+  // The guard must not outlive its attempt: a later turn that still finds the port dead has to
+  // start a fresh one rather than inheriting a spent attempt that already gave up.
+  it("starts again once the previous attempt has settled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(new Error("ECONNREFUSED")))
+    );
+    const child = { on: vi.fn(), unref: vi.fn() };
+    const spawnFn = vi.fn(() => child);
+    const cfg = resolveConfig({ serverMode: "daemon" });
+    const spawn = spawnFn as unknown as typeof import("node:child_process").spawn;
+
+    await ensureDaemon(cfg, "dsh", { waitMs: 0, spawnFn: spawn });
+    await ensureDaemon(cfg, "dsh", { waitMs: 0, spawnFn: spawn });
+
+    expect(spawnFn).toHaveBeenCalledTimes(2);
+  });
+
+  // Joining must not cost a caller patience. The shared attempt belongs to the leader, so a
+  // follower whose own budget is larger would otherwise return the instant that leader gave up —
+  // and spend the rest of its turn making memory calls against a daemon still coming up.
+  it("spends what is left of its own budget after joining", async () => {
+    const probe = vi.fn(() => Promise.reject(new Error("ECONNREFUSED")));
+    vi.stubGlobal("fetch", probe);
+    const child = { on: vi.fn(), unref: vi.fn() };
+    const spawnFn = vi.fn(() => child);
+    const cfg = resolveConfig({ serverMode: "daemon" });
+    const spawn = spawnFn as unknown as typeof import("node:child_process").spawn;
+
+    // The first call takes the guard with a zero budget and settles at once; the second has 100 ms
+    // to spend and must go on polling after that first attempt is gone.
+    await Promise.all([
+      ensureDaemon(cfg, "dsh", { waitMs: 0, spawnFn: spawn }),
+      ensureDaemon(cfg, "dsh", { waitMs: 100, spawnFn: spawn }),
+    ]);
+
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    // One probe each up front, plus the follower's own poll — the shorter-lived leader has none.
+    expect(probe.mock.calls.length).toBeGreaterThan(2);
+  });
+});
+
+/**
+ * Daemon parity across harnesses (#3524).
+ *
+ * The ensure points were written for the fresh-process hook harnesses and lived in their hook
+ * wrappers, so every harness added since — the persistent-plugin hosts, which call the shared
+ * lifecycle directly — silently shipped without one. In daemon mode that means every request fails
+ * with ECONNREFUSED and nothing ever starts a daemon; dsh shipped that way in 0.3.4.
+ *
+ * A per-harness unit test can't catch this: the harness that forgets is by definition the one whose
+ * test nobody wrote. So this asserts the shape instead — a module that builds a client is a place a
+ * request originates, and every one of them either ensures a daemon itself or delegates to
+ * something that does. Adding a harness that does neither fails here, and an entrypoint that
+ * genuinely must not start one has to say why in EXEMPT.
+ */
+describe("every harness entrypoint reaches a daemon", () => {
+  const SRC = fileURLToPath(new URL("..", import.meta.url));
+
+  /** Entrypoints that build a client but deliberately do NOT ensure a daemon, and why. */
+  const EXEMPT: Record<string, string> = {
+    "status.ts": "diagnostic — reports what is running; starting one would falsify the report",
+    "deepen.ts": "spawned by the seed, which already ensured the daemon it inherits",
+    "mcp-server.ts": "child of a hook harness whose SessionStart ensured the daemon first",
+    "core/hook.ts":
+      "the prompt path, deliberately: a cold start outlives the hook budget and stalls the turn",
+    "core/host-client.ts":
+      "the shared builder itself, not an entrypoint — its CALLERS are the request origins this checks",
+  };
+
+  /** A module is a request origin if it constructs a client directly OR asks the shared builder
+   *  (core/host-client.ts) for one — the long-lived hosts do the latter, and reading only for
+   *  `new RememberClient(` would silently stop checking every one of them. */
+  const buildsClient = (src: string): boolean =>
+    src.includes("new RememberClient(") || src.includes("resolveHostMemory(");
+
+  function sourceFiles(dir: string, prefix = ""): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory())
+        return entry.name === "e2e" ? [] : sourceFiles(join(dir, entry.name), rel);
+      return entry.name.endsWith(".ts") && !entry.name.includes(".test.") ? [rel] : [];
+    });
+  }
+
+  it("has no client-building module that neither ensures a daemon nor delegates to one", () => {
+    const unreached = sourceFiles(SRC).filter((rel) => {
+      if (rel in EXEMPT) return false;
+      const src = readFileSync(join(SRC, rel), "utf8");
+      if (!buildsClient(src)) return false;
+      // RuntimeCore is the persistent-plugin hosts' shared lifecycle; it ensures at both points.
+      return !src.includes("ensureDaemon") && !src.includes("RuntimeCore");
+    });
+    expect(unreached).toEqual([]);
+  });
+
+  // An exemption for a file that no longer builds a client is a stale claim about live code.
+  it("keeps no exemption for a module that stopped building a client", () => {
+    const stale = Object.keys(EXEMPT).filter(
+      (rel) => !buildsClient(readFileSync(join(SRC, rel), "utf8"))
+    );
+    expect(stale).toEqual([]);
+  });
+});
+
+describe("startDaemonDetached", () => {
+  it("spawns the starter detached, so it outlives the hook", () => {
+    const child = { on: vi.fn(), unref: vi.fn() };
+    const spawn = vi.fn(() => child);
+    startDaemonDetached(
+      resolveConfig({ serverMode: "daemon" }),
+      "claude-code",
+      spawn as unknown as typeof import("node:child_process").spawn
+    );
+    const [cmd, args, opts] = spawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { detached: boolean; stdio: string; windowsHide: boolean },
+    ];
+    expect(cmd).toBe("node");
+    expect(args[0]).toMatch(/daemon-start\.js$/);
+    expect(opts.detached).toBe(true);
+    expect(opts.stdio).toBe("ignore");
+    expect(opts.windowsHide).toBe(true);
+    // An async spawn 'error' event would otherwise crash the hook process.
+    expect(child.on).toHaveBeenCalledWith("error", expect.any(Function));
+    expect(child.unref).toHaveBeenCalled();
+  });
+
+  it("keeps daemon subprocess windows hidden", () => {
+    const bundled = readFileSync(
+      fileURLToPath(new URL("./local-server/server.ts", import.meta.url)),
+      "utf8"
+    );
+    const spawns = bundled.split("\n").filter((line) => /\bspawn\(/.test(line));
+    expect(spawns.length).toBeGreaterThan(0);
+    for (const call of spawns) expect(call).toContain("windowsHide: true");
+  });
+});

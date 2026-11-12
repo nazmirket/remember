@@ -1,0 +1,189 @@
+"""Reflect/mental-model ``max_tokens`` is a page-length target, not a transport cap (#3365).
+
+On thinking models the provider's output budget is consumed by reasoning tokens,
+so passing the page ``max_tokens`` straight through as ``max_completion_tokens``
+truncates the visible answer mid-word. These tests pin the decoupled contract:
+
+- ``build_final_prompt`` communicates the length as a prompt directive.
+- ``reflect_max_completion_tokens`` config is uncapped (None) by default and
+  overridable via env.
+- The forced synthesis passes the *config* cap (None by default), never the page
+  budget.
+- ``GeminiLLM`` logs a warning instead of silently returning MAX_TOKENS-truncated
+  text.
+"""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from remember_api.config import RememberConfig, clear_config_cache
+from remember_api.engine.llm_interface import LLMToolChoice
+from remember_api.engine.reflect.agent import run_reflect_agent
+from remember_api.engine.reflect.prompts import build_final_prompt
+from remember_api.engine.response_models import LLMCallResult
+
+BANK = {"name": "TestBank", "mission": "Testing"}
+
+
+# --------------------------------------------------------------------------- #
+# Prompt directive
+# --------------------------------------------------------------------------- #
+def test_build_final_prompt_includes_length_directive():
+    prompt = build_final_prompt("q", [], BANK, max_tokens=3072)
+    assert "## Length" in prompt
+    assert "approximately 3072 tokens" in prompt
+    # The whole point: steer toward a clean stop, never a hard mid-word cut.
+    assert "NEVER stop" in prompt
+
+
+def test_build_final_prompt_omits_length_directive_when_unset():
+    prompt = build_final_prompt("q", [], BANK)
+    assert "## Length" not in prompt
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+def test_reflect_max_completion_tokens_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("REMEMBER_API_REFLECT_MAX_COMPLETION_TOKENS", raising=False)
+    config = RememberConfig.from_env()
+    assert config.reflect_max_completion_tokens is None
+
+
+def test_reflect_max_completion_tokens_env_override(monkeypatch):
+    monkeypatch.setenv("REMEMBER_API_REFLECT_MAX_COMPLETION_TOKENS", "16000")
+    config = RememberConfig.from_env()
+    assert config.reflect_max_completion_tokens == 16000
+
+
+# --------------------------------------------------------------------------- #
+# Forced synthesis honors the config cap, not the page budget
+# --------------------------------------------------------------------------- #
+def _mock_llm(final_answer: str = "Synthesized final answer."):
+    from remember_api.engine.response_models import TokenUsage
+
+    llm = MagicMock()
+    llm.provider = "openai"
+    llm.model = "gpt-4o-mini"
+    llm.call = AsyncMock(
+        return_value=LLMCallResult(
+            content=final_answer, usage=TokenUsage(input_tokens=40, output_tokens=12, total_tokens=52)
+        )
+    )
+    return llm
+
+
+def _mock_functions():
+    return {
+        "read_mental_models_fn": AsyncMock(return_value={"mental_models": []}),
+        "search_mental_models_fn": AsyncMock(
+            return_value={"mental_models": [{"id": "mm-1", "name": "Prefs", "content": "Fresh.", "is_stale": False}]}
+        ),
+        "search_observations_fn": AsyncMock(return_value={"observations": []}),
+        "recall_fn": AsyncMock(return_value={"memories": []}),
+        "expand_fn": AsyncMock(return_value={"memories": []}),
+    }
+
+
+def _stop_after_evidence(llm):
+    """Turn 0 tool-calls, turn 1 stops with plain text -> forced final synthesis."""
+    from remember_api.engine.response_models import LLMToolCall, LLMToolCallResult
+
+    llm.call_with_tools = AsyncMock(
+        side_effect=[
+            LLMToolCallResult(
+                tool_calls=[LLMToolCall(id="1", name="search_mental_models", arguments={"query": "q"})],
+                finish_reason="tool_calls",
+            ),
+            LLMToolCallResult(tool_calls=[], content="I have enough.", finish_reason="stop"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_forced_synthesis_uncapped_by_default(monkeypatch):
+    monkeypatch.delenv("REMEMBER_API_REFLECT_MAX_COMPLETION_TOKENS", raising=False)
+    clear_config_cache()
+    try:
+        llm = _mock_llm()
+        _stop_after_evidence(llm)
+        result = await run_reflect_agent(
+            llm_config=llm,
+            bank_id="b",
+            query="q",
+            bank_profile=BANK,
+            has_mental_models=True,
+            budget="low",
+            max_tokens=64,
+            **_mock_functions(),
+        )
+        assert result.text == "Synthesized final answer."
+        # Uncapped transport; page length reached the model via the prompt.
+        assert llm.call.await_args.kwargs["max_completion_tokens"] is None
+        assert "approximately 64 tokens" in llm.call.await_args.kwargs["messages"][1]["content"]
+    finally:
+        clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_forced_synthesis_uses_config_cap_when_set(monkeypatch):
+    monkeypatch.setenv("REMEMBER_API_REFLECT_MAX_COMPLETION_TOKENS", "12345")
+    clear_config_cache()
+    try:
+        llm = _mock_llm()
+        _stop_after_evidence(llm)
+        await run_reflect_agent(
+            llm_config=llm,
+            bank_id="b",
+            query="q",
+            bank_profile=BANK,
+            has_mental_models=True,
+            budget="low",
+            max_tokens=64,
+            **_mock_functions(),
+        )
+        # The transport cap is the operator-set ceiling, still independent of the
+        # page budget (64).
+        assert llm.call.await_args.kwargs["max_completion_tokens"] == 12345
+    finally:
+        clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_loop_uses_config_cap(monkeypatch):
+    """The closing ``done`` gets the synthesis cap; a loop turn, which only names a search, 1024.
+
+    Left unset the closing call fell through to the provider's own default, which on
+    Anthropic is a fixed number (the Messages API requires ``max_tokens``) — truncating a
+    long ``done`` payload before the answer field was written (#4437). A loop turn's reply
+    is held to a schema and only names a search, so it is capped well below that: a
+    schema-held reply that falls into a repetition loop otherwise runs to the cap.
+    """
+    monkeypatch.setenv("REMEMBER_API_REFLECT_MAX_COMPLETION_TOKENS", "12345")
+    clear_config_cache()
+    try:
+        llm = _mock_llm()
+        _stop_after_evidence(llm)
+        await run_reflect_agent(
+            llm_config=llm,
+            bank_id="b",
+            query="q",
+            bank_profile=BANK,
+            has_mental_models=True,
+            budget="low",
+            max_tokens=64,
+            **_mock_functions(),
+        )
+        calls = llm.call_with_tools.await_args_list
+        closing = [c for c in calls if c.kwargs["tool_choice"] == LLMToolChoice.named("done")]
+        assert closing and all(c.kwargs["max_completion_tokens"] == 12345 for c in closing)
+        assert all(c.kwargs["max_completion_tokens"] == 1024 for c in calls if c not in closing)
+        # A capped turn cannot pick done, whose page the cap would cut off; it is still declared,
+        # so every turn's prompt prefix is the same.
+        for c in calls:
+            if c not in closing:
+                assert "done" not in {t["function"]["name"] for t in c.kwargs["tools"]}
+            assert "done" in {t["function"]["name"] for t in c.kwargs["declared_tools"]}
+    finally:
+        clear_config_cache()

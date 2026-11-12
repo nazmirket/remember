@@ -1,31 +1,35 @@
-# Local Hindsight memory
+# Remember
 
-A headless, persistent memory layer for Codex and Claude Code. Both agents share a local API daemon and a local pg0 database. The memory engine retains and retrieves observations, supports reasoning and Pages, and keeps the background worker that maintains them.
+Remember is a headless, persistent memory layer for Codex and Claude Code. Both agents share a local API daemon and a local pg0 database. The memory engine retains and retrieves observations, supports reasoning and Pages, and keeps the background worker that maintains them.
+
+Remember is maintained at [nazmirket/remember](https://github.com/nazmirket/remember). It originated from [Hindsight](https://github.com/vectorize-io/hindsight), created by Vectorize, and is developed as its own project. The original copyright notice and MIT license are preserved in [LICENSE](LICENSE).
 
 The service runs on demand on loopback. Memory storage is local; inference can use OpenAI, Anthropic, their Codex or Claude Code adapters, or a local model. A hosted provider receives the content it processes. Server logs, metrics, and optional in-process traces stay local.
 
+The optional `hindsight` decision-model provider uses Vectorize's Hindsight Inference service. It is a third-party service and is used only when explicitly configured.
+
 ## Setup
 
-See [the coding-agent setup guide](hindsight-integrations/coding-agents/README.md) for prerequisites, installation, configuration and diagnostics. Install from this checkout so the daemon runs this fork's API and embedded manager.
+See [the coding-agent setup guide](remember-integrations/coding-agents/README.md) for prerequisites, installation, configuration and diagnostics. Install from this checkout so the daemon runs Remember's API and embedded manager.
+
+## Configuration
+
+Remember stores its configuration and local state in `~/.remember` by default. Set `REMEMBER_HOME` to choose another location or `REMEMBER_CONFIG` to select the coding-agent configuration file. Command-line tools and environment settings use the `remember` and `REMEMBER_` prefixes.
 
 ## Development
 
-- `hindsight-api-slim/`: API, memory engine, worker and database migrations.
-- `hindsight-embed/`: local daemon and profile lifecycle.
-- `hindsight-integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
-- `hindsight-system-tests/`: blackbox memory tests using local database and deterministic model stubs.
-- `hindsight-clients/python/` and `hindsight-cli/`: the system-test client and standalone command-line tool.
+- `remember-api-slim/`: API, memory engine, worker and database migrations.
+- `remember-embed/`: local daemon and profile lifecycle.
+- `remember-integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
+- `remember-system-tests/`: blackbox memory tests using local database and deterministic model stubs.
+- `remember-clients/python/` and `remember-cli/`: the system-test client and standalone command-line tool.
 - `schemas/`: generated local API schema.
 
 ```sh
-(cd hindsight-integrations/coding-agents && npm ci && npm test && npm run build)
-(cd hindsight-api-slim && uv sync --frozen --extra embedded-db)
-(cd hindsight-system-tests && uv run pytest tests/)
-PYTHONPATH=hindsight-embed .venv/bin/python -m pytest hindsight-embed/tests
+(cd remember-integrations/coding-agents && npm ci && npm test && npm run build)
+(cd remember-api-slim && uv sync --frozen --extra embedded-db)
+(cd remember-system-tests && uv run pytest tests/)
+PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests
 ```
 
 For direct API development, `./scripts/dev/start.sh` starts the API on loopback. Run `./scripts/hooks/lint.sh` after Python or TypeScript changes.
-
-## Upgrading from earlier fork versions
-
-This version removes file-retain uploads, hosted file parsers, separate knowledge-bank access, and the CLI filesystem mirror. Existing database tables and stored files are not deleted. Before upgrading, finish queued ingestion and export any knowledge-bank material you need using the earlier version; the new API no longer exposes those banks or searches their linked passages. Old knowledge-bank and file-upload enablement settings do not re-enable the removed APIs. Pages and ordinary text memories remain available.

@@ -1,0 +1,66 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from remember_api.engine.providers.openai_compatible_llm import OpenAICompatibleLLM
+
+
+def _make_minimax(extra_body=None, model: str = "MiniMax-M3") -> OpenAICompatibleLLM:
+    return OpenAICompatibleLLM(
+        provider="minimax",
+        api_key="test-key",
+        base_url="",
+        model=model,
+        extra_body=extra_body,
+    )
+
+
+def _text_response(content: str = "ok"):
+    return SimpleNamespace(
+        error=None,
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=content, tool_calls=None, refusal=None),
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_minimax_call_disables_thinking_by_default():
+    llm = _make_minimax()
+    llm._client.chat.completions.create = AsyncMock(return_value=_text_response())
+
+    with patch("remember_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
+        await llm.call(messages=[{"role": "user", "content": "hi"}], max_retries=0)
+
+    assert llm._client.chat.completions.create.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_minimax_m31_call_uses_adaptive_thinking_by_default():
+    # M3.1 rejects thinking.type="disabled" with HTTP 400 (#5718).
+    llm = _make_minimax(model="MiniMax-M3.1-Flash-Preview")
+    llm._client.chat.completions.create = AsyncMock(return_value=_text_response())
+
+    with patch("remember_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
+        await llm.call(messages=[{"role": "user", "content": "hi"}], max_retries=0)
+
+    assert llm._client.chat.completions.create.call_args.kwargs["extra_body"] == {"thinking": {"type": "adaptive"}}
+
+
+@pytest.mark.asyncio
+async def test_minimax_call_preserves_configured_thinking_extra_body():
+    llm = _make_minimax(extra_body={"thinking": {"type": "enabled"}, "reasoning_split": True})
+    llm._client.chat.completions.create = AsyncMock(return_value=_text_response())
+
+    with patch("remember_api.engine.providers.openai_compatible_llm.get_metrics_collector"):
+        await llm.call(messages=[{"role": "user", "content": "hi"}], max_retries=0)
+
+    assert llm._client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "thinking": {"type": "enabled"},
+        "reasoning_split": True,
+    }

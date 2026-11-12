@@ -1,0 +1,46 @@
+"""The server must not carry extension implementations into its import graph.
+
+Extensions are resolved by import path at load time. Re-exporting a concrete
+implementation from ``remember_api.extensions`` would make that implementation's
+dependencies part of core's import graph, which is what kept the Supabase
+extension (and its JWT stack) inside every install before it moved to
+``remember-extensions/supabase-tenant``.
+"""
+
+from pathlib import Path
+
+import pytest
+
+import remember_api
+import remember_api.extensions as extensions
+
+_PACKAGE_ROOT = Path(remember_api.__file__).parent
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["ApiKeyTenantExtension", "MemoryDefenseRegexExtension", "SupabaseTenantExtension"],
+)
+def test_concrete_extensions_are_not_re_exported(name: str):
+    assert name not in extensions.__all__
+    assert not hasattr(extensions, name)
+
+
+def test_builtin_package_exports_only_the_bundled_extensions():
+    from remember_api.extensions import builtin
+
+    assert sorted(builtin.__all__) == ["ApiKeyTenantExtension", "MemoryDefenseRegexExtension"]
+
+
+def test_no_core_module_imports_jwt():
+    """`jwt` was a direct dependency solely for the Supabase extension.
+
+    The chatgpt provider is the one core user since: it verifies the Sign in with
+    ChatGPT ID token against OpenAI's JWKS.
+    """
+    importers = [
+        path.relative_to(_PACKAGE_ROOT).as_posix()
+        for path in _PACKAGE_ROOT.rglob("*.py")
+        if any(line.startswith(("import jwt", "from jwt ")) for line in path.read_text(encoding="utf-8").splitlines())
+    ]
+    assert importers == ["engine/providers/chatgpt_auth.py"]

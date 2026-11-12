@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Hindsight HTTP API",
-    "description": "HTTP API for Hindsight",
+    "title": "Remember HTTP API",
+    "description": "HTTP API for Remember",
     "contact": {
       "name": "Memory System"
     },
@@ -1227,7 +1227,7 @@
           "Banks"
         ],
         "summary": "Test the bank's LLM connectivity",
-        "description": "Probe the LLMs this bank would use for retain / consolidation / reflect with one minimal call each (configs shared across operations are probed once), so you can discover 'not configured / unreachable' instead of a silent stall. Deliberate action (makes a real provider call); not for polling. Returns status only \u2014 never the provider, model, endpoint, API key, or raw error. Disable with HINDSIGHT_API_ENABLE_BANK_LLM_HEALTH=false.",
+        "description": "Probe the LLMs this bank would use for retain / consolidation / reflect with one minimal call each (configs shared across operations are probed once), so you can discover 'not configured / unreachable' instead of a silent stall. Deliberate action (makes a real provider call); not for polling. Returns status only \u2014 never the provider, model, endpoint, API key, or raw error. Disable with REMEMBER_API_ENABLE_BANK_LLM_HEALTH=false.",
         "operationId": "test_bank_llm",
         "parameters": [
           {
@@ -4666,7 +4666,7 @@
           "Documents"
         ],
         "summary": "Get document change history",
-        "description": "What each change to a document did, newest first: every retain, append and reprocess (facts added and removed), every fact edit, invalidation, restore, delete, retag and per-fact observation clear (observations removed), and every consolidation run (observations created, updated and removed). Observations are rebuilt, not versioned, so this is the only record of the ones a change removed. Ids and counts only, with each id list capped at 100.\n\nRebuilt from the bank's async operations, which carry these events: it reaches back only as far as operations are kept (HINDSIGHT_API_OPERATION_RETENTION_DAYS, unlimited by default), and a change that ran without an operation is not in it \u2014 a synchronous retain (async=false), or a fact edit, delete or retag while auto-consolidation is off. A fact edit, delete or retag is recorded on the consolidation operation it queues. Clearing every observation in the bank is not listed. total, limit and offset count operations, not events.",
+        "description": "What each change to a document did, newest first: every retain, append and reprocess (facts added and removed), every fact edit, invalidation, restore, delete, retag and per-fact observation clear (observations removed), and every consolidation run (observations created, updated and removed). Observations are rebuilt, not versioned, so this is the only record of the ones a change removed. Ids and counts only, with each id list capped at 100.\n\nRebuilt from the bank's async operations, which carry these events: it reaches back only as far as operations are kept (REMEMBER_API_OPERATION_RETENTION_DAYS, unlimited by default), and a change that ran without an operation is not in it \u2014 a synchronous retain (async=false), or a fact edit, delete or retag while auto-consolidation is off. A fact edit, delete or retag is recorded on the consolidation operation it queues. Clearing every observation in the bank is not listed. total, limit and offset count operations, not events.",
         "operationId": "get_document_history",
         "parameters": [
           {
@@ -5263,10 +5263,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter by operation type: retain, consolidation, refresh_mental_model, file_convert_retain, webhook_delivery",
+              "description": "Filter by operation type: retain, consolidation, refresh_mental_model, webhook_delivery",
               "title": "Type"
             },
-            "description": "Filter by operation type: retain, consolidation, refresh_mental_model, file_convert_retain, webhook_delivery"
+            "description": "Filter by operation type: retain, consolidation, refresh_mental_model, webhook_delivery"
           },
           {
             "name": "limit",
@@ -7577,7 +7577,7 @@
           "Banks"
         ],
         "summary": "Get bank configuration",
-        "description": "Get fully resolved configuration for a bank including all hierarchical overrides (global \u2192 tenant \u2192 bank). The 'config' field contains all resolved config values. The 'overrides' field shows only bank-specific overrides. Always available: HINDSIGHT_API_ENABLE_BANK_CONFIG_API gates only the write operations on this resource.",
+        "description": "Get fully resolved configuration for a bank including all hierarchical overrides (global \u2192 tenant \u2192 bank). The 'config' field contains all resolved config values. The 'overrides' field shows only bank-specific overrides. Always available: REMEMBER_API_ENABLE_BANK_CONFIG_API gates only the write operations on this resource.",
         "operationId": "get_bank_config",
         "parameters": [
           {
@@ -7637,7 +7637,7 @@
           "Banks"
         ],
         "summary": "Update bank configuration",
-        "description": "Update configuration overrides for a bank. Only hierarchical behavioral settings can be overridden (retention parameters, recall settings, etc.). Keys can be provided in Python field format (retain_extraction_mode) or environment variable format (HINDSIGHT_API_RETAIN_EXTRACTION_MODE).",
+        "description": "Update configuration overrides for a bank. Only hierarchical behavioral settings can be overridden (retention parameters, recall settings, etc.). Keys can be provided in Python field format (retain_extraction_mode) or environment variable format (REMEMBER_API_RETAIN_EXTRACTION_MODE).",
         "operationId": "update_bank_config",
         "parameters": [
           {
@@ -8706,7 +8706,7 @@
           "LLM Traces"
         ],
         "summary": "List LLM request traces",
-        "description": "List traced LLM requests for a bank, ordered by most recent first. Requires LLM request tracing to be enabled (HINDSIGHT_API_LLM_TRACE_ENABLED). Requests older than HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS are deleted; `retention_days` in the response says how many days are kept (null = forever).",
+        "description": "List traced LLM requests for a bank, ordered by most recent first. Requires LLM request tracing to be enabled (REMEMBER_API_LLM_TRACE_ENABLED). Requests older than REMEMBER_API_LLM_TRACE_RETENTION_DAYS are deleted; `retention_days` in the response says how many days are kept (null = forever).",
         "operationId": "list_llm_requests",
         "parameters": [
           {
@@ -8993,7 +8993,7 @@
           "LLM Traces"
         ],
         "summary": "LLM request statistics",
-        "description": "Get LLM request counts grouped by time bucket and status for charting. Only requests within HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS are kept, so a period longer than `retention_days` (in the response; null = kept forever) only covers the last `retention_days`.",
+        "description": "Get LLM request counts grouped by time bucket and status for charting. Only requests within REMEMBER_API_LLM_TRACE_RETENTION_DAYS are kept, so a period longer than `retention_days` (in the response; null = kept forever) only covers the last `retention_days`.",
         "operationId": "llm_request_stats",
         "parameters": [
           {
@@ -9601,7 +9601,7 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Updates",
-            "description": "Configuration overrides. Keys can be in Python field format (retain_extraction_mode) or environment variable format (HINDSIGHT_API_RETAIN_EXTRACTION_MODE). Only hierarchical fields can be overridden per-bank."
+            "description": "Configuration overrides. Keys can be in Python field format (retain_extraction_mode) or environment variable format (REMEMBER_API_RETAIN_EXTRACTION_MODE). Only hierarchical fields can be overridden per-bank."
           }
         },
         "type": "object",
@@ -10360,21 +10360,6 @@
             ],
             "title": "Mcp Enabled Tools",
             "description": "MCP tool allowlist for this bank (None = all tools)"
-          },
-          "knowledge_banks": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Knowledge Banks",
-            "description": "Knowledge banks whose passages this bank's reflect reads"
           },
           "consolidation_llm_batch_size": {
             "anyOf": [
@@ -13786,11 +13771,6 @@
             "title": "Bank Llm Health",
             "description": "Whether the per-bank LLM connectivity probe is enabled"
           },
-          "file_upload_api": {
-            "type": "boolean",
-            "title": "File Upload Api",
-            "description": "Whether file upload/conversion API is enabled"
-          },
           "document_export_api": {
             "type": "boolean",
             "title": "Document Export Api",
@@ -13800,12 +13780,6 @@
             "type": "boolean",
             "title": "Document Import Api",
             "description": "Whether the document import endpoint is enabled"
-          },
-          "knowledge_banks": {
-            "type": "boolean",
-            "title": "Knowledge Banks",
-            "description": "Whether knowledge banks are enabled",
-            "default": false
           },
           "audit_log": {
             "type": "boolean",
@@ -13830,7 +13804,6 @@
           "worker",
           "bank_config_api",
           "bank_llm_health",
-          "file_upload_api",
           "document_export_api",
           "document_import_api",
           "audit_log",
@@ -14831,7 +14804,7 @@
           "version": {
             "type": "string",
             "title": "Version",
-            "description": "Hindsight version this process is running"
+            "description": "Remember version this process is running"
           },
           "uptime_seconds": {
             "type": "number",
@@ -17365,7 +17338,7 @@
               }
             ],
             "title": "Filename",
-            "description": "Original filename for file-conversion operations (file_convert_retain); null for other task types."
+            "description": "Filename associated with the operation, if present."
           },
           "mental_model_id": {
             "anyOf": [
@@ -18103,7 +18076,7 @@
               "builtin"
             ],
             "title": "Source",
-            "description": "`config` \u2014 produced by a setting (`field` names it); `builtin` \u2014 Hindsight's own wording."
+            "description": "`config` \u2014 produced by a setting (`field` names it); `builtin` \u2014 Remember's own wording."
           },
           "field": {
             "type": "string",
@@ -21035,8 +21008,6 @@
             "bank_llm_health": true,
             "document_export_api": true,
             "document_import_api": true,
-            "file_upload_api": false,
-            "knowledge_banks": false,
             "llm_trace": false,
             "mcp": true,
             "observations": false,

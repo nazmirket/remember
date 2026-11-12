@@ -1,0 +1,187 @@
+"""Candidate-set bounding in entity resolution (GH-3211).
+
+Candidate volume per query text is whatever the fuzzy probe returns. On a bank
+with many near-identical names that can be thousands of rows, and every one of
+them costs a synchronous ``SequenceMatcher`` call on the event-loop thread — a
+resolution batch then blocks the worker for minutes, so ``/health`` stops
+answering and the orchestrator kills the worker mid-op.
+
+These tests pin the two guarantees that prevent it:
+  1. at most ``entity_resolution_max_candidates`` candidates are scored per mention;
+  2. the scoring loop yields, so other tasks keep getting scheduled while it runs.
+"""
+
+import asyncio
+import time
+import uuid
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from remember_api.engine.memories.pg import entity_resolver as entity_resolver_module
+from remember_api.engine.memories.pg.entity_resolver import EntityResolver
+
+
+def _make_resolver(max_candidates: int = 200) -> EntityResolver:
+    """Resolver whose entity INSERTs are stubbed (no DB), so only scoring runs."""
+    pool = MagicMock()
+    ops = MagicMock()
+    ops.bulk_insert_entities = AsyncMock(
+        side_effect=lambda conn, table, bank_id, names, dates, kinds: {n.lower(): uuid.uuid4() for n in names}
+    )
+    ops.fetch_missing_entity_ids = AsyncMock(return_value=[])
+    pool.ops = ops
+    return EntityResolver(
+        pool=pool,
+        entity_lookup="trigram",
+        entity_resolution_max_candidates=max_candidates,
+    )  # type: ignore[arg-type]
+
+
+def _make_conn() -> MagicMock:
+    conn = MagicMock()
+    conn.backend_type = "postgresql"
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.executemany = AsyncMock()
+    return conn
+
+
+def _candidates(count: int, name: str = "Acme Corporation") -> list[tuple]:
+    """A polluted candidate set: many distinct names sharing trigrams with the query."""
+    now = datetime.now(UTC)
+    return [(uuid.uuid4(), f"{name} variant {i:05d}", None, now, 1) for i in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_scoring_is_capped_at_max_candidates():
+    """Only the top `max_candidates` per mention reach the scoring loop.
+
+    Counted on the word-level check rather than on ``SequenceMatcher``: it runs once per
+    candidate that reaches scoring, and nowhere else here (see below). ``SequenceMatcher`` is no longer
+    one-per-candidate (the word-level check calls it too, and a candidate the trigram gate
+    rejects never reaches the name score), and the trigram helpers are also used by the
+    O(N^2) in-batch pass — so counting either measures the shape of the scoring code rather
+    than the cap this test exists to pin.
+
+    The in-batch pass runs the word-level check too, on the names this batch is about to create.
+    So the four mentions are mutually dissimilar, each with its own candidate pool: no in-batch
+    pair clears the 0.5 trigram bar to reach the check, and the count stays exactly the scoring
+    loop's.
+    """
+    resolver = _make_resolver(max_candidates=50)
+    entities_data = [
+        {"text": name, "nearby_entities": []}
+        for name in ("Acme Corporation", "Globex Industries", "Initech Systems", "Umbrella Holdings")
+    ]
+    all_candidates = {e["text"]: _candidates(1000, e["text"]) for e in entities_data}
+
+    with patch(
+        "remember_api.engine.memories.pg.entity_resolver._tokens_are_compatible",
+        wraps=entity_resolver_module._tokens_are_compatible,
+    ) as gate:
+        await resolver._resolve_from_candidates(
+            _make_conn(), "bank-1", entities_data, datetime.now(UTC), all_candidates, {}, None, None
+        )
+
+    # 4 mentions x 50 candidates — not 4 x 1000.
+    assert gate.call_count == 4 * 50
+
+
+@pytest.mark.asyncio
+async def test_capping_keeps_the_exact_match():
+    """Truncation must not drop the candidate that actually matches the mention."""
+    resolver = _make_resolver(max_candidates=10)
+    exact_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    # The right answer sits at the very end of a large noisy candidate set.
+    candidates = _candidates(500) + [(exact_id, "Acme Corporation", None, now, 1)]
+    entities_data = [{"text": "Acme Corporation", "nearby_entities": []}]
+
+    resolved = await resolver._resolve_from_candidates(
+        _make_conn(),
+        "bank-1",
+        entities_data,
+        now,
+        {"Acme Corporation": candidates},
+        {},
+        None,
+        None,
+    )
+
+    assert resolved[0].entity_id == str(exact_id)
+    assert resolved[0].canonical_name == "Acme Corporation"
+
+
+@pytest.mark.asyncio
+async def test_scoring_loop_keeps_the_event_loop_responsive():
+    """A wide resolution batch must not starve other tasks (e.g. the /health handler).
+
+    Asserts on scheduling, not wall time: a concurrent ticker has to get turns
+    while scoring is in flight. It counts turns rather than timing the longest
+    gap, because one machine stall on a busy CI runner (GC, CPU steal) can make a
+    single gap as long as the batch even when the loop yields properly.
+    """
+    resolver = _make_resolver(max_candidates=2000)
+    candidates = _candidates(2000)
+    entities_data = [{"text": f"Acme Corporation {i}", "nearby_entities": []} for i in range(20)]
+    all_candidates = {e["text"]: candidates for e in entities_data}
+    conn = _make_conn()
+
+    # First call in a process lazily imports heavy optional deps; warm that up so
+    # it isn't charged to the measured batch.
+    await resolver._resolve_from_candidates(
+        conn, "bank-1", [{"text": "warm up", "nearby_entities": []}], None, {"warm up": []}, {}, None, None
+    )
+
+    stop = False
+    ticks: list[float] = []
+
+    async def ticker() -> None:
+        while not stop:
+            await asyncio.sleep(0.005)
+            ticks.append(time.perf_counter())
+
+    tick_task = asyncio.create_task(ticker())
+    await asyncio.sleep(0.01)
+
+    started = time.perf_counter()
+    await resolver._resolve_from_candidates(
+        conn, "bank-1", entities_data, datetime.now(UTC), all_candidates, {}, None, None
+    )
+    finished = time.perf_counter()
+
+    stop = True
+    await tick_task
+
+    # Before the fix the ticker got zero turns for the whole batch. Counting turns
+    # inside the batch fails that every time and does not care how long one stall was.
+    during = [t for t in ticks if started < t < finished]
+    assert len(during) >= 3, f"ticker got {len(during)} turns during a {finished - started:.3f}s scoring batch"
+
+
+@pytest.mark.asyncio
+async def test_trigram_query_caps_candidates_per_query_text():
+    """The PG probe truncates in SQL, pre-ranked by real trigram similarity."""
+    resolver = _make_resolver(max_candidates=42)
+    conn = _make_conn()
+
+    with patch.object(resolver, "_resolve_from_candidates", new=AsyncMock(return_value=[])):
+        await resolver._resolve_entities_batch_trigram(
+            conn=conn,
+            bank_id="bank-1",
+            entities_data=[{"text": "Alice", "nearby_entities": [], "event_date": None}],
+            unit_event_date=None,
+        )
+
+    query = conn.fetch.call_args.args[0]
+    assert "LATERAL" in query
+    assert "LIMIT $3" in query
+    assert "ORDER BY similarity(" in query
+    assert conn.fetch.call_args.args[3] == 42
+
+
+def test_max_candidates_must_be_positive():
+    with pytest.raises(ValueError, match="entity_resolution_max_candidates must be >= 1"):
+        EntityResolver(pool=None, entity_resolution_max_candidates=0)  # type: ignore[arg-type]

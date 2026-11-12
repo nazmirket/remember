@@ -1,5 +1,5 @@
 {
-  "name": "hindsight",
+  "name": "remember",
   "private": true,
   "scripts": {
     "prepare": "./scripts/setup-hooks.sh"

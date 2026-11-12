@@ -1,0 +1,1037 @@
+"""
+Test OpenAI Batch API integration for retain fact extraction.
+
+Tests cover:
+- Normal batch API flow (submit, poll, complete)
+- Crash recovery (resume from existing batch_id)
+- Hard error when provider doesn't support the batch API (no silent fallback)
+- Worker recovery on restart
+"""
+
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from remember_api.config import RememberConfig
+from remember_api.engine.providers.openai_compatible_llm import batch_result_from_chat_completion
+from remember_api.engine.response_models import (
+    BatchRequestCounts,
+    BatchResult,
+    BatchStatus,
+    BatchSubmission,
+    TokenUsage,
+)
+from remember_api.engine.retain.fact_extraction import (
+    RetainContent,
+    extract_facts_from_contents,
+    extract_facts_from_contents_batch_api,
+)
+from remember_api.worker.poller import WorkerPoller
+
+logger = logging.getLogger(__name__)
+
+
+def _status(batch_id: str, status: str = "completed", total: int = 1, completed: int = 1) -> BatchStatus:
+    return BatchStatus(
+        batch_id=batch_id, status=status, request_counts=BatchRequestCounts(total=total, completed=completed)
+    )
+
+
+def _usage(input_tokens: int = 100, output_tokens: int = 50) -> TokenUsage:
+    return TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=input_tokens + output_tokens)
+
+
+@pytest.fixture
+def mock_llm_config():
+    """Create a mock LLM config with batch API support."""
+    mock = MagicMock()
+    mock.provider = "openai"
+    mock.model = "gpt-4o-mini"
+    mock._provider_impl = AsyncMock()
+    # The serving impl is what the request body and the crash-recovery guard read,
+    # so it carries real values rather than auto-created mock attributes.
+    mock._provider_impl.provider = "openai"
+    mock._provider_impl.model = "gpt-4o-mini"
+    mock._provider_impl.openai_service_tier = None
+    mock._provider_impl.batch_account_key = "openai|https://api.openai.com/v1|000000000000"
+
+    # The batch path resolves its serving impl via ``batch_provider_impl()`` (a
+    # multi-LLM chain returns the first batch-capable member); for a single mock
+    # provider that is ``_provider_impl`` itself — or None when the test declares
+    # the provider batch-incapable, or when a resume names a different account,
+    # mirroring LLMProvider.batch_provider_impl.
+    async def _batch_provider_impl(account_key: str | None = None):
+        if not await mock._provider_impl.supports_batch_api():
+            return None
+        if account_key is not None and mock._provider_impl.batch_account_key != account_key:
+            return None
+        return mock._provider_impl
+
+    mock.batch_provider_impl = _batch_provider_impl
+    return mock
+
+
+@pytest.fixture
+def test_contents():
+    """Create test content for fact extraction."""
+    return [
+        RetainContent(
+            content="Alice is a senior software engineer at TechCorp. She specializes in distributed systems.",
+            event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
+            context="team overview",
+        ),
+        RetainContent(
+            content="Bob joined the team last month as a junior developer. He is learning React.",
+            event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
+            context="team overview",
+        ),
+    ]
+
+
+@pytest.fixture
+def remember_config():
+    """Create test config with batch API enabled."""
+    config = RememberConfig.from_env()
+    config.retain_batch_enabled = True
+    config.retain_batch_poll_interval_seconds = 1  # Fast polling for tests
+    config.retain_chunk_size = 4000
+    config.retain_extraction_mode = "concise"
+    config.retain_extract_causal_links = False
+    return config
+
+
+@pytest.mark.asyncio
+async def test_batch_api_normal_flow(mock_llm_config, test_contents, remember_config, memory, request_context):
+    """Test normal batch API flow: submit, poll, complete."""
+    bank_id = f"test_batch_{datetime.now(timezone.utc).timestamp()}"
+
+    try:
+        # Mock batch API responses
+        batch_id = "batch_test123"
+
+        # Mock supports_batch_api
+        mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+
+        # Mock submit_batch - returns batch metadata
+        mock_llm_config._provider_impl.submit_batch = AsyncMock(
+            return_value=BatchSubmission(batch_id=batch_id, status="validating")
+        )
+
+        # Mock get_batch_status - simulate polling sequence
+        status_sequence = [
+            _status(batch_id, status="in_progress", total=2, completed=1),
+            _status(batch_id, total=2, completed=2),
+        ]
+        mock_llm_config._provider_impl.get_batch_status = AsyncMock(side_effect=status_sequence)
+
+        # Mock retrieve_batch_results - returns fact extraction results
+        mock_results = [
+            BatchResult(
+                custom_id="chunk_0",
+                content=json.dumps(
+                    {
+                        "facts": [
+                            {
+                                "what": "Alice is a senior software engineer at TechCorp",
+                                "when": "present",
+                                "where": "TechCorp",
+                                "who": "Alice",
+                                "why": "Professional background information",
+                                "fact_type": "world",
+                                "fact_kind": "conversation",
+                            }
+                        ]
+                    }
+                ),
+                usage=_usage(),
+            ),
+            BatchResult(
+                custom_id="chunk_1",
+                content=json.dumps(
+                    {
+                        "facts": [
+                            {
+                                "what": "Bob joined the team last month as a junior developer",
+                                "when": "last month",
+                                "where": "team",
+                                "who": "Bob",
+                                "why": "New team member information",
+                                "fact_type": "world",
+                                "fact_kind": "conversation",
+                            }
+                        ]
+                    }
+                ),
+                usage=_usage(),
+            ),
+        ]
+        mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(return_value=mock_results)
+
+        # Call batch API extraction
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,  # No DB pool for this test
+            operation_id=None,
+            schema=None,
+        )
+        facts = extraction.facts
+        chunks = extraction.chunks
+        usage = extraction.usage
+
+        # Verify results
+        assert len(facts) == 2, "Should extract 2 facts (one per chunk)"
+        # Facts are ExtractedFact objects with .fact_text field
+        assert "Alice" in facts[0].fact_text and "senior software engineer" in facts[0].fact_text
+        assert "Bob" in facts[1].fact_text and "junior developer" in facts[1].fact_text
+
+        # Verify chunks metadata
+        assert len(chunks) == 2, "Should have 2 chunks metadata"
+        assert chunks[0].fact_count == 1
+        assert chunks[1].fact_count == 1
+
+        # Verify token usage
+        assert usage.input_tokens == 200  # 100 per chunk
+        assert usage.output_tokens == 100  # 50 per chunk
+        assert usage.total_tokens == 300
+
+        # Verify API calls
+        mock_llm_config._provider_impl.submit_batch.assert_called_once()
+        assert mock_llm_config._provider_impl.get_batch_status.call_count == 2
+        mock_llm_config._provider_impl.retrieve_batch_results.assert_called_once_with(batch_id)
+
+        logger.info("✅ Normal batch API flow test passed")
+
+    finally:
+        # Cleanup
+        try:
+            await memory.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_batch_api_accepts_top_level_fact_list(mock_llm_config, test_contents, remember_config):
+    """Batch extraction accepts a recoverable top-level facts array."""
+    batch_id = "batch_top_level_facts"
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[
+            BatchResult(
+                custom_id="chunk_0",
+                content=json.dumps(
+                    [
+                        {
+                            "what": "Alice is a senior software engineer at TechCorp",
+                            "when": "present",
+                            "where": "TechCorp",
+                            "who": "Alice",
+                            "why": "Professional background information",
+                            "fact_type": "world",
+                            "fact_kind": "conversation",
+                        }
+                    ]
+                ),
+                usage=_usage(),
+            )
+        ]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[test_contents[0]],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+    facts = extraction.facts
+    chunks = extraction.chunks
+    usage = extraction.usage
+
+    assert len(facts) == 1
+    assert "Alice" in facts[0].fact_text
+    assert "Where: TechCorp" in facts[0].fact_text  # #6129
+    assert len(chunks) == 1
+    assert chunks[0].fact_count == 1
+    assert usage.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_batch_api_usage_keeps_cached_and_reasoning_tokens(mock_llm_config, test_contents, remember_config):
+    """The consumer sums each result's usage whole: cached prompt and reasoning tokens survive (#5487)."""
+    usage = TokenUsage(input_tokens=100, output_tokens=30, total_tokens=130, cached_tokens=80, thoughts_tokens=20)
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id="batch_usage", status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[BatchResult(custom_id="chunk_0", content=json.dumps({"facts": []}), usage=usage)]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[test_contents[0]],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+
+    assert extraction.usage == usage
+
+
+def test_batch_result_from_chat_completion_reads_usage_like_a_live_call():
+    """An OpenAI batch output line's usage is read like a live call's: cached prompt
+    and reasoning tokens survive, and folded reasoning is split out of output (#5487)."""
+    result = batch_result_from_chat_completion(
+        "chunk_0",
+        {
+            "choices": [{"message": {"content": '{"facts": []}'}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "prompt_tokens_details": {"cached_tokens": 80},
+                "completion_tokens_details": {"reasoning_tokens": 20},
+            },
+        },
+    )
+
+    assert result.custom_id == "chunk_0"
+    assert result.content == '{"facts": []}'
+    assert result.error is None
+    assert result.usage.input_tokens == 100
+    assert result.usage.cached_tokens == 80
+    assert result.usage.thoughts_tokens == 20
+    assert result.usage.output_tokens == 30  # reasoning folded into completion is split out
+
+
+@pytest.mark.parametrize(
+    ("body", "error", "expected"),
+    [
+        (None, {"code": "server_error", "message": "boom"}, "boom"),
+        # A non-2xx line: the body is an error response, not an empty completion.
+        ({"error": {"message": "Invalid request parameters"}}, None, "Invalid request parameters"),
+    ],
+)
+def test_batch_result_from_chat_completion_reports_a_failed_request(body, error, expected):
+    result = batch_result_from_chat_completion("chunk_0", body, error)
+
+    assert result.content is None
+    assert result.error is not None and expected in result.error
+
+
+@pytest.mark.asyncio
+async def test_batch_api_rejects_top_level_non_fact_list(mock_llm_config, test_contents, remember_config):
+    """Batch extraction records malformed top-level lists instead of crashing."""
+    batch_id = "batch_malformed_list"
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[BatchResult(custom_id="chunk_0", content=json.dumps(["not a fact dict"]), usage=_usage())]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[test_contents[0]],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+    facts = extraction.facts
+    chunks = extraction.chunks
+    usage = extraction.usage
+
+    assert facts == []
+    assert len(chunks) == 1
+    assert chunks[0].fact_count == 0
+    assert usage.total_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_api_records_schema_drifted_facts_as_extraction_errors(
+    mock_llm_config, test_contents, remember_config
+):
+    """Issue #3708.
+
+    A fact object carrying none of the text keys means the model ignored the
+    schema. The batch API cannot re-prompt one request, so the drop has to reach
+    the operation's extraction_errors instead of only the server log. A 'what'
+    that IS present but empty is the model saying "nothing here" — stays quiet.
+    """
+    batch_id = "batch_schema_drift"
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[
+            BatchResult(
+                custom_id="chunk_0",
+                content=json.dumps(
+                    {
+                        "facts": [
+                            {"when": "2024", "who": "Alice", "fact_type": "world"},
+                            {"what": "", "fact_type": "world"},
+                        ]
+                    }
+                ),
+                usage=_usage(),
+            )
+        ]
+    )
+
+    recorded = []
+
+    async def _capture(pool, operation_id, schema, errors):
+        recorded.append(errors)
+
+    with patch(
+        "remember_api.engine.retain.fact_extraction._write_batch_extraction_errors",
+        side_effect=_capture,
+    ):
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=[test_contents[0]],
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,
+            operation_id=None,
+            schema=None,
+        )
+        facts = extraction.facts
+        chunks = extraction.chunks
+
+    assert facts == []
+    assert chunks[0].fact_count == 0
+    assert len(recorded) == 1
+    # Only the fact with no text key at all is an error; the empty 'what' is not.
+    assert recorded[0].count == 1
+    # The message names the keys the model DID send (#5280): the batch path cannot
+    # re-ask, so this string is all an operator gets to recognise schema drift.
+    assert recorded[0].sample == [
+        "chunk_0: fact 0 has no 'what'/'factual_core'/'text' field; keys present: fact_type, when, who"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_api_records_missing_facts_key_as_extraction_error(mock_llm_config, test_contents, remember_config):
+    """Issue #5582: a reply with no top-level 'facts' list is a broken envelope,
+    not an empty extraction — it must reach extraction_errors, not pass as 0 facts."""
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id="batch_no_facts_key", status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    wrapped = {"final": {"facts": [{"what": "Alice visited Paris", "fact_type": "world"}]}}
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[BatchResult(custom_id="chunk_0", content=json.dumps(wrapped), usage=_usage())]
+    )
+
+    recorded = []
+
+    async def _capture(pool, operation_id, schema, errors):
+        recorded.append(errors)
+
+    with patch(
+        "remember_api.engine.retain.fact_extraction._write_batch_extraction_errors",
+        side_effect=_capture,
+    ):
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=[test_contents[0]],
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,
+            operation_id=None,
+            schema=None,
+        )
+
+    assert extraction.facts == []
+    assert extraction.chunks[0].fact_count == 0
+    assert len(recorded) == 1
+    assert recorded[0].sample == ["chunk_0: LLM reply had no top-level 'facts' list (dict)"]
+
+
+@pytest.mark.asyncio
+async def test_batch_api_recovers_fenced_and_control_char_json(mock_llm_config, test_contents, remember_config):
+    """#2701: batch content that bare json.loads can't parse but parse_llm_json can
+    (markdown code fences + an embedded raw control character, e.g. a transient
+    Gemini quirk) must still yield facts instead of dropping the whole chunk."""
+    batch_id = "batch_recoverable_json"
+
+    # Valid facts JSON, but wrapped in ```json fences AND containing a raw
+    # control character (\x01) inside a string value. Bare json.loads fails on
+    # both; parse_llm_json strips the fences and scrubs the control char.
+    inner_json = json.dumps(
+        {
+            "facts": [
+                {
+                    "what": "Alice is a senior software engineer at TechCorp",
+                    "when": "present",
+                    "where": "TechCorp",
+                    "who": "Alice",
+                    "why": "Professional background\x01information",
+                    "fact_type": "world",
+                    "fact_kind": "conversation",
+                }
+            ]
+        }
+    )
+    unparseable_content = f"```json\n{inner_json}\n```"
+
+    # Sanity: the raw content is NOT parseable by the bare parser.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(unparseable_content)
+
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[BatchResult(custom_id="chunk_0", content=unparseable_content, usage=_usage())]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[test_contents[0]],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+    facts = extraction.facts
+    chunks = extraction.chunks
+    usage = extraction.usage
+
+    # The facts are recovered rather than lost.
+    assert len(facts) == 1
+    assert "Alice" in facts[0].fact_text
+    assert len(chunks) == 1
+    assert chunks[0].fact_count == 1
+    assert usage.total_tokens == 150
+
+
+@pytest.mark.asyncio
+async def test_batch_api_unparseable_json_still_records_error(mock_llm_config, test_contents, remember_config):
+    """#2701: genuinely unparseable content (not recoverable by parse_llm_json)
+    must preserve the existing behavior — record the error, fact_count=0, no crash."""
+    batch_id = "batch_unparseable_json"
+
+    # Not JSON at all, and not recoverable by fence-stripping or control-char scrubbing.
+    unparseable_content = "this is not json {{{ ["
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(unparseable_content)
+
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[BatchResult(custom_id="chunk_0", content=unparseable_content, usage=_usage())]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[test_contents[0]],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+    facts = extraction.facts
+    chunks = extraction.chunks
+    usage = extraction.usage
+
+    assert facts == []
+    assert len(chunks) == 1
+    assert chunks[0].fact_count == 0
+    assert usage.total_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_api_crash_recovery(mock_llm_config, test_contents, remember_config, memory, request_context):
+    """Test crash recovery: resume polling from existing batch_id."""
+    bank_id = f"test_crash_{datetime.now(timezone.utc).timestamp()}"
+    operation_id = str(uuid.uuid4())  # Must be UUID for async_operations table
+
+    try:
+        # Ensure bank exists
+        await memory.ensure_bank_profile(bank_id, request_context=request_context)
+
+        # Setup: Store batch_id in async_operations table (simulates partial execution)
+        batch_id = "batch_recovered_456"
+        pool = memory._pool
+        schema = request_context.tenant_id
+
+        from remember_api.engine.task_backend import fq_table
+
+        table = fq_table("async_operations", schema)
+
+        # Create operation with batch_id already stored
+        await pool.execute(
+            f"""
+            INSERT INTO {table} (operation_id, operation_type, bank_id, status, result_metadata)
+            VALUES ($1, 'retain', $2, 'processing', $3::jsonb)
+            """,
+            operation_id,
+            bank_id,
+            json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "batch_provider": "openai",
+                    "chunk_count": 2,
+                }
+            ),
+        )
+
+        # Mock batch API responses for resume scenario
+        mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+
+        # Mock get_batch_status - batch already in progress
+        mock_llm_config._provider_impl.get_batch_status = AsyncMock(
+            return_value=_status(batch_id, total=2, completed=2)
+        )
+
+        # Mock retrieve_batch_results
+        mock_results = [
+            BatchResult(
+                custom_id="chunk_0",
+                content=json.dumps(
+                    {
+                        "facts": [
+                            {
+                                "what": "Alice is a senior software engineer",
+                                "when": "present",
+                                "where": "TechCorp",
+                                "who": "Alice",
+                                "why": "Background",
+                                "fact_type": "world",
+                                "fact_kind": "conversation",
+                            }
+                        ]
+                    }
+                ),
+                usage=_usage(),
+            ),
+            BatchResult(
+                custom_id="chunk_1",
+                content=json.dumps(
+                    {
+                        "facts": [
+                            {
+                                "what": "Bob is a junior developer",
+                                "when": "last month",
+                                "where": "team",
+                                "who": "Bob",
+                                "why": "New member",
+                                "fact_type": "world",
+                                "fact_kind": "conversation",
+                            }
+                        ]
+                    }
+                ),
+                usage=_usage(),
+            ),
+        ]
+        mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(return_value=mock_results)
+
+        # Call batch API extraction with operation_id (crash recovery scenario)
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=pool,
+            operation_id=operation_id,  # Provides crash recovery context
+            schema=schema,
+        )
+        facts = extraction.facts
+        chunks = extraction.chunks
+        usage = extraction.usage
+
+        # Verify results
+        assert len(facts) == 2, "Should extract 2 facts after recovery"
+
+        # CRITICAL: Verify submit_batch was NOT called (because batch_id already exists)
+        mock_llm_config._provider_impl.submit_batch.assert_not_called()
+
+        # Verify get_batch_status WAS called (polling resumed)
+        mock_llm_config._provider_impl.get_batch_status.assert_called()
+
+        # Verify retrieve_batch_results was called with the recovered batch_id
+        mock_llm_config._provider_impl.retrieve_batch_results.assert_called_once_with(batch_id)
+
+        logger.info("✅ Crash recovery test passed - resumed polling without re-submission")
+
+    finally:
+        # Cleanup
+        try:
+            await memory.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_batch_api_records_non_fatal_extraction_errors(
+    mock_llm_config, test_contents, remember_config, memory, request_context
+):
+    """Batch API skipped chunks are surfaced in operation result_metadata."""
+    bank_id = f"test_batch_errors_{datetime.now(timezone.utc).timestamp()}"
+    operation_id = str(uuid.uuid4())
+
+    try:
+        await memory.ensure_bank_profile(bank_id, request_context=request_context)
+        pool = memory._pool
+        schema = request_context.tenant_id
+
+        from remember_api.engine.task_backend import fq_table
+
+        table = fq_table("async_operations", schema)
+        await pool.execute(
+            f"""
+            INSERT INTO {table} (operation_id, operation_type, bank_id, status, result_metadata)
+            VALUES ($1, 'retain', $2, 'processing', $3::jsonb)
+            """,
+            operation_id,
+            bank_id,
+            json.dumps({}),
+        )
+
+        batch_id = "batch_partial_errors"
+        mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+        mock_llm_config._provider_impl.submit_batch = AsyncMock(
+            return_value=BatchSubmission(batch_id=batch_id, status="validating")
+        )
+        mock_llm_config._provider_impl.get_batch_status = AsyncMock(
+            return_value=_status(batch_id, total=2, completed=2)
+        )
+        mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+            return_value=[
+                BatchResult(
+                    custom_id="chunk_0",
+                    content=json.dumps(
+                        {
+                            "facts": [
+                                {
+                                    "what": "Alice is a senior software engineer",
+                                    "when": "present",
+                                    "where": "TechCorp",
+                                    "who": "Alice",
+                                    "why": "Background",
+                                    "fact_type": "world",
+                                    "fact_kind": "conversation",
+                                }
+                            ]
+                        }
+                    ),
+                    usage=_usage(),
+                )
+            ]
+        )
+
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=pool,
+            operation_id=operation_id,
+            schema=schema,
+        )
+        facts = extraction.facts
+        chunks = extraction.chunks
+        usage = extraction.usage
+
+        assert len(facts) == 1
+        assert len(chunks) == 2
+        assert chunks[1].fact_count == 0
+        assert usage.total_tokens == 150
+
+        row = await pool.fetchrow(f"SELECT result_metadata FROM {table} WHERE operation_id = $1", operation_id)
+        metadata = (
+            json.loads(row["result_metadata"]) if isinstance(row["result_metadata"], str) else row["result_metadata"]
+        )
+        assert metadata["batch_id"] == batch_id
+        assert metadata["extraction_errors_count"] == 1
+        assert metadata["extraction_errors_sample"] == ["chunk_1: missing batch result"]
+
+    finally:
+        try:
+            await memory.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_batch_api_raises_for_unsupported_provider(mock_llm_config, test_contents, remember_config):
+    """Batch extraction must surface a hard error (not silently fall back) when
+    the configured provider doesn't support the batch API.
+
+    The silent-fallback behavior was removed in #1463 because it created a
+    mutual-recursion path between sync and batch extraction. Misconfiguration
+    should fail loudly and be caught at startup; this test guards that
+    contract.
+    """
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=False)
+    mock_llm_config.provider = "groq"
+
+    with pytest.raises(RuntimeError, match="does not.*support the batch API"):
+        await extract_facts_from_contents_batch_api(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,
+            operation_id=None,
+            schema=None,
+        )
+
+    mock_llm_config._provider_impl.submit_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_worker_batch_recovery(memory, request_context):
+    """Test that WorkerPoller._recover_batch_operations finds and resets orphaned batches."""
+    bank_id = f"test_worker_recovery_{datetime.now(timezone.utc).timestamp()}"
+    operation_id = str(uuid.uuid4())  # Must be UUID for async_operations table
+
+    try:
+        # Ensure bank exists
+        await memory.ensure_bank_profile(bank_id, request_context=request_context)
+
+        pool = memory._pool
+        schema = request_context.tenant_id
+
+        from remember_api.engine.task_backend import fq_table
+
+        table = fq_table("async_operations", schema)
+
+        # Create orphaned batch operation (simulates worker crash during polling)
+        batch_id = "batch_orphaned_999"
+        task_payload = {
+            "operation_type": "retain",
+            "bank_id": bank_id,
+            "contents": [{"content": "test", "event_date": "2024-01-15T00:00:00Z"}],
+        }
+
+        await pool.execute(
+            f"""
+            INSERT INTO {table} (operation_id, operation_type, bank_id, status, worker_id, result_metadata, task_payload)
+            VALUES ($1, 'retain', $2, 'processing', 'worker_crashed', $3::jsonb, $4::jsonb)
+            """,
+            operation_id,
+            bank_id,
+            json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "batch_provider": "openai",
+                    "chunk_count": 1,
+                }
+            ),
+            json.dumps(task_payload),
+        )
+
+        # Create WorkerPoller
+        from remember_api.extensions.builtin.tenant import DefaultTenantExtension
+
+        tenant_extension = DefaultTenantExtension(config={"schema": schema} if schema else {})
+
+        poller = WorkerPoller(
+            backend=pool,
+            worker_id="test_worker_recovery",
+            executor=memory,
+            poll_interval_ms=100,
+            schema=schema,
+            tenant_extension=tenant_extension,
+            max_slots=5,
+            slot_reservations={"consolidation": 2},
+        )
+
+        # Run recovery
+        recovered_count = await poller._recover_batch_operations(schema)
+
+        # Verify recovery
+        assert recovered_count == 1, "Should recover 1 batch operation"
+
+        # Verify operation was reset to pending
+        row = await pool.fetchrow(
+            f"SELECT status, worker_id FROM {table} WHERE operation_id = $1",
+            operation_id,
+        )
+
+        assert row["status"] == "pending", "Operation should be reset to pending"
+        assert row["worker_id"] is None, "Worker ID should be cleared"
+
+        logger.info("✅ Worker batch recovery test passed")
+
+    finally:
+        # Cleanup
+        try:
+            await memory.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_batch_api_via_extract_facts_from_contents(
+    mock_llm_config, test_contents, remember_config, memory, request_context
+):
+    """Test that extract_facts_from_contents routes to batch API when enabled."""
+    bank_id = f"test_routing_{datetime.now(timezone.utc).timestamp()}"
+
+    try:
+        # Enable batch API in config
+        remember_config.retain_batch_enabled = True
+
+        # Mock batch API support
+        mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+        mock_llm_config._provider_impl.submit_batch = AsyncMock(
+            return_value=BatchSubmission(batch_id="batch_123", status="validating")
+        )
+        mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+        mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+            return_value=[BatchResult(custom_id="chunk_0", content=json.dumps({"facts": []}), usage=_usage(10, 5))]
+        )
+
+        # Call main extract_facts_from_contents (should route to batch API)
+        extraction = await extract_facts_from_contents(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,
+            operation_id=None,
+            schema=None,
+        )
+        facts = extraction.facts
+        chunks = extraction.chunks
+        usage = extraction.usage
+
+        # Verify batch API was called
+        mock_llm_config._provider_impl.submit_batch.assert_called_once()
+
+        logger.info("✅ Routing to batch API test passed")
+
+    finally:
+        # Cleanup
+        try:
+            await memory.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_batch_api_sanitizes_model_authored_text(mock_llm_config, remember_config):
+    """Batch results bypass ``LLMProvider.call``, so they need their own scrub (#3729).
+
+    A model can write ``\\udXXX`` in any string field of a batch response. The raw
+    JSONL carries harmless ASCII; the surrogate is born when the batch path parses it,
+    and from there the fact text and the entity names go straight to the embedder,
+    the reranker and an asyncpg bind.
+    """
+    batch_id = "batch_surrogate"
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id=batch_id, status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[
+            BatchResult(
+                custom_id="chunk_0",
+                content='{"facts": [{"what": "Alex laughed \ud83d", "when": "N/A", '
+                '"where": "N/A", "who": "Alex", "why": "N/A", "fact_type": "world", '
+                '"fact_kind": "conversation", "entities": ["Al\ud83dex"]}]}',
+                usage=_usage(10, 5),
+            )
+        ]
+    )
+
+    extraction = await extract_facts_from_contents_batch_api(
+        contents=[RetainContent(content="Alex laughed at the joke.")],
+        llm_config=mock_llm_config,
+        config=remember_config,
+        pool=None,
+        operation_id=None,
+        schema=None,
+    )
+    facts = extraction.facts
+
+    assert len(facts) == 1
+    assert facts[0].fact_text.encode("utf-8")  # raised UnicodeEncodeError before the fix
+    assert "Alex laughed" in facts[0].fact_text
+    assert facts[0].entities == ["Alex"]
+
+
+def _one_fact(what: str) -> str:
+    return json.dumps({"facts": [{"what": what, "fact_type": "world", "fact_kind": "conversation"}]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_first", [True, False])
+async def test_batch_api_rejects_duplicate_and_unexpected_custom_ids(
+    mock_llm_config, test_contents, remember_config, error_first
+):
+    """Issue #6439: a custom_id returned twice is ambiguous — whichever comes last must not
+    decide the chunk's facts. It, and any id nobody asked for, is an extraction error, while
+    a sibling chunk with exactly one result is still kept."""
+    duplicates = [
+        BatchResult(custom_id="chunk_0", error="server_error"),
+        BatchResult(custom_id="chunk_0", content=_one_fact("Alice visited Paris"), usage=_usage()),
+    ]
+    if not error_first:
+        duplicates.reverse()
+    mock_llm_config._provider_impl.supports_batch_api = AsyncMock(return_value=True)
+    mock_llm_config._provider_impl.submit_batch = AsyncMock(
+        return_value=BatchSubmission(batch_id="batch_dupes", status="validating")
+    )
+    mock_llm_config._provider_impl.get_batch_status = AsyncMock(return_value=_status("batch_dupes"))
+    mock_llm_config._provider_impl.retrieve_batch_results = AsyncMock(
+        return_value=[
+            *duplicates,
+            BatchResult(custom_id="chunk_1", content=_one_fact("Bob lives in Rome"), usage=_usage()),
+            BatchResult(custom_id="chunk_99", content=_one_fact("Nobody asked for this"), usage=_usage()),
+        ]
+    )
+
+    recorded = []
+
+    async def _capture(pool, operation_id, schema, errors):
+        recorded.append(errors)
+
+    with patch(
+        "remember_api.engine.retain.fact_extraction._write_batch_extraction_errors",
+        side_effect=_capture,
+    ):
+        extraction = await extract_facts_from_contents_batch_api(
+            contents=test_contents,
+            llm_config=mock_llm_config,
+            config=remember_config,
+            pool=None,
+            operation_id=None,
+            schema=None,
+        )
+
+    assert len(extraction.facts) == 1
+    assert "Bob" in extraction.facts[0].fact_text
+    assert extraction.chunks[0].fact_count == 0
+    assert extraction.chunks[1].fact_count == 1
+    assert len(recorded) == 1
+    assert sorted(recorded[0].sample) == [
+        "chunk_0: provider returned 2 results for this request",
+        "chunk_99: provider returned a result for a request that was never sent",
+    ]

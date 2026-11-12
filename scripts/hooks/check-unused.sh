@@ -29,9 +29,9 @@ section() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 # when hunting dead functions, accepting more false positives.
 # Format: "<package-dir>:<importable source dir(s)>".
 for entry in \
-  "hindsight-api-slim:hindsight_api" \
-  "hindsight-dev:hindsight_dev" \
-  "hindsight-embed:hindsight_embed"; do
+  "remember-api-slim:remember_api" \
+  "remember-dev:remember_dev" \
+  "remember-embed:remember_embed"; do
   pkg="${entry%%:*}"
   srcs="${entry#*:}"
   section "vulture: $pkg"

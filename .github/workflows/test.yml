@@ -9,14 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: hindsight-integrations/coding-agents
+        working-directory: remember-integrations/coding-agents
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: hindsight-integrations/coding-agents/package-lock.json
+          cache-dependency-path: remember-integrations/coding-agents/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
@@ -30,8 +30,8 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --all-packages --extra embedded-db --extra test
-      - run: PYTHONPATH=hindsight-embed .venv/bin/python -m pytest hindsight-embed/tests -q
-      - run: .venv/bin/python -m pytest hindsight-api-slim/tests/test_health_probes.py hindsight-api-slim/tests/test_migration_shape.py -q -n 0
+      - run: PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests -q
+      - run: .venv/bin/python -m pytest remember-api-slim/tests/test_health_probes.py remember-api-slim/tests/test_migration_shape.py -q -n 0
   memory-system:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -42,14 +42,14 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --extra embedded-db
-        working-directory: hindsight-api-slim
+        working-directory: remember-api-slim
       - run: uv sync --frozen
-        working-directory: hindsight-system-tests
+        working-directory: remember-system-tests
       - run: uv run pytest tests -q
-        working-directory: hindsight-system-tests
+        working-directory: remember-system-tests
   cli:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --manifest-path hindsight-cli/Cargo.toml
+      - run: cargo check --manifest-path remember-cli/Cargo.toml

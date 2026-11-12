@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Triage a GitHub issue or a reported problem — check it is real and not by design (code, git history, PRs, Hindsight memory), find the code and patterns to reuse, build a proof-of-concept fix and prove it solves the problem, then explain the problem and the fix in behaviours before doing the full fix. Use when asked to "triage #N", "look into this issue", or "is this a real bug".
+description: Triage a GitHub issue or a reported problem — check it is real and not by design (code, git history, PRs, Remember memory), find the code and patterns to reuse, build a proof-of-concept fix and prove it solves the problem, then explain the problem and the fix in behaviours before doing the full fix. Use when asked to "triage #N", "look into this issue", or "is this a real bug".
 user_invocable: true
 ---
 
@@ -24,7 +24,7 @@ version, config. Then check both sides:
     read those commits.
   - The PRs behind them: `gh pr list --state all --search "<keywords>"`, `gh pr view <N> --comments`.
   - Related or duplicate issues: `gh issue list --state all --search "<keywords>"`.
-  - Hindsight memory, if the plugin is installed (the `hindsight_*` tools are available): search the
+  - Remember memory, if the plugin is installed (the `remember_*` tools are available): search the
     pages and, when you need the *why*, run a reflect. Treat what it says as a past
     record — check it against the code.
 
@@ -71,16 +71,16 @@ Then prove it:
 **Performance issue:** recreate the reporter's situation at the same or a smaller scale (same data
 shape, same operation, same config), measure it before the change, then after, the same way, a few
 runs each. Use the repo's perf tools when they fit (`./scripts/benchmarks/`,
-`hindsight-dev/benchmarks/`), otherwise a small script. Show numbers side by side (before / after /
+`remember-dev/benchmarks/`), otherwise a small script. Show numbers side by side (before / after /
 change). No numbers, no plan.
 
 **UI change:** start the API and the control plane so the user can see it. Use free ports (check
 with `lsof -nP -iTCP:<port> -sTCP:LISTEN` — other worktrees often hold 8888/9999) and a new,
-unique pg0 instance (`HINDSIGHT_API_DATABASE_URL=pg0://triage-<issue-number-or-short-slug>`).
+unique pg0 instance (`REMEMBER_API_DATABASE_URL=pg0://triage-<issue-number-or-short-slug>`).
 Write down each PID and the pg0 instance. Seed the data needed to show the change, open it in the browser if browser tools are
 available, and give the user the link.
 
-**Services you start:** stop only your own — kill your PIDs (never `pkill -f hindsight`/`pytest`),
+**Services you start:** stop only your own — kill your PIDs (never `pkill -f remember`/`pytest`),
 and `pg0 drop --name <name> -f` only on instances you created; never touch a shared one. Leave the
 UI running while the user looks; stop everything once they are done or the triage ends.
 
