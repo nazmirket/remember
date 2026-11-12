@@ -101,18 +101,7 @@ describe("detectLlm", () => {
 });
 
 describe("daemonEnv", () => {
-  const cfg = resolveConfig({ serverMode: "daemon", daemonIdleTimeout: 42 });
-
-  it("passes the idle timeout through under the daemon's own env name", () => {
-    expect(daemonEnv(cfg, {} as NodeJS.ProcessEnv).REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT).toBe("42");
-  });
-
-  // It used to send 300 whether or not anyone asked, quietly retiring a SHARED daemon out from
-  // under an idle session — while every other Remember integration ships 0 (never exits).
-  it("says nothing about the idle timeout when it is unset, leaving the daemon its own default", () => {
-    const env = daemonEnv(resolveConfig({ serverMode: "daemon" }), {} as NodeJS.ProcessEnv);
-    expect(env).not.toHaveProperty("REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT");
-  });
+  const cfg = resolveConfig({ serverMode: "daemon" });
 
   // Forwarding the whole REMEMBER_API_* namespace means a new server-side knob needs no change
   // here to reach the daemon.
@@ -125,14 +114,13 @@ describe("daemonEnv", () => {
     expect(env.UNRELATED).toBeUndefined();
   });
 
-  it("forces both identity prefixes to local host and the same profile database", () => {
+  it("forces a local host and leaves database selection to the embedded manager", () => {
     const env = daemonEnv(cfg, {
       REMEMBER_API_HOST: "0.0.0.0",
       REMEMBER_API_DATABASE_URL: "postgresql://remote/db",
     });
     expect(env.REMEMBER_API_HOST).toBe("127.0.0.1");
-    expect(env.REMEMBER_API_DATABASE_URL).toBe(env.REMEMBER_API_DATABASE_URL);
-    expect(env.REMEMBER_API_DATABASE_URL).toMatch(/^pg0:\/\//);
+    expect(env.REMEMBER_API_DATABASE_URL).toBeUndefined();
   });
 
   it("binds locally even when the inherited environment requests a public host", () => {
@@ -149,8 +137,8 @@ describe("Remember checkout", () => {
       writeFileSync(join(embed, "pyproject.toml"), "");
       expect(isRememberCheckout(undefined)).toBe(false);
       expect(isRememberCheckout(embed)).toBe(false);
-      mkdirSync(join(root, "remember-api-slim"));
-      writeFileSync(join(root, "remember-api-slim", "pyproject.toml"), "");
+      mkdirSync(join(root, "remember-api"));
+      writeFileSync(join(root, "remember-api", "pyproject.toml"), "");
       expect(isRememberCheckout(embed)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });

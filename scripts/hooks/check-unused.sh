@@ -29,7 +29,7 @@ section() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 # when hunting dead functions, accepting more false positives.
 # Format: "<package-dir>:<importable source dir(s)>".
 for entry in \
-  "remember-api-slim:remember_api" \
+  "remember-api:remember_api" \
   "remember-dev:remember_dev" \
   "remember-embed:remember_embed"; do
   pkg="${entry%%:*}"

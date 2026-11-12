@@ -40,6 +40,7 @@ async function main(): Promise<void> {
   // An agent can start in any repository. Its .env must not override the local
   // bind address, database, or provider settings inherited by the daemon.
   process.env.PYTHON_DOTENV_DISABLED = "1";
+  process.env.REMEMBER_EMBED_PROFILE = cfg.daemonProfile;
   // The lifecycle wrapper persists its `env` in the profile. Keep credentials in this
   // starter's inherited environment instead of writing them into the profile file.
   const daemonSettings = daemonEnv(cfg);

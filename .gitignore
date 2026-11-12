@@ -7,7 +7,6 @@ wheels/
 *.egg-info
 # Release builds stage the canonical root license in each package context.
 /remember-clients/python/LICENSE
-/remember-api-slim/LICENSE
 /remember-api/LICENSE
 /remember-all/LICENSE
 /remember-all-slim/LICENSE

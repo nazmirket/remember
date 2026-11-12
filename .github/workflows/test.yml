@@ -31,7 +31,7 @@ jobs:
           python-version-file: .python-version
       - run: uv sync --frozen --all-packages --extra embedded-db --extra test
       - run: PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests -q
-      - run: .venv/bin/python -m pytest remember-api-slim/tests/test_health_probes.py remember-api-slim/tests/test_migration_shape.py -q -n 0
+      - run: .venv/bin/python -m pytest remember-api/tests/test_health_probes.py remember-api/tests/test_migration_shape.py -q -n 0
   memory-system:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -42,14 +42,8 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --extra embedded-db
-        working-directory: remember-api-slim
+        working-directory: remember-api
       - run: uv sync --frozen
         working-directory: remember-system-tests
       - run: uv run pytest tests -q
         working-directory: remember-system-tests
-  cli:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --manifest-path remember-cli/Cargo.toml

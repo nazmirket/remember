@@ -1,4 +1,4 @@
-"""Tests for forwarding commands from remember-embed to remember-cli."""
+"""Tests for daemon command routing and configuration."""
 
 import json
 import os
@@ -40,47 +40,6 @@ def invoke_cli(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
     assert exit_info.value.code == 0
-
-
-@pytest.mark.parametrize(
-    "env_profile,flag,expected",
-    [
-        pytest.param(None, [], "work", id="active-profile"),
-        pytest.param(None, ["-p", "other"], "other", id="cli-over-active"),
-        pytest.param("work", ["--profile", "other"], "work", id="env-over-cli"),
-        pytest.param(None, ["--profile", "default"], "", id="explicit-default"),
-        pytest.param("default", ["--profile", "other"], "", id="env-default-over-cli"),
-    ],
-)
-def test_forwarded_cli_uses_selected_config_and_endpoint(
-    profiles: ProfileManager,
-    monkeypatch: pytest.MonkeyPatch,
-    env_profile: str | None,
-    flag: list[str],
-    expected: str,
-) -> None:
-    """The parsed selection must govern both daemon configuration and the Rust CLI endpoint."""
-    profiles.set_active_profile("work")
-    if env_profile is not None:
-        monkeypatch.setenv("REMEMBER_EMBED_PROFILE", env_profile)
-    ensure_running = Mock(return_value=True)
-    child_process = Mock(return_value=Mock(returncode=0))
-    monkeypatch.setattr(daemon_client, "ensure_cli_installed", lambda: True)
-    monkeypatch.setattr(daemon_client, "find_cli_binary", lambda: Path("remember"))
-    monkeypatch.setattr(daemon_client, "ensure_daemon_running", ensure_running)
-    monkeypatch.setattr("subprocess.run", child_process)
-
-    invoke_cli(monkeypatch, [*flag, "bank", "list"])
-
-    ensure_running.assert_called_once()
-    config, actual_profile = ensure_running.call_args.args
-    assert actual_profile == expected
-    assert config["REMEMBER_API_LLM_MODEL"] == f"{expected or 'default'}-model"
-    child_process.assert_called_once()
-    assert child_process.call_args.args[0] == ["remember", "bank", "list"]
-    assert child_process.call_args.kwargs["env"]["REMEMBER_API_URL"] == (
-        f"http://127.0.0.1:{profiles.resolve_profile_paths(expected).port}"
-    )
 
 
 @pytest.mark.parametrize("command", ["daemon"])
@@ -155,16 +114,9 @@ def test_configure_uses_the_creation_target_even_with_an_env_profile(
     assert profiles.load_profile_config("work")["REMEMBER_API_LLM_MODEL"] == "work-model"
 
 
-def test_no_key_provider_is_forwarded_to_daemon(profiles: ProfileManager, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provider implementations, not the wrapper CLI, own credential validation."""
-    config = {"llm_provider": "mock", "llm_api_key": None}
-    run_cli = Mock(return_value=0)
+def test_unknown_memory_cli_command_is_rejected(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["remember-embed", "bank", "list"])
-    monkeypatch.setattr(cli, "get_config", lambda: config)
-    monkeypatch.setattr(daemon_client, "run_cli", run_cli)
-
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
-
-    assert exit_info.value.code == 0
-    run_cli.assert_called_once_with(["bank", "list"], config, "")
+    assert exit_info.value.code == 2
+    assert "unknown command" in capsys.readouterr().err

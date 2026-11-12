@@ -58,16 +58,6 @@ export interface RawConfig {
    *  NOT 8888 — that is the conventional port for a server you run yourself, and a daemon must
    *  never squat on it. A healthy server already on this port is adopted rather than restarted. */
   apiPort?: number;
-  /** Daemon mode: seconds of inactivity before the daemon exits. Unset means it never exits on
-   *  its own — `remember-embed`'s own default, which every other Remember integration also
-   *  ships. This used to default to 300 here, which made the plugin the only thing on the machine
-   *  opting a shared daemon into an auto-exit nobody asked for. There is deliberately no
-   *  stop-on-session-end either: one daemon is shared by every agent and repo on the machine, so
-   *  ending one session must not cut memory out from under another. */
-  daemonIdleTimeout?: number;
-  /** Daemon mode: `remember-embed` profile name, i.e. which local database is used (default
-   *  "coding-agent"). Separate profiles keep unrelated setups from sharing memory. */
-  daemonProfile?: string;
   /** Daemon mode: local `remember-embed` checkout to run instead of a published release (dev). */
   embedPackagePath?: string;
   bankId?: string; // EXPLICIT memory bank id — set = static bank; unset = per-repo dynamic (core/bank.ts)
@@ -294,8 +284,6 @@ export interface Config {
   apiUrl: string;
   apiToken?: string;
   apiPort: number;
-  /** Undefined = never told the daemon to auto-exit; see RawConfig above. */
-  daemonIdleTimeout?: number;
   daemonProfile: string;
   embedPackagePath?: string;
   bankId?: string; // resolved per-directory via deriveBankIdOrSkip — see core/bank.ts
@@ -582,8 +570,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     apiUrl: `http://127.0.0.1:${apiPort}`,
     apiToken: raw.apiToken || undefined,
     apiPort,
-    daemonIdleTimeout: raw.daemonIdleTimeout,
-    daemonProfile: raw.daemonProfile || DEFAULT_DAEMON_PROFILE,
+    daemonProfile: DEFAULT_DAEMON_PROFILE,
     embedPackagePath: raw.embedPackagePath || undefined,
     bankId: raw.bankId,
     dynamicBankId: raw.dynamicBankId,
@@ -733,12 +720,8 @@ const ENV_KEYS = {
   serverMode: "REMEMBER_SERVER_MODE",
   apiUrl: "REMEMBER_API_URL",
   apiToken: "REMEMBER_API_TOKEN",
-  // These four keep the names the old per-agent Claude Code plugin used, so a user migrating from
-  // it can carry their existing environment over unchanged.
   apiPort: "REMEMBER_API_PORT",
-  daemonIdleTimeout: "REMEMBER_DAEMON_IDLE_TIMEOUT",
   embedPackagePath: "REMEMBER_EMBED_PACKAGE_PATH",
-  daemonProfile: "REMEMBER_DAEMON_PROFILE",
   bankId: "REMEMBER_BANK_ID",
   dynamicBankId: "REMEMBER_DYNAMIC_BANK_ID",
   bankIdTemplate: "REMEMBER_BANK_ID_TEMPLATE",
@@ -793,7 +776,6 @@ const ENV_BOOLEANS = new Set<keyof RawConfig>([
 const ENV_LISTS = new Set<keyof RawConfig>(["retainTags", "optInPaths"]);
 const ENV_NUMBERS = new Set<keyof RawConfig>([
   "apiPort",
-  "daemonIdleTimeout",
   "maxParallelRetains",
   "reflectTimeoutMs",
   "reflectToolTimeoutMs",

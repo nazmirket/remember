@@ -12,7 +12,6 @@ from .server import (
     StubServer,
     run_remember_admin,
     start_remember_server,
-    start_remember_worker,
     start_stub_server,
 )
 from .waiting import wait_until_settled
@@ -24,7 +23,6 @@ __all__ = [
     "StubServer",
     "Stubs",
     "start_remember_server",
-    "start_remember_worker",
     "reflect_loop",
     "run_remember_admin",
     "start_stub_server",

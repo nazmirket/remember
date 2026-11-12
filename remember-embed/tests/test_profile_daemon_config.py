@@ -30,8 +30,8 @@ def test_profile_config_is_loaded_for_daemon(temp_home):
     """Test that profile .env config is loaded when preparing daemon startup.
 
     Before the fix, the daemon would ignore all values from the profile's .env file,
-    using only os.environ or hardcoded defaults. This caused REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT
-    and other profile-specific settings to be silently ignored.
+    using only os.environ or hardcoded defaults. This caused profile-specific
+    settings to be silently ignored.
     """
     # Create a profile with custom configuration
     profile_dir = temp_home / ".remember" / "profiles"
@@ -45,7 +45,6 @@ def test_profile_config_is_loaded_for_daemon(temp_home):
         "REMEMBER_API_LLM_PROVIDER=openai\n"
         "REMEMBER_API_LLM_API_KEY=sk-test-fake-key\n"
         "REMEMBER_API_LLM_MODEL=gpt-4o-mini\n"
-        "REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT=0\n"
         "REMEMBER_API_LOG_LEVEL=debug\n"
     )
 
@@ -84,7 +83,6 @@ def test_profile_config_is_loaded_for_daemon(temp_home):
     assert profile_config["REMEMBER_API_LLM_PROVIDER"] == "openai"
     assert profile_config["REMEMBER_API_LLM_API_KEY"] == "sk-test-fake-key"
     assert profile_config["REMEMBER_API_LLM_MODEL"] == "gpt-4o-mini"
-    assert profile_config["REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT"] == "0"
     assert profile_config["REMEMBER_API_LOG_LEVEL"] == "debug"
 
     # Keys are returned under their environment-variable names only. The
@@ -403,7 +401,7 @@ def test_daemon_preserves_uv_python_for_local_uv(temp_home, monkeypatch):
 
     def fake_find_api_command(env=None):
         captured["find_env"] = env
-        return ["uv", "run", "--project", "/fork/remember-api-slim", "remember-api"]
+        return ["uv", "run", "--project", "/fork/remember-api", "remember-api"]
 
     def fake_popen(cmd, env, **kwargs):
         captured["popen_env"] = env
@@ -739,88 +737,6 @@ def _windows_scripts_dir(tmp_path: Path, *, with_pythonw: bool) -> Path:
     return scripts_dir
 
 
-def test_windows_daemon_launches_via_gui_interpreter(temp_home, tmp_path, monkeypatch):
-    """Regression test for issue #1885.
-
-    On Windows the daemon must be launched through the GUI-subsystem
-    pythonw.exe (`pythonw.exe -m remember_api.main`) rather than the
-    console-subsystem remember-api.exe wrapper. The CUI exe makes Windows
-    Terminal's ConPTY pop a visible terminal tab on every daemon start; the GUI
-    interpreter never allocates a console.
-    """
-    from remember_embed.daemon_embed_manager import DaemonEmbedManager
-
-    scripts_dir = _windows_scripts_dir(tmp_path, with_pythonw=True)
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(manager, "_dev_api_command", lambda: None)
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.sysconfig.get_path",
-        lambda name: str(scripts_dir),
-    )
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.sys.executable",
-        str(scripts_dir / "python.exe"),
-    )
-
-    cmd = manager._find_api_command(
-        env={"REMEMBER_API_EMBEDDINGS_PROVIDER": "openai", "REMEMBER_API_RERANKER_PROVIDER": "rrf"}
-    )
-    assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "remember_api.main"]
-
-
-def test_windows_daemon_falls_back_to_console_exe_without_pythonw(temp_home, tmp_path, monkeypatch):
-    """When pythonw.exe is missing the daemon still launches via the console exe.
-
-    The GUI-interpreter swap is best-effort: an exotic install without
-    pythonw.exe must not break daemon startup, only forgo the no-window benefit.
-    """
-    from remember_embed.daemon_embed_manager import DaemonEmbedManager
-
-    scripts_dir = _windows_scripts_dir(tmp_path, with_pythonw=False)
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(manager, "_dev_api_command", lambda: None)
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.sysconfig.get_path",
-        lambda name: str(scripts_dir),
-    )
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.sys.executable",
-        str(scripts_dir / "python.exe"),
-    )
-
-    cmd = manager._find_api_command(
-        env={"REMEMBER_API_EMBEDDINGS_PROVIDER": "openai", "REMEMBER_API_RERANKER_PROVIDER": "rrf"}
-    )
-    assert cmd == [str(scripts_dir / "remember-api.exe")]
-
-
-def test_posix_daemon_uses_console_entrypoint(temp_home, tmp_path, monkeypatch):
-    """On POSIX there's no pythonw substitution — run the console entry point."""
-    from remember_embed.daemon_embed_manager import DaemonEmbedManager
-
-    scripts_dir = tmp_path / "bin"
-    scripts_dir.mkdir()
-    console_bin = scripts_dir / "remember-api"
-    console_bin.write_text("#!/usr/bin/env python\n")
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(manager, "_dev_api_command", lambda: None)
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.sysconfig.get_path",
-        lambda name: str(scripts_dir),
-    )
-
-    cmd = manager._find_api_command(
-        env={"REMEMBER_API_EMBEDDINGS_PROVIDER": "openai", "REMEMBER_API_RERANKER_PROVIDER": "rrf"}
-    )
-    assert cmd == [str(console_bin)]
-
-
 def _base_pythonw(tmp_path: Path) -> Path:
     """The base interpreter a fake venv's pyvenv.cfg points ``home`` at."""
     return tmp_path / "base" / "pythonw.exe"
@@ -871,93 +787,6 @@ _EXTERNAL_PROVIDERS = {
     "REMEMBER_API_EMBEDDINGS_PROVIDER": "openai",
     "REMEMBER_API_RERANKER_PROVIDER": "openai",
 }
-
-
-def test_windows_uv_trampoline_resolves_to_base_pythonw(temp_home, tmp_path, monkeypatch):
-    """Regression test for issue #4466.
-
-    A uv venv's Scripts/pythonw.exe is a trampoline that relaunches the base
-    interpreter as the CUI python.exe, popping the console window our detach
-    flags were supposed to prevent — they only ever applied to the trampoline.
-    Launch the base pythonw.exe directly, adding the venv's site-packages with
-    site.addsitedir so remember_api is importable from outside the venv and the
-    venv's .pth files still run (#4974, #5025: PYTHONPATH skipped them).
-    """
-    from remember_embed.daemon_embed_manager import _VENV_SITE_BOOTSTRAP
-
-    scripts_dir = _windows_launcher_venv(tmp_path, uv=True)
-    manager = _windows_manager(monkeypatch, scripts_dir)
-
-    env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command(env=env)
-
-    site_packages = str(tmp_path / "Lib" / "site-packages")
-    assert cmd == [str(_base_pythonw(tmp_path)), "-c", _VENV_SITE_BOOTSTRAP, site_packages]
-    assert "PYTHONPATH" not in env
-
-
-def test_venv_site_bootstrap_runs_pth_files_and_passes_the_daemon_args(tmp_path):
-    """The bootstrap must do what the venv would: process .pth files, then run
-    remember_api.main with the arguments the daemon command appends."""
-    import subprocess
-    import sys
-
-    from remember_embed.daemon_embed_manager import _VENV_SITE_BOOTSTRAP
-
-    site_packages = tmp_path / "site-packages"
-    (site_packages / "remember_api").mkdir(parents=True)
-    (site_packages / "extra").mkdir()
-    (site_packages / "extra.pth").write_text("extra\n")
-    (site_packages / "extra" / "pth_marker.py").write_text("LOADED = True\n")
-    (site_packages / "remember_api" / "__init__.py").write_text("")
-    (site_packages / "remember_api" / "main.py").write_text(
-        "import sys, pth_marker\nif __name__ == '__main__':\n    print(sys.argv[1:], pth_marker.LOADED)\n"
-    )
-
-    out = subprocess.run(
-        # -S: no site-packages of its own, like the base interpreter outside the venv; otherwise
-        # this dev environment's real remember_api would win over the fake one.
-        [sys.executable, "-S", "-c", _VENV_SITE_BOOTSTRAP, str(site_packages), "--port", "9077"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert out.strip() == "['--port', '9077'] True"
-
-
-def test_windows_stdlib_venv_keeps_its_own_pythonw(temp_home, tmp_path, monkeypatch):
-    """A stdlib venv's pythonw.exe already redirects to the base pythonw.
-
-    It is the GUI venvwlauncher, so it never allocates a console. Bypassing it
-    would drop the daemon out of its venv for no gain, so only uv-marked
-    pyvenv.cfg files trigger the #4466 resolution.
-    """
-    scripts_dir = _windows_launcher_venv(tmp_path, uv=False)
-    manager = _windows_manager(monkeypatch, scripts_dir)
-
-    env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command(env=env)
-
-    assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "remember_api.main"]
-    assert "PYTHONPATH" not in env
-
-
-def test_windows_uv_trampoline_kept_when_site_packages_missing(temp_home, tmp_path, monkeypatch):
-    """Bypassing the trampoline is only safe if we can replace the venv's imports.
-
-    The base interpreter lives outside the venv, so without site-packages on
-    PYTHONPATH it cannot import remember_api and the daemon never starts — a
-    worse outcome than the console flash we are trying to remove. Fall back to
-    launching the trampoline unchanged.
-    """
-    scripts_dir = _windows_launcher_venv(tmp_path, uv=True, with_site_packages=False)
-    manager = _windows_manager(monkeypatch, scripts_dir)
-
-    env = dict(_EXTERNAL_PROVIDERS)
-    cmd = manager._find_api_command(env=env)
-
-    assert cmd == [str(scripts_dir / "pythonw.exe"), "-m", "remember_api.main"]
-    assert "PYTHONPATH" not in env
 
 
 def _capture_daemon_env(manager, profile: str, config: dict) -> dict[str, str]:
@@ -1079,37 +908,23 @@ def test_configure_from_env_persists_every_api_var(temp_home, monkeypatch):
     assert not any(line.startswith("REMEMBER_EMBED_API_URL=") for line in active)
 
 
-def test_api_database_url_is_not_replaced_by_pg0(temp_home, monkeypatch):
-    """Regression test for issue #6065.
-
-    On a Windows zh-CN machine pg0 cannot start, and the user's
-    REMEMBER_API_DATABASE_URL (in the shell or the profile) was overwritten
-    with the profile's pg0 URL, so there was no way to use an external server.
-    """
+def test_daemon_uses_local_pg0_even_with_remote_database_config(temp_home, monkeypatch):
     from remember_embed.daemon_embed_manager import DaemonEmbedManager
 
-    monkeypatch.delenv("REMEMBER_EMBED_API_DATABASE_URL", raising=False)
-    external = "postgresql://postgres:postgres@127.0.0.1:5433/postgres"
-
+    external = "postgresql://remote.example/other"
     _write_profile(temp_home, "coding-agent", f"REMEMBER_API_DATABASE_URL={external}\n")
-    monkeypatch.delenv("REMEMBER_API_DATABASE_URL", raising=False)
-    env = _capture_daemon_env(DaemonEmbedManager(), "coding-agent", {})
-    assert env["REMEMBER_API_DATABASE_URL"] == external
-
-    _write_profile(temp_home, "coding-agent", "")
+    monkeypatch.setenv("REMEMBER_EMBED_API_DATABASE_URL", external)
     monkeypatch.setenv("REMEMBER_API_DATABASE_URL", external)
     env = _capture_daemon_env(DaemonEmbedManager(), "coding-agent", {})
-    assert env["REMEMBER_API_DATABASE_URL"] == external
-
-    monkeypatch.delenv("REMEMBER_API_DATABASE_URL")
-    env = _capture_daemon_env(DaemonEmbedManager(), "coding-agent", {})
-    assert env["REMEMBER_API_DATABASE_URL"].startswith("pg0://")
+    assert env["REMEMBER_API_DATABASE_URL"] == "pg0://remember-embed-coding-agent"
 
 
-def test_profile_database_wins_over_ambient_setting(temp_home, monkeypatch):
+def test_daemon_forces_loopback_and_embedded_worker(temp_home, monkeypatch):
     from remember_embed.daemon_embed_manager import DaemonEmbedManager
 
-    _write_profile(temp_home, "coding-agent", "REMEMBER_API_DATABASE_URL=pg0://existing-bank\n")
-    monkeypatch.setenv("REMEMBER_API_DATABASE_URL", "postgresql://remote.example/other")
+    _write_profile(temp_home, "coding-agent", "REMEMBER_API_HOST=0.0.0.0\nREMEMBER_API_WORKERS=8\n")
+    monkeypatch.setenv("REMEMBER_API_WORKER_ENABLED", "false")
     env = _capture_daemon_env(DaemonEmbedManager(), "coding-agent", {})
-    assert env["REMEMBER_API_DATABASE_URL"] == "pg0://existing-bank"
+    assert env["REMEMBER_API_HOST"] == "127.0.0.1"
+    assert env["REMEMBER_API_WORKERS"] == "1"
+    assert env["REMEMBER_API_WORKER_ENABLED"] == "true"

@@ -1,9 +1,4 @@
-"""
-Concrete implementation of EmbedManager using daemon-based architecture.
-
-This module provides the production implementation of the embed management interface,
-consolidating daemon lifecycle, profile management, and database URL resolution.
-"""
+"""Local daemon lifecycle and database selection."""
 
 import logging
 import math
@@ -12,14 +7,10 @@ import platform
 import re
 import signal
 import subprocess
-import sys
-import sysconfig
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from importlib.util import find_spec
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO
 
 from rich.console import Console
 from rich.live import Live
@@ -27,7 +18,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ._http_probe import ProbeResponse, probe_get
-from .embed_manager import EmbedManager
 from .profile_manager import ProfileLockTimeout, ProfileManager, lock_file, unlock_file
 
 logger = logging.getLogger(__name__)
@@ -71,7 +61,6 @@ def _parse_non_negative_int(value: str | None, default: int, name: str) -> int:
 # runners than POSIX.
 DAEMON_STARTUP_TIMEOUT = int(os.getenv("REMEMBER_EMBED_DAEMON_STARTUP_TIMEOUT", "180"))
 DAEMON_STARTUP_TERMINATE_TIMEOUT = 10
-DEFAULT_DAEMON_IDLE_TIMEOUT = 0  # 0 = disabled (no auto-exit)
 ENV_DAEMON_LOG_MAX_BYTES = "REMEMBER_EMBED_DAEMON_LOG_MAX_BYTES"
 ENV_DAEMON_LOG_BACKUP_COUNT = "REMEMBER_EMBED_DAEMON_LOG_BACKUP_COUNT"
 DEFAULT_DAEMON_LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -150,7 +139,7 @@ def _runs_a_foreign_interpreter(cmd: list[str]) -> bool:
     """Whether *cmd* launches remember-api on an interpreter that is not ours.
 
     True for uv-launched commands, including the
-    monorepo ``uv run --project <api-slim> ... remember-api`` dev command — because uv resolves
+    monorepo ``uv run --project <api> ... remember-api`` dev command — because uv resolves
     an environment of its own, usually on a different Python than the caller. False for the
     installed-binary paths, which are a single executable from an environment we already share.
 
@@ -249,23 +238,7 @@ def _terminate_startup_process(process: subprocess.Popen) -> None:
         return
 
 
-# Runs remember_api.main on a base interpreter after adding a venv's site-packages (argv[1])
-# the way the venv itself would, .pth files included. Arguments after it reach the module.
-_VENV_SITE_BOOTSTRAP = (
-    "import runpy, site, sys; site.addsitedir(sys.argv.pop(1)); "
-    "runpy.run_module('remember_api.main', run_name='__main__', alter_sys=True)"
-)
-
-
-@dataclass(frozen=True)
-class UvTrampoline:
-    """A uv venv's Scripts/pythonw.exe, resolved to what it actually launches."""
-
-    base_pythonw: str
-    venv_root: Path
-
-
-class DaemonEmbedManager(EmbedManager):
+class DaemonEmbedManager:
     """Production embed manager using daemon-based architecture with profile isolation."""
 
     def __init__(self):
@@ -302,42 +275,12 @@ class DaemonEmbedManager(EmbedManager):
             return "default"
         return re.sub(r"[^a-zA-Z0-9_-]", "-", profile)
 
-    def get_database_url(self, profile: str, db_url: Optional[str] = None) -> str:
-        """
-        Get the database URL for this profile.
-
-        Args:
-            profile: Profile name
-            db_url: Optional override database URL
-
-        Returns:
-            Database connection string
-        """
-        if db_url and db_url != "pg0":
-            return db_url
-        safe_profile = self._sanitize_profile_name(profile)
-        return f"pg0://remember-embed-{safe_profile}"
+    def get_database_url(self, profile: str) -> str:
+        """Return the local pg0 database owned by this profile."""
+        return f"pg0://remember-embed-{self._sanitize_profile_name(profile)}"
 
     def resolve_database_url(self, profile: str, config: Mapping[str, str] | None = None) -> str:
-        """Return the database the daemon for this profile runs on.
-
-        A URL the user set wins, from the profile .env (or ``config``) first and
-        the process environment second: REMEMBER_EMBED_API_DATABASE_URL, then
-        the API's own REMEMBER_API_DATABASE_URL. Only with neither set does the
-        profile get its own pg0. The API variable used to be overwritten with
-        pg0, which left no way to use an external server on a machine where pg0
-        cannot start (issue #6065).
-        """
-        if config is None:
-            config = self._profile_manager.load_profile_config(profile)
-        keys = (
-            "REMEMBER_EMBED_API_DATABASE_URL",
-            "REMEMBER_API_DATABASE_URL",
-        )
-        for source in (config, os.environ):
-            for key in keys:
-                if source.get(key):
-                    return source[key]
+        """Resolve the daemon database locally, independent of inherited settings."""
         return self.get_database_url(profile)
 
     def get_url(self, profile: str) -> str:
@@ -369,168 +312,17 @@ class DaemonEmbedManager(EmbedManager):
 
     def _dev_api_command(self) -> list[str] | None:
         """Return the dev-mode launch command when running inside the monorepo."""
-        dev_api_path = Path(__file__).parent.parent.parent / "remember-api-slim"
+        dev_api_path = Path(__file__).parent.parent.parent / "remember-api"
         if dev_api_path.exists() and (dev_api_path / "pyproject.toml").exists():
             return ["uv", "run", "--project", str(dev_api_path), "--extra", "all", "remember-api"]
         return None
 
-    @staticmethod
-    def _uv_trampoline_target(pythonw: Path) -> UvTrampoline | None:
-        """For a uv venv trampoline, resolve the base pythonw.exe it launches.
-
-        uv does not put a real interpreter in a venv's Scripts dir: the small
-        ``pythonw.exe`` there is a trampoline that CreateProcess's the base
-        interpreter recorded in ``pyvenv.cfg``. That relaunch lands on the CUI
-        ``python.exe``, which allocates a visible console because the
-        ``CREATE_NO_WINDOW`` flag applied to the trampoline, not to the process
-        the trampoline went on to spawn (issue #4466). Launching the base
-        pythonw.exe ourselves keeps the whole tree GUI-subsystem.
-
-        Returns None unless pyvenv.cfg carries uv's own ``uv =`` marker: a
-        stdlib venv's pythonw.exe is the GUI venvwlauncher, which already
-        redirects to the base *pythonw*, so bypassing it here would drop it out
-        of its venv for no gain.
-        """
-        for venv_root in (pythonw.parent.parent, pythonw.parent):
-            cfg = venv_root / "pyvenv.cfg"
-            try:
-                if not cfg.is_file():
-                    continue
-                text = cfg.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            entries = {
-                key.strip().lower(): value.strip()
-                for key, _, value in (line.partition("=") for line in text.splitlines())
-            }
-            if "uv" not in entries or "home" not in entries:
-                continue
-            base_pythonw = Path(entries["home"]) / "pythonw.exe"
-            if base_pythonw.is_file():
-                return UvTrampoline(base_pythonw=str(base_pythonw), venv_root=venv_root)
-        return None
-
-    @staticmethod
-    def _windows_gui_api_command(preferred_dir: Path | None = None) -> list[str] | None:
-        """Command that runs ``remember_api.main`` on the GUI-subsystem Python (pythonw.exe), or None.
-
-        Returns None on non-Windows, or when pythonw.exe can't be located next
-        to the preferred scripts directory or running interpreter.
-
-        On Windows 11 with Windows Terminal as the default terminal app,
-        spawning the console-subsystem (CUI, subsystem 3) remember-api.exe
-        launcher makes ConPTY pop a visible terminal tab on daemon start, even
-        with DETACHED_PROCESS / CREATE_NO_WINDOW (issue #1885). Launching the
-        daemon through the GUI-subsystem (subsystem 2) pythonw.exe interpreter
-        never allocates a console, so no window appears. Prefer the scripts dir
-        that contains remember-api.exe because wrapper entry points can make
-        sys.executable point at a different launcher directory (issue #2389).
-
-        When the pythonw we find is a uv trampoline, run the base interpreter
-        instead (#4466) and add the venv's site-packages with
-        ``site.addsitedir`` before running the module. This used to put
-        site-packages on PYTHONPATH, which makes it importable but never
-        processes its ``.pth`` files: ``pywin32.pth`` (DLL search path for
-        ``pywintypes``) and the files that wire up fastmcp were skipped, and the
-        daemon died on import (#4974, #5025). ``addsitedir`` handles both.
-        """
-        if platform.system() != "Windows":
-            return None
-        candidates: list[Path] = []
-        if preferred_dir is not None:
-            candidates.append(preferred_dir / "pythonw.exe")
-        candidates.append(Path(sys.executable).with_name("pythonw.exe"))
-        for pythonw in candidates:
-            if not pythonw.exists():
-                continue
-            target = DaemonEmbedManager._uv_trampoline_target(pythonw)
-            # Only bypass the trampoline when we can hand the base interpreter
-            # the venv's packages: without them it can't import remember_api,
-            # and a daemon that won't start is worse than a console flash.
-            if target is not None:
-                site_packages = target.venv_root / "Lib" / "site-packages"
-                if site_packages.is_dir():
-                    return [target.base_pythonw, "-c", _VENV_SITE_BOOTSTRAP, str(site_packages)]
-            return [str(pythonw), "-m", "remember_api.main"]
-        return None
-
-    @staticmethod
-    def _needs_local_sentence_transformers(env: Mapping[str, str] | None = None) -> bool:
-        """Return True when the daemon config will load the local ST providers."""
-        env = env or os.environ
-        embeddings_provider = env.get("REMEMBER_API_EMBEDDINGS_PROVIDER", "local")
-        reranker_provider = env.get("REMEMBER_API_RERANKER_PROVIDER", "local")
-        return embeddings_provider == "local" or reranker_provider == "local"
-
-    @staticmethod
-    def _can_use_installed_api_binary(env: Mapping[str, str] | None = None) -> bool:
-        """Avoid slim sibling binaries when default local ML deps are unavailable."""
-        if not DaemonEmbedManager._needs_local_sentence_transformers(env):
-            return True
-        if find_spec("sentence_transformers") is not None:
-            return True
-        logger.warning(
-            "Installed remember-api binary is missing local ML dependencies; "
-            "install local ML extras in the Remember environment or set "
-            "REMEMBER_API_EMBEDDINGS_PROVIDER and REMEMBER_API_RERANKER_PROVIDER "
-            "to non-local providers to use a slim install."
-        )
-        return False
-
     def _find_api_command(self, env: Mapping[str, str] | None = None) -> list[str]:
-        """Find a local API executable without downloading a published upstream package."""
-        # Check if we're in development mode
-        dev_command = self._dev_api_command()
-        if dev_command is not None:
-            return dev_command
-
-        # Prefer a remember-api entry point installed alongside remember-embed.
-        # Try three strategies:
-        #
-        # 1. sysconfig: resolves <venv>/bin or <venv>/Scripts for standard
-        #    pip/venv installs (issue #1401).
-        # 2. The venv holding this file, found by its pyvenv.cfg: a different
-        #    interpreter can load the venv's site-packages (Hermes runs the base
-        #    Python with site.addsitedir), and then sysconfig reports that
-        #    interpreter's scripts dir instead of the venv's (issue #6252).
-        # 3. __file__-relative: resolves <target>/bin or <target>/Scripts for
-        #    `pip install --target` layouts where sysconfig still points at the
-        #    system/venv scripts dir (issue #1240).
-        is_windows = platform.system() == "Windows"
-        binary_names = ("remember-api.exe",) if is_windows else ("remember-api",)
-
-        scripts_dirs = [Path(sysconfig.get_path("scripts"))]
-        site_packages = Path(__file__).parent.parent
-        if site_packages.name == "site-packages":
-            # Only the venv that owns this site-packages: <venv>/Lib/site-packages
-            # on Windows, <venv>/lib/pythonX.Y/site-packages elsewhere. Walking every
-            # parent would let an unrelated outer venv shadow a --target bundle.
-            venv_root = next((p for p in site_packages.parents[1:3] if (p / "pyvenv.cfg").is_file()), None)
-            if venv_root is not None:
-                scripts_dirs.append(venv_root / ("Scripts" if is_windows else "bin"))
-        installed = [(d, name) for name in binary_names for d in dict.fromkeys(scripts_dirs) if (d / name).exists()]
-        if installed and self._can_use_installed_api_binary(env):
-            # remember_api is importable by that venv's own interpreter, so
-            # prefer its GUI pythonw.exe on Windows to avoid ConPTY popping a
-            # terminal tab (issue #1885).
-            scripts_dir, binary_name = installed[0]
-            return self._windows_gui_api_command(scripts_dir) or [str(scripts_dir / binary_name)]
-
-        # --target installs place binaries alongside site-packages contents.
-        # The running interpreter usually can't import remember_api here (it's
-        # under the --target dir, not on sys.path), so we can't substitute
-        # pythonw.exe; run the console exe directly.
-        package_root = Path(__file__).parent.parent
-        for binary_name in binary_names:
-            for bin_dir in ("bin", "Scripts"):
-                candidate = package_root / bin_dir / binary_name
-                if candidate.exists():
-                    # A binary bundled into a --target layout is a deliberate local install.
-                    return [str(candidate)]
-
-        raise RuntimeError(
-            "No usable local remember-api found; install Remember and its required local model dependencies"
-        )
+        """Launch only the API from this Remember checkout."""
+        command = self._dev_api_command()
+        if command is None:
+            raise RuntimeError("The Remember API checkout is required beside remember-embed")
+        return command
 
     @staticmethod
     def _is_port_in_use(port: int) -> bool:
@@ -975,6 +767,9 @@ class DaemonEmbedManager(EmbedManager):
                 env[key] = str(value)
 
         env["REMEMBER_API_DATABASE_URL"] = self.resolve_database_url(profile, config)
+        env["REMEMBER_API_HOST"] = "127.0.0.1"
+        env["REMEMBER_API_WORKERS"] = "1"
+        env["REMEMBER_API_WORKER_ENABLED"] = "true"
 
         database_url = env["REMEMBER_API_DATABASE_URL"]
         is_pg0 = database_url.startswith("pg0://")
@@ -982,15 +777,10 @@ class DaemonEmbedManager(EmbedManager):
         # Set defaults if not provided
         if "REMEMBER_API_LOG_LEVEL" not in env:
             env["REMEMBER_API_LOG_LEVEL"] = "info"
-        if "REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT" not in env:
-            env["REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT"] = str(DEFAULT_DAEMON_IDLE_TIMEOUT)
 
         # Tell the daemon child it was already launched in a detached session
         # (via our Popen below) so daemonize() skips the redundant re-exec.
         env["_REMEMBER_DAEMON_CHILD"] = "1"
-
-        # Get idle timeout from env
-        idle_timeout = int(env.get("REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT", str(DEFAULT_DAEMON_IDLE_TIMEOUT)))
 
         # Create log directory
         daemon_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1023,8 +813,6 @@ class DaemonEmbedManager(EmbedManager):
             console.print(f"[red]Cannot start local daemon: {exc}[/red]")
             return False
         cmd += [
-            "--idle-timeout",
-            str(idle_timeout),
             "--port",
             str(port),
         ]

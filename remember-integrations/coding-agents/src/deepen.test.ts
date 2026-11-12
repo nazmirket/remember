@@ -42,7 +42,7 @@ beforeEach(async () => {
       res.end(
         JSON.stringify({
           checkout_source: realpathSync(
-            join(__dirname, "..", "..", "..", "remember-api-slim", "remember_api", "api", "http.py")
+            join(__dirname, "..", "..", "..", "remember-api", "remember_api", "api", "http.py")
           ),
         })
       );

@@ -18,16 +18,16 @@ Remember stores its configuration and local state in `~/.remember` by default. S
 
 ## Development
 
-- `remember-api-slim/`: API, memory engine, worker and database migrations.
+- `remember-api/`: API, memory engine, worker and database migrations.
 - `remember-embed/`: local daemon and profile lifecycle.
 - `remember-integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
 - `remember-system-tests/`: blackbox memory tests using local database and deterministic model stubs.
-- `remember-clients/python/` and `remember-cli/`: the system-test client and standalone command-line tool.
+- `remember-clients/python/`: the system-test API client.
 - `schemas/`: generated local API schema.
 
 ```sh
 (cd remember-integrations/coding-agents && npm ci && npm test && npm run build)
-(cd remember-api-slim && uv sync --frozen --extra embedded-db)
+(cd remember-api && uv sync --frozen --extra embedded-db)
 (cd remember-system-tests && uv run pytest tests/)
 PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests
 ```

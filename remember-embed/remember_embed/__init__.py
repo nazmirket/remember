@@ -1,16 +1,7 @@
-"""Remember embedded CLI - local memory operations without a server."""
+"""Local daemon lifecycle for Remember."""
 
 from .daemon_embed_manager import DaemonEmbedManager
-from .embed_manager import EmbedManager
 
 __version__ = "1.2.1"
 
-__all__ = [
-    "EmbedManager",
-    "DaemonEmbedManager",
-]
-
-
-def get_embed_manager() -> EmbedManager:
-    """Get the default embed manager instance."""
-    return DaemonEmbedManager()
+__all__ = ["DaemonEmbedManager"]

@@ -325,22 +325,6 @@
           "description": "Hard cap on inline images in a single extraction chunk",
           "title": "Retain Max Attachments Per Chunk"
         },
-        "mcp_enabled_tools": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "MCP tool allowlist for this bank (None = all tools)",
-          "title": "Mcp Enabled Tools"
-        },
         "consolidation_llm_batch_size": {
           "anyOf": [
             {

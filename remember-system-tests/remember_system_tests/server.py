@@ -28,9 +28,9 @@ from .stub_server import create_stub_app
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-API_DIR = REPO_ROOT / "remember-api-slim"
+API_DIR = REPO_ROOT / "remember-api"
 
-# A pg0 instance of its own, on a port nothing else uses. The api-slim suite and
+# A pg0 instance of its own, on a port nothing else uses. The api suite and
 # the dev server share the default "remember" instance, and pointing system
 # tests at that one would both see their leftovers and block on their locks.
 PG0_INSTANCE = "remember-systest"
@@ -207,20 +207,6 @@ def start_remember_server(
     return _start(["remember-api"], env=env, url=f"http://127.0.0.1:{port}", log_path=log_path)
 
 
-def start_remember_worker(
-    *, stub_url: str, log_path: Path, extra_env: dict[str, str] | None = None
-) -> RememberServer:
-    """A standalone ``remember-worker`` process, as a split deployment runs one.
-
-    It claims queued work from every schema its tenant extension lists — with the
-    default extension, ``REMEMBER_API_DATABASE_SCHEMA`` — so a story pairing it
-    with an HTTP-only server gives both its own schema, or this worker would claim
-    every other server's work too.
-    """
-    port = free_port()
-    env = _server_env(stub_url, extra_env)
-    command = ["remember-worker", "--http-host", "127.0.0.1", "--http-port", str(port)]
-    return _start(command, env=env, url=f"http://127.0.0.1:{port}", log_path=log_path)
 
 
 def run_remember_admin(

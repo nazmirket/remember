@@ -452,7 +452,7 @@ export class RememberClient {
         throw new Error("Memory requires Remember's local daemon");
       }
       const expected = realpathSync(
-        join(this.checkoutEmbedPath, "..", "remember-api-slim", "remember_api", "api", "http.py")
+        join(this.checkoutEmbedPath, "..", "remember-api", "remember_api", "api", "http.py")
       );
       const health = await fetch(`${this.apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
       const body = health.ok ? ((await health.json()) as { checkout_source?: string }) : undefined;

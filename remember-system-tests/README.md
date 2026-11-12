@@ -5,7 +5,7 @@ published Python client. No engine imports, no SQL, no internals.
 
 ## Why this package exists
 
-`remember-api-slim/tests/` holds ~500 files, each covering one mechanism. That
+`remember-api/tests/` holds ~500 files, each covering one mechanism. That
 catches mechanism bugs. It does not catch *composition* bugs — consolidation
 wiping facts, a delta refresh missing a backdated window, a transfer dropping
 evidence — because no single-mechanism test spans the steps where those live.
@@ -32,7 +32,7 @@ exercised for real.
 
 ```bash
 # once: the server needs pg0, and nothing else beyond its base dependencies
-(cd ../remember-api-slim && uv sync --frozen --extra embedded-db)
+(cd ../remember-api && uv sync --frozen --extra embedded-db)
 
 cd remember-system-tests
 uv run pytest tests -v
@@ -44,7 +44,7 @@ model download**. CI (`test-system`) needs no provider secrets either, which
 means it runs on fork PRs — unlike every `test-api` job.
 
 The fixtures start their own embedded Postgres (`pg0://remember-systest:15499`),
-separate from the dev database and from the api-slim suite's, and run the server
+separate from the dev database and from the api suite's, and run the server
 from a scratch directory holding an empty `.env` so your own `.env` cannot leak
 into the test configuration.
 

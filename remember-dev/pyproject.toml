@@ -37,7 +37,6 @@ remember-api = { workspace = true }
 [project.scripts]
 generate-openapi = "remember_dev.generate_openapi:generate_openapi_spec"
 generate-bank-template-schema = "remember_dev.generate_bank_template_schema:main"
-cli-coverage-check = "remember_dev.cli_coverage_check:main"
 check-openapi-compatibility = "remember_dev.check_openapi_compatibility:main"
 
 [dependency-groups]

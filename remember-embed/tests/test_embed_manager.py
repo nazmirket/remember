@@ -1,4 +1,4 @@
-"""Tests for EmbedManager interface."""
+"""Tests for local daemon management."""
 
 import io
 import os
@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from remember_embed import get_embed_manager
 from remember_embed._http_probe import ProbeResponse
 from remember_embed.daemon_embed_manager import (
     DaemonEmbedManager,
@@ -21,10 +20,6 @@ from remember_embed.daemon_embed_manager import (
     _strip_parent_interpreter_env,
     _terminate_startup_process,
 )
-
-
-def _mock_sentence_transformers_present(monkeypatch):
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.find_spec", lambda name: object())
 
 
 # Process groups and SIGKILL do not exist on Windows.
@@ -62,7 +57,7 @@ def test_start_timeout_terminates_spawned_daemon_group(tmp_path, monkeypatch):
     with patch("remember_embed.daemon_embed_manager.subprocess.Popen", return_value=process) as popen:
         assert manager._start_daemon_locked({}, "test", paths) is False
 
-    assert popen.call_args.args[0] == ["remember-api", "--idle-timeout", "0", "--port", "9177"]
+    assert popen.call_args.args[0] == ["remember-api", "--port", "9177"]
     # The whole group, so a uvx launcher's remember-api grandchild goes too.
     killpg.assert_called_once_with(4321, signal.SIGTERM)
     process.wait.assert_called_once_with(timeout=10)
@@ -125,12 +120,12 @@ def test_uvx_fallback_does_not_inherit_the_parent_interpreter_env(tmp_path, monk
 
 
 def test_the_dev_uv_run_command_does_not_inherit_it_either(tmp_path, monkeypatch):
-    """`uv run --project <api-slim>` resolves that project's own environment, so it is as foreign
+    """`uv run --project <api>` resolves that project's own environment, so it is as foreign
     as uvx: a monorepo checkout under a host that exports PYTHONPATH would hit the same crash."""
     monkeypatch.setenv("PYTHONPATH", "/host/venv/lib/python3.14/site-packages")
     manager = _startup_manager(MagicMock(return_value=False))
     manager._find_api_command = MagicMock(
-        return_value=["uv", "run", "--project", "/repo/remember-api-slim", "--extra", "all", "remember-api"]
+        return_value=["uv", "run", "--project", "/repo/remember-api", "--extra", "all", "remember-api"]
     )
 
     assert "PYTHONPATH" not in _spawned_env(manager, tmp_path, monkeypatch)
@@ -196,7 +191,7 @@ def test_start_timeout_kills_daemon_on_windows(monkeypatch):
 
 def test_sanitize_profile_name_via_db_url():
     """Test profile name sanitization through database URL generation."""
-    manager = get_embed_manager()
+    manager = DaemonEmbedManager()
 
     # Test None defaults to "default"
     assert manager.get_database_url(None) == "pg0://remember-embed-default"
@@ -216,26 +211,23 @@ def test_sanitize_profile_name_via_db_url():
 
 def test_get_database_url_default():
     """Test database URL generation with default pg0."""
-    manager = get_embed_manager()
+    manager = DaemonEmbedManager()
 
     assert manager.get_database_url("myapp") == "pg0://remember-embed-myapp"
-    assert manager.get_database_url("myapp", None) == "pg0://remember-embed-myapp"
-    assert manager.get_database_url("myapp", "pg0") == "pg0://remember-embed-myapp"
 
 
-def test_get_database_url_custom():
-    """Test database URL generation with custom database."""
-    manager = get_embed_manager()
-
-    custom_url = "postgresql://user:pass@localhost/db"
-    assert manager.get_database_url("myapp", custom_url) == custom_url
-    assert manager.get_database_url("any-profile", custom_url) == custom_url
+def test_database_url_ignores_remote_settings(monkeypatch):
+    manager = DaemonEmbedManager()
+    monkeypatch.setenv("REMEMBER_EMBED_API_DATABASE_URL", "postgresql://remote/inherited")
+    monkeypatch.setenv("REMEMBER_API_DATABASE_URL", "postgresql://remote/inherited")
+    config = {"REMEMBER_API_DATABASE_URL": "postgresql://remote/profile"}
+    assert manager.resolve_database_url("myapp", config) == "pg0://remember-embed-myapp"
 
 
 def test_manager_singleton():
-    """Test that get_embed_manager returns functional instances."""
-    manager1 = get_embed_manager()
-    manager2 = get_embed_manager()
+    """Managers are independent and resolve the same local database."""
+    manager1 = DaemonEmbedManager()
+    manager2 = DaemonEmbedManager()
 
     # They should be independent instances but same type
     assert type(manager1) == type(manager2)
@@ -311,144 +303,6 @@ def test_register_profile_calls_create_when_api_keys_present():
     )
 
 
-def test_find_api_command_prefers_installed_binary_over_uvx(tmp_path, monkeypatch):
-    """
-    When remember-api is installed alongside remember-embed (e.g. via
-    `pip install remember-all`), _find_api_command should invoke that
-    binary directly rather than shelling out to uvx. Uses sysconfig to
-    locate the venv's scripts directory (issue #1401, #1240).
-    """
-    scripts_dir = tmp_path / "bin"
-    scripts_dir.mkdir()
-    api_binary = scripts_dir / "remember-api"
-    api_binary.touch()
-
-    manager = DaemonEmbedManager()
-    # Point __file__ away from monorepo so dev-mode check doesn't trigger
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember_embed" / "daemon_embed_manager.py")
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(api_binary)]
-
-
-def test_find_api_command_skips_slim_binary_without_local_ml(tmp_path, monkeypatch):
-    """Default local embeddings/reranker need sentence-transformers.
-
-    A slim sibling remember-api binary can exist without local ML extras
-    installed. In that case, report that local dependencies are missing instead of
-    starting a daemon that immediately fails during local provider init.
-    """
-    scripts_dir = tmp_path / "venv_bin"
-    scripts_dir.mkdir()
-    (scripts_dir / "remember-api").touch()
-
-    # Realistic venv layout: the module lives under site-packages, so the
-    # __file__-relative --target path (<site-packages>/bin) is distinct from the
-    # sysconfig scripts dir and finds no binary. The slim sibling is only in the
-    # sysconfig scripts dir — exactly where the #2676 uvx fallback applies (a
-    # --target bundle's sibling would instead be used unconditionally, per #1240).
-    module_path = tmp_path / "site-packages" / "remember_embed" / "daemon_embed_manager.py"
-    module_path.parent.mkdir(parents=True)
-    module_path.write_text("")
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(module_path))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.find_spec", lambda name: None)
-
-    with pytest.raises(RuntimeError, match="No usable local remember-api"):
-        manager._find_api_command(env={})
-
-
-def test_find_api_command_allows_slim_binary_with_external_providers(tmp_path, monkeypatch):
-    """Slim installs are valid when both embeddings and reranker are external."""
-    scripts_dir = tmp_path / "bin"
-    scripts_dir.mkdir()
-    api_binary = scripts_dir / "remember-api"
-    api_binary.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember_embed" / "daemon_embed_manager.py")
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.find_spec", lambda name: None)
-
-    env = {
-        "REMEMBER_API_EMBEDDINGS_PROVIDER": "cohere",
-        "REMEMBER_API_RERANKER_PROVIDER": "cohere",
-    }
-    assert manager._find_api_command(env=env) == [str(api_binary)]
-
-
-def test_find_api_command_target_install_uses_file_relative_fallback(tmp_path, monkeypatch):
-    """
-    When installed with `pip install --target`, sysconfig still points at the
-    system/venv scripts dir (no binary there). The __file__-relative fallback
-    should find the sibling binary in <target>/bin/ (issue #1240).
-    """
-    # sysconfig points to an empty venv scripts dir (no binary)
-    venv_scripts = tmp_path / "venv_bin"
-    venv_scripts.mkdir()
-
-    # --target layout: binary sits next to site-packages contents
-    target_dir = tmp_path / "target"
-    pkg_dir = target_dir / "remember_embed"
-    pkg_dir.mkdir(parents=True)
-    fake_module = pkg_dir / "daemon_embed_manager.py"
-    fake_module.write_text("")
-    sibling_bin = target_dir / "bin" / "remember-api"
-    sibling_bin.parent.mkdir()
-    sibling_bin.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(fake_module))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(venv_scripts))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(sibling_bin)]
-
-
-def test_find_api_command_target_install_uses_sibling_even_without_local_ml(tmp_path, monkeypatch):
-    """A --target-bundled sibling binary must be used even when local ML deps
-    are missing.
-
-    Regression for the #2676 vs #1240 conflict: the "missing sentence-transformers
-    -> uvx" fallback (#2676) applies only to the sysconfig-scripts path (standard
-    venv installs). A deliberate --target bundle must still use its sibling binary,
-    because falling back to uvx on --target installs reintroduces #1240 (enforced
-    by the Windows embed smoke test).
-    """
-    venv_scripts = tmp_path / "venv_bin"
-    venv_scripts.mkdir()
-
-    target_dir = tmp_path / "target"
-    pkg_dir = target_dir / "remember_embed"
-    pkg_dir.mkdir(parents=True)
-    fake_module = pkg_dir / "daemon_embed_manager.py"
-    fake_module.write_text("")
-    sibling_bin = target_dir / "bin" / "remember-api"
-    sibling_bin.parent.mkdir()
-    sibling_bin.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(fake_module))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(venv_scripts))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    # Default local providers + no sentence_transformers: the sysconfig path would
-    # fall back to uvx, but the --target sibling must still win.
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.find_spec", lambda name: None)
-
-    assert manager._find_api_command(env={}) == [str(sibling_bin)]
-
-
 def _embed_module_in_venv(venv: Path, site_packages: str) -> Path:
     """Create a venv (pyvenv.cfg at its root) holding remember_embed; return the module path."""
     pkg_dir = venv / site_packages / "remember_embed"
@@ -457,187 +311,6 @@ def _embed_module_in_venv(venv: Path, site_packages: str) -> Path:
     module = pkg_dir / "daemon_embed_manager.py"
     module.write_text("")
     return module
-
-
-def test_find_api_command_uses_venv_of_module_when_run_by_another_interpreter(tmp_path, monkeypatch):
-    """A base interpreter that loads the venv's site-packages (site.addsitedir, the
-    Hermes launcher) reports its own scripts dir through sysconfig. The binary in the
-    venv holding remember_embed must still be found instead of falling back to uvx (#6252).
-    """
-    base_scripts = tmp_path / "base" / "Scripts"
-    base_scripts.mkdir(parents=True)
-    venv = tmp_path / "venv"
-    module = _embed_module_in_venv(venv, "Lib/site-packages")
-    api_binary = venv / "Scripts" / "remember-api.exe"
-    api_binary.parent.mkdir()
-    api_binary.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(module))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(base_scripts))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    # The base interpreter has no pythonw.exe, so only the venv's could be used.
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sys.executable", str(base_scripts / "python.exe"))
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(api_binary)]
-
-    # With the venv's pythonw.exe present, the daemon starts windowless from it (#1885).
-    pythonw = venv / "Scripts" / "pythonw.exe"
-    pythonw.touch()
-    assert manager._find_api_command() == [str(pythonw), "-m", "remember_api.main"]
-
-
-def test_find_api_command_uses_venv_of_module_on_posix(tmp_path, monkeypatch):
-    """Same launcher shape on POSIX: <venv>/lib/pythonX.Y/site-packages -> <venv>/bin (#6252)."""
-    base_bin = tmp_path / "base" / "bin"
-    base_bin.mkdir(parents=True)
-    venv = tmp_path / "venv"
-    module = _embed_module_in_venv(venv, "lib/python3.12/site-packages")
-    api_binary = venv / "bin" / "remember-api"
-    api_binary.parent.mkdir()
-    api_binary.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(module))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(base_bin))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(api_binary)]
-
-    # Missing local ML deps keep the #2676 uvx fallback, as for a standard venv.
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.find_spec", lambda name: None)
-    with pytest.raises(RuntimeError, match="No usable local remember-api"):
-        manager._find_api_command(env={})
-
-
-def test_find_api_command_target_bundle_inside_venv_keeps_its_sibling(tmp_path, monkeypatch):
-    """A --target bundle that happens to sit inside some venv is not that venv's
-    install: its own sibling binary must win over the outer venv's (#6252, #1240).
-    """
-    base_bin = tmp_path / "base" / "bin"
-    base_bin.mkdir(parents=True)
-    outer_venv = tmp_path / "venv"
-    (outer_venv / "bin").mkdir(parents=True)
-    (outer_venv / "pyvenv.cfg").write_text("home = /base\n")
-    (outer_venv / "bin" / "remember-api").touch()
-    target_dir = outer_venv / "vendor"
-    pkg_dir = target_dir / "remember_embed"
-    pkg_dir.mkdir(parents=True)
-    module = pkg_dir / "daemon_embed_manager.py"
-    module.write_text("")
-    sibling_bin = target_dir / "bin" / "remember-api"
-    sibling_bin.parent.mkdir()
-    sibling_bin.touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(module))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(base_bin))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(sibling_bin)]
-
-
-def test_find_api_command_rejects_missing_local_binary(tmp_path, monkeypatch):
-    """Without a local binary or checkout, fail instead of downloading upstream."""
-    scripts_dir = tmp_path / "bin"
-    scripts_dir.mkdir()
-    # No remember-api binary in scripts_dir
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember_embed" / "daemon_embed_manager.py")
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Linux")
-
-    with pytest.raises(RuntimeError, match="No usable local remember-api"):
-        manager._find_api_command()
-
-
-def test_find_api_command_windows_uses_exe_suffix(tmp_path, monkeypatch):
-    """On Windows, the installed console binary has a .exe suffix.
-
-    Pin sys.executable to an interpreter dir without a pythonw.exe sibling so the
-    GUI-interpreter swap (issue #1885) is skipped and we deterministically
-    exercise the console-exe fallback — the path that proves .exe-suffix
-    resolution. The pythonw swap itself is covered below and in
-    test_profile_daemon_config.py.
-    """
-    scripts_dir = tmp_path / "Scripts"
-    scripts_dir.mkdir()
-    api_binary = scripts_dir / "remember-api.exe"
-    api_binary.touch()
-    interp_dir = tmp_path / "interp"
-    interp_dir.mkdir()
-    (interp_dir / "python.exe").touch()  # deliberately no pythonw.exe sibling
-
-    manager = DaemonEmbedManager()
-    # Point __file__ away from monorepo so dev-mode check doesn't trigger
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember_embed" / "daemon_embed_manager.py")
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sys.executable", str(interp_dir / "python.exe"))
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(api_binary)]
-
-
-def test_find_api_command_windows_prefers_gui_interpreter(tmp_path, monkeypatch):
-    """On Windows, launch via pythonw.exe instead of the console exe (issue #1885).
-
-    The console-subsystem remember-api.exe makes Windows Terminal's ConPTY pop a
-    visible tab on daemon start; the GUI-subsystem pythonw.exe never allocates a
-    console. When pythonw.exe sits next to sys.executable, _find_api_command must
-    return `pythonw.exe -m remember_api.main`.
-    """
-    scripts_dir = tmp_path / "Scripts"
-    scripts_dir.mkdir()
-    (scripts_dir / "remember-api.exe").touch()
-    (scripts_dir / "python.exe").touch()
-    pythonw = scripts_dir / "pythonw.exe"
-    pythonw.touch()
-
-    manager = DaemonEmbedManager()
-    # Point __file__ away from monorepo so dev-mode check doesn't trigger
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember_embed" / "daemon_embed_manager.py")
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sys.executable", str(scripts_dir / "python.exe"))
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(pythonw), "-m", "remember_api.main"]
-
-
-def test_find_api_command_windows_prefers_scripts_dir_pythonw_for_wrappers(tmp_path, monkeypatch):
-    """pip/uv wrapper executables can make sys.executable differ from Scripts."""
-    scripts_dir = tmp_path / "Scripts"
-    scripts_dir.mkdir()
-    (scripts_dir / "remember-api.exe").touch()
-    pythonw = scripts_dir / "pythonw.exe"
-    pythonw.touch()
-
-    wrapper_dir = tmp_path / "wrapper"
-    wrapper_dir.mkdir()
-    (wrapper_dir / "remember-embed.exe").touch()
-
-    manager = DaemonEmbedManager()
-    monkeypatch.setattr(
-        "remember_embed.daemon_embed_manager.__file__",
-        str(tmp_path / "remember_embed" / "daemon_embed_manager.py"),
-    )
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sysconfig.get_path", lambda key: str(scripts_dir))
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.platform.system", lambda: "Windows")
-    monkeypatch.setattr("remember_embed.daemon_embed_manager.sys.executable", str(wrapper_dir / "remember-embed.exe"))
-    _mock_sentence_transformers_present(monkeypatch)
-
-    assert manager._find_api_command() == [str(pythonw), "-m", "remember_api.main"]
 
 
 def test_listening_pids_windows_hides_netstat_console(monkeypatch):
@@ -874,3 +547,18 @@ def test_windows_daemon_descendants_inherit_console(tmp_path: Path) -> None:
     console_pids = {int(pid) for pid in output.split()}
     assert process.pid in console_pids
     assert os.getpid() not in console_pids
+
+
+def test_api_command_uses_checkout():
+    manager = DaemonEmbedManager()
+    command = manager._find_api_command()
+    assert command[:3] == ["uv", "run", "--project"]
+    assert Path(command[3]).resolve().name == "remember-api"
+    assert command[-1] == "remember-api"
+
+
+def test_api_command_rejects_missing_checkout(monkeypatch):
+    manager = DaemonEmbedManager()
+    monkeypatch.setattr(manager, "_dev_api_command", lambda: None)
+    with pytest.raises(RuntimeError, match="checkout is required"):
+        manager._find_api_command()

@@ -131,30 +131,21 @@ function onPath(bin: string): boolean {
   }
 }
 
-/** Environment handed to the daemon: the LLM choice, the idle timeout, and any REMEMBER_API_* the
+/** Environment handed to the daemon: the LLM choice and any REMEMBER_API_* the
  *  user already exports (so provider-specific knobs pass through without being enumerated here). */
 export function daemonEnv(
   cfg: Config,
   env: NodeJS.ProcessEnv = process.env
 ): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
-  // Forwarded only when set, and inert either way: the server dropped its idle timeout in #3903
-  // (it measured idleness from the request *start*, so a long retain killed its own daemon). Kept
-  // so an existing config still starts — the daemon ignores the value.
-  // It used to default to 300s here, which made the plugin the one thing on the machine opting a
-  // SHARED daemon into an auto-exit; every other integration shipped 0.
-  if (cfg.daemonIdleTimeout !== undefined) {
-    out.REMEMBER_EMBED_DAEMON_IDLE_TIMEOUT = String(cfg.daemonIdleTimeout);
-  }
   for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("REMEMBER_API_") && value) out[key] = value;
+    if (key.startsWith("REMEMBER_API_") && key !== "REMEMBER_API_DATABASE_URL" && value) {
+      out[key] = value;
+    }
   }
   // The local memory service must not inherit an externally exposed bind address.
   out.REMEMBER_API_HOST = "127.0.0.1";
-  // Ignore inherited remote database settings: this profile owns a local pg0 database.
-  const db = `pg0://remember-embed-${cfg.daemonProfile.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  out.REMEMBER_API_DATABASE_URL = db;
-  out.REMEMBER_EMBED_API_DATABASE_URL = db;
+  // Database selection is owned by remember-embed and always uses local pg0.
   const llm = detectLlm(env);
   if (llm) {
     out.REMEMBER_API_LLM_PROVIDER = llm.provider;
@@ -170,7 +161,7 @@ export function isRememberCheckout(path: string | undefined): boolean {
   return (
     !!path &&
     existsSync(join(path, "pyproject.toml")) &&
-    existsSync(join(path, "..", "remember-api-slim", "pyproject.toml"))
+    existsSync(join(path, "..", "remember-api", "pyproject.toml"))
   );
 }
 

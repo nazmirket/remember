@@ -23,7 +23,6 @@ from remember_system_tests import (
     LLMStub,
     Stubs,
     start_remember_server,
-    start_remember_worker,
     start_stub_server,
     wait_until_settled,
 )

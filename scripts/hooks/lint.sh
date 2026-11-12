@@ -107,7 +107,7 @@ fi
 
 # The Python packages import each other (remember-dev and remember-embed use
 # remember_api), so a change to any of them type-checks all three.
-PYTHON_PACKAGES=(remember-api-slim/ remember-dev/ remember-embed/ remember-clients/python/)
+PYTHON_PACKAGES=(remember-api/ remember-dev/ remember-embed/ remember-clients/python/)
 if changed "${PYTHON_PACKAGES[@]}" remember-integrations/; then
     echo "  Syncing Python dependencies..."
     # Run uv sync first so the environment is complete before the tools run.
@@ -126,10 +126,10 @@ echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
 if changed "${PYTHON_PACKAGES[@]}"; then
-    # Python remember-api-slim tasks
-    run_task "ruff-api-check" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-api-format" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ruff format ."
-    run_task "ty-api" "$REPO_ROOT/remember-api-slim" "$VENV_BIN/ty check remember_api"
+    # Python remember-api tasks
+    run_task "ruff-api-check" "$REPO_ROOT/remember-api" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-api-format" "$REPO_ROOT/remember-api" "$VENV_BIN/ruff format ."
+    run_task "ty-api" "$REPO_ROOT/remember-api" "$VENV_BIN/ty check remember_api"
 
     # Python remember-dev tasks
     run_task "ruff-dev-check" "$REPO_ROOT/remember-dev" "$VENV_BIN/ruff check --fix ."

@@ -3025,8 +3025,6 @@ class Remember:
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
         disposition_empathy: int | None = None,
-        # MCP settings
-        mcp_enabled_tools: list[str] | None = None,
         # Security / audit
         memory_defense: dict[str, Any] | None = None,
         audit_log_enabled: bool | None = None,
@@ -3096,7 +3094,6 @@ class Remember:
                 disposition_skepticism=disposition_skepticism,
                 disposition_literalism=disposition_literalism,
                 disposition_empathy=disposition_empathy,
-                mcp_enabled_tools=mcp_enabled_tools,
                 memory_defense=memory_defense,
                 audit_log_enabled=audit_log_enabled,
             )
@@ -3169,8 +3166,6 @@ class Remember:
         disposition_skepticism: int | None = None,
         disposition_literalism: int | None = None,
         disposition_empathy: int | None = None,
-        # MCP settings
-        mcp_enabled_tools: list[str] | None = None,
         # Security / audit
         memory_defense: dict[str, Any] | None = None,
         audit_log_enabled: bool | None = None,
@@ -3262,7 +3257,6 @@ class Remember:
             disposition_skepticism: How skeptical vs trusting (1=trusting, 5=skeptical).
             disposition_literalism: How literally to interpret information (1=flexible, 5=literal).
             disposition_empathy: How much to consider emotional context (1=detached, 5=empathetic).
-            mcp_enabled_tools: List of MCP tool names to enable for this bank.
             memory_defense: Memory-defense (prompt-injection / secret redaction) settings.
             audit_log_enabled: Write an audit log entry for each operation on this bank.
 
@@ -3333,7 +3327,6 @@ class Remember:
                 "disposition_skepticism": disposition_skepticism,
                 "disposition_literalism": disposition_literalism,
                 "disposition_empathy": disposition_empathy,
-                "mcp_enabled_tools": mcp_enabled_tools,
                 "memory_defense": memory_defense,
                 "audit_log_enabled": audit_log_enabled,
             }.items()

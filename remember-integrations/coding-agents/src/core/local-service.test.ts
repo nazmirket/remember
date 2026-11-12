@@ -6,9 +6,7 @@ import { daemonEnv } from "./daemon";
 import { resolveConfig } from "./config";
 
 const embed = join(process.cwd(), "..", "..", "remember-embed");
-const source = realpathSync(
-  join(embed, "..", "remember-api-slim", "remember_api", "api", "http.py")
-);
+const source = realpathSync(join(embed, "..", "remember-api", "remember_api", "api", "http.py"));
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -65,13 +63,13 @@ describe("local memory boundaries", () => {
   });
 
   it("overrides inherited remote database and bind settings", () => {
-    const cfg = resolveConfig({ daemonProfile: "my/profile" });
+    const cfg = resolveConfig({});
     const env = daemonEnv(cfg, {
       REMEMBER_API_DATABASE_URL: "postgres://remote/db",
       REMEMBER_API_HOST: "0.0.0.0",
     });
-    expect(env.REMEMBER_API_DATABASE_URL).toBe("pg0://remember-embed-my-profile");
-    expect(env.REMEMBER_EMBED_API_DATABASE_URL).toBe(env.REMEMBER_API_DATABASE_URL);
+    expect(env.REMEMBER_API_DATABASE_URL).toBeUndefined();
+    expect(env.REMEMBER_EMBED_API_DATABASE_URL).toBeUndefined();
     expect(env.REMEMBER_API_HOST).toBe("127.0.0.1");
   });
 });

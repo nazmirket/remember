@@ -1,33 +1,11 @@
-"""
-Remember Embedded CLI.
-
-A wrapper CLI that manages a local daemon and forwards commands to remember-cli.
-No external server required - runs everything locally with automatic daemon management.
-
-Usage:
-    remember-embed configure              # Interactive setup
-    remember-embed retain "User prefers dark mode"
-    remember-embed recall "What are user preferences?"
-    remember-embed daemon status          # Check daemon status
-
-Environment variables:
-    REMEMBER_API_LLM_API_KEY: Required when the selected LLM provider uses an API key.
-    REMEMBER_API_LLM_PROVIDER: Optional. LLM provider (default: "openai").
-    REMEMBER_API_LLM_MODEL: Optional. LLM model (default: provider-specific, resolved by remember-api).
-    REMEMBER_EMBED_API_URL: Optional. Use external API server instead of starting local daemon.
-    REMEMBER_EMBED_API_TOKEN: Optional. Authentication token for external API (sent as Bearer token).
-    REMEMBER_EMBED_API_DATABASE_URL: Optional. Database URL for daemon (default: "pg0://remember-embed").
-    REMEMBER_EMBED_API_VERSION: Optional. remember-api version to use (default: matches embed version).
-                                 Note: Only applies when starting daemon. To change version, stop daemon first.
-    REMEMBER_EMBED_CLI_VERSION: Optional. remember CLI version to install (default: {embed_version}).
-"""
+"""Manage the local Remember daemon and its configuration."""
 
 import argparse
 import logging
 import os
 import sys
 
-from . import get_embed_manager
+from .daemon_embed_manager import DaemonEmbedManager
 from .profile_manager import get_cli_profile_override, set_cli_profile_override
 
 # The --profile override is stored in profile_manager, not here: we must keep
@@ -465,8 +443,6 @@ def _do_configure_interactive(profile_name: str | None = None, port: int | None 
     print(f"  \033[2mConfig:\033[0m {CONFIG_FILE}")
     print()
     print("  \033[2mTest with:\033[0m")
-    print('    \033[36mremember-embed retain "Alice works at Google as a software engineer"\033[0m')
-    print('    \033[36mremember-embed recall "Alice"\033[0m')
     print()
 
     return 0
@@ -591,7 +567,7 @@ def do_daemon(args, config: dict, logger):
             status_text.append(f"{daemon_log_path}\n", style="")
 
             # Check if using pg0 and show database location
-            database_url = get_embed_manager().resolve_database_url(profile)
+            database_url = DaemonEmbedManager().resolve_database_url(profile)
 
             if database_url.startswith("pg0://"):
                 pg0_name = database_url.replace("pg0://", "")
@@ -1236,16 +1212,9 @@ def main() -> None:
                 print(f"              (with --profile {global_profile})", file=sys.stderr)
             sys.exit(1)
 
-        # Forward all other commands to remember-cli
-        config = get_config()
-
-        from . import daemon_client
-
-        # Forward to remember-cli (handles daemon startup and CLI installation)
-        # Pass the same resolved profile used to load the configuration.
-        # remaining_args already has --profile/-p filtered out
-        exit_code = daemon_client.run_cli(remaining_args, config, resolved_profile)
-        sys.exit(exit_code)
+        print(f"error: unknown command '{command}'", file=sys.stderr)
+        print_help()
+        sys.exit(2)
 
     # No command - show help
     print_help()
@@ -1273,13 +1242,6 @@ Daemon management:
     daemon status          Check daemon status
     daemon logs [-f] [-n]  View daemon logs
 
-CLI commands (forwarded to remember):
-    memory retain <bank> <content>   Store a memory
-    memory recall <bank> <query>     Search memories
-    memory reflect <bank> <query>    Generate contextual answer
-    bank list                        List memory banks
-    ...                              Run 'remember --help' for all commands
-
 Global options:
     -p, --profile PROFILE  Profile to use for commands
 
@@ -1293,8 +1255,6 @@ Examples:
 
     # Use profile with commands
     remember-embed -p my-app daemon start
-    remember-embed -p my-app memory retain default "User prefers dark mode"
-    remember-embed --profile my-app bank list
 
 Note: 'configure' command is deprecated, use 'profile create' instead.
 """)
