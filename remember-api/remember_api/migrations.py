@@ -48,7 +48,7 @@ from ._vector_index import (
     should_defer_index_creation,
     uses_per_bank_vector_indexes,
 )
-from .config import ENV_MIGRATION_DATABASE_URL, ENV_MIGRATION_ISOLATION, get_config
+from .config import ENV_MIGRATION_ISOLATION, get_config
 from .db_url import is_oracle_url, to_libpq_url
 from .utils import mask_network_location
 
@@ -359,7 +359,6 @@ def run_migrations(
     database_url: str,
     script_location: str | None = None,
     schema: str | None = None,
-    migration_database_url: str | None = None,
 ) -> None:
     """
     Run database migrations to the latest version using programmatic Alembic configuration.
@@ -395,12 +394,6 @@ def run_migrations(
             script_location="/path/to/copied/_alembic"
         )
     """
-    # Prefer a dedicated migration URL that bypasses connection poolers (e.g.
-    # PgBouncer in transaction mode).  Session-level advisory locks don't
-    # survive a PgBouncer transaction-mode cycle, so the distributed lock is
-    # ineffective when the app URL goes through a pooler.  Configure
-    # REMEMBER_API_MIGRATION_DATABASE_URL to the direct PostgreSQL endpoint
-    # (e.g. remember-pg-rw) to restore correct locking behaviour.
     # When isolation is on, keep psycopg2 out of this process entirely.
     # ``_CHILD_MARKER`` stops the child from recursing.
     if _should_isolate_migrations():
@@ -410,12 +403,11 @@ def run_migrations(
                 "database_url": database_url,
                 "script_location": script_location,
                 "schema": schema,
-                "migration_database_url": migration_database_url,
             },
         )
         return
 
-    raw_url = migration_database_url or database_url
+    raw_url = database_url
     if is_oracle_url(raw_url):
         raise ValueError("Only PostgreSQL migrations are supported")
     migration_url = to_libpq_url(raw_url)
@@ -492,14 +484,12 @@ def run_migrations(
                     holder = _advisory_lock_holder(conn, lock_id)
                     logger.warning(
                         "Waiting for migration advisory lock (id=%s, schema=%s) held by %s; "
-                        "waited %.0fs so far, polling every %ss. If the holder is a stale pooled "
-                        "backend, point %s at the direct PostgreSQL endpoint to bypass the pooler.",
+                        "waited %.0fs so far, polling every %ss. Check the daemon's database connection.",
                         lock_id,
                         schema_name,
                         holder or "another session (holder not found in pg_locks)",
                         waited,
                         _LOCK_POLL_INTERVAL_SECS,
-                        ENV_MIGRATION_DATABASE_URL,
                     )
                 # Commit the transaction so this connection holds no open snapshot
                 # while waiting.  This prevents blocking CREATE INDEX CONCURRENTLY
@@ -1078,14 +1068,13 @@ def _migrate_one_schema_pg(
     database_url: str,
     schema: str,
     *,
-    migration_database_url: str | None,
     embedding_dimension: int | None,
     vector_extension: str,
     text_search_extension: str,
     ensure_extensions: bool,
 ) -> str:
     """Run migrations and reconcile indexes for the configured local schema."""
-    run_migrations(database_url, schema=schema, migration_database_url=migration_database_url)
+    run_migrations(database_url, schema=schema)
     if embedding_dimension is not None:
         ensure_embedding_dimension(
             database_url,
@@ -1111,7 +1100,6 @@ def run_local_migrations(
     database_url: str,
     schema: str,
     *,
-    migration_database_url: str | None = None,
     embedding_dimension: int | None = None,
     vector_extension: str = "pgvector",
     text_search_extension: str = "native",
@@ -1121,7 +1109,6 @@ def run_local_migrations(
     options = dict(
         database_url=database_url,
         schema=schema,
-        migration_database_url=migration_database_url,
         embedding_dimension=embedding_dimension,
         vector_extension=vector_extension,
         text_search_extension=text_search_extension,
@@ -1133,7 +1120,6 @@ def run_local_migrations(
     _migrate_one_schema_pg(
         database_url,
         schema,
-        migration_database_url=migration_database_url,
         embedding_dimension=embedding_dimension,
         vector_extension=vector_extension,
         text_search_extension=text_search_extension,

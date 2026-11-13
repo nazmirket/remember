@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 
-from remember_api.engine.db import create_database_backend
+from remember_api.engine.db.postgresql import PostgreSQLBackend
 from remember_api.engine.db.ops_postgresql import PostgreSQLOps
 from remember_api.engine.db.postgresql import PostgresConnection
 from remember_api.engine.memories.pg.entity_resolver import EntityResolver
@@ -111,7 +111,7 @@ async def test_phase2_reasserts_entity_pruned_after_resolution(pg0_db_url):
     canonical name ("Alice Smith") — it is unrecoverable once the row is pruned.
     """
     resolved_url = await resolve_database_url(pg0_db_url)
-    backend = create_database_backend("postgresql")
+    backend = PostgreSQLBackend()
     await backend.initialize(resolved_url, min_size=1, max_size=3, command_timeout=30)
 
     bank_id = f"test-retain-prune-race-{uuid.uuid4().hex[:8]}"

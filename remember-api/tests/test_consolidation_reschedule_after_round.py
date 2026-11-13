@@ -18,7 +18,7 @@ This test exercises the full end-to-end path:
          (the round-limit re-queue actually landed in the DB)
        - unconsolidated rows remain (the backlog isn't drained in one round)
 
-The engine's task_backend is swapped to ``WorkerTaskBackend`` for the
+The engine's task_backend is swapped to ``QueuedTaskBackend`` for the
 duration of the run so the in-task ``submit_async_consolidation`` call does
 NOT recursively execute (which is what ``SyncTaskBackend`` would do). That
 matches production worker semantics, where ``submit_task`` is a no-op and
@@ -33,7 +33,7 @@ import pytest
 
 from remember_api.config import _get_raw_config
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.engine.task_backend import WorkerTaskBackend
+from remember_api.engine.task_backend import QueuedTaskBackend
 
 
 def _make_config(**overrides):
@@ -123,11 +123,11 @@ async def test_round_limited_consolidation_leaves_followup_pending_op(memory: Me
             json.dumps(payload),
         )
 
-    # Swap to WorkerTaskBackend so the in-task submit_async_consolidation does
+    # Swap to QueuedTaskBackend so the in-task submit_async_consolidation does
     # NOT recursively execute (matches production worker semantics — the row
     # is left for the poller's next cycle).
     original_backend = memory._task_backend
-    memory._task_backend = WorkerTaskBackend()
+    memory._task_backend = QueuedTaskBackend()
     await memory._task_backend.initialize()
 
     fake_config = _make_config(consolidation_max_memories_per_round=round_limit)

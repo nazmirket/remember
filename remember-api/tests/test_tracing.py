@@ -16,7 +16,6 @@ from remember_api.tracing import (
     NoOpLLMSpanRecorder,
     _truncate_content,
     create_operation_span,
-    initialize_tracing,
     is_tracing_enabled,
 )
 
@@ -584,7 +583,6 @@ async def test_api_lifespan_bootstraps_and_flushes_tracing():
     memory = AsyncMock()
     memory._pool = None
     memory.audit_logger = None
-    memory._backend.supports_worker_poller = False
 
     bootstrap_calls = []
 

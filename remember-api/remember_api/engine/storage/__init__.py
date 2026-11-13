@@ -3,10 +3,9 @@
 from urllib.parse import quote
 
 from ...schema_context import get_current_schema
-from .base import FileStorage
 from .postgresql import PostgreSQLFileStorage
 
-__all__ = ["FileStorage", "PostgreSQLFileStorage", "bank_storage_prefix", "key_segment"]
+__all__ = ["PostgreSQLFileStorage", "bank_storage_prefix", "key_segment"]
 
 
 def bank_storage_prefix(bank_id: str, schema: str | None = None) -> str:

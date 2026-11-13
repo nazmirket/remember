@@ -359,9 +359,6 @@ def test_log_config_masks_database_urls(caplog):
     from remember_api.config import RememberConfig
 
     os.environ["REMEMBER_API_DATABASE_URL"] = "postgresql://remember_user:plain-password@db:5432/remember_db"
-    os.environ["REMEMBER_API_MIGRATION_DATABASE_URL"] = (
-        "postgresql://migration_user:migration-password@db-admin:5432/remember_db"
-    )
     os.environ["REMEMBER_API_RETAIN_MAX_COMPLETION_TOKENS"] = "64000"
     os.environ["REMEMBER_API_RETAIN_CHUNK_SIZE"] = "3000"
     os.environ["REMEMBER_API_LLM_PROVIDER"] = "mock"
@@ -374,78 +371,24 @@ def test_log_config_masks_database_urls(caplog):
     log_output = "\n".join(record.getMessage() for record in caplog.records)
     assert "remember_user" not in log_output
     assert "plain-password" not in log_output
-    assert "migration_user" not in log_output
-    assert "migration-password" not in log_output
     assert "postgresql://***:***@db:5432/remember_db" in log_output
-    assert "postgresql://***:***@db-admin:5432/remember_db" in log_output
 
 
-def test_read_database_url_defaults_to_none_when_unset(monkeypatch):
-    """Without REMEMBER_API_READ_DATABASE_URL, the field is None — engine
-    will alias the read backend to the primary, preserving today's
-    single-pool behaviour byte-for-bit. This is the most important guarantee
-    of the change: zero-config means zero behaviour change.
-    """
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("REMEMBER_API_READ_DATABASE_URL", "postgresql://remote/db", "separate read database"),
+        ("REMEMBER_API_MIGRATION_DATABASE_URL", "postgresql://remote/db", "separate migration database"),
+        ("REMEMBER_API_DATABASE_BACKEND", "oracle", "Only the PostgreSQL"),
+    ],
+)
+def test_unsupported_database_settings_are_rejected(monkeypatch, name, value, message):
     from remember_api.config import RememberConfig
 
-    monkeypatch.delenv("REMEMBER_API_READ_DATABASE_URL", raising=False)
+    monkeypatch.setenv(name, value)
     monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.read_database_url is None
-
-
-def test_read_database_url_is_loaded_when_set(monkeypatch):
-    """When REMEMBER_API_READ_DATABASE_URL is set, the value flows into
-    config so MemoryEngine.initialize() will open a second backend against
-    that URL for recall queries.
-    """
-    from remember_api.config import RememberConfig
-
-    read_url = "postgresql://reader:secret@replica.example:5432/remember"
-    monkeypatch.setenv("REMEMBER_API_READ_DATABASE_URL", read_url)
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.read_database_url == read_url
-
-
-def test_read_database_url_empty_string_is_treated_as_unset(monkeypatch):
-    """Helm sometimes renders an unset env var as the empty string. Treat it
-    the same as unset so deployments that conditionally set the var don't
-    accidentally try to open a pool against `''`.
-    """
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_READ_DATABASE_URL", "")
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    config = RememberConfig.from_env()
-    assert config.read_database_url is None
-
-
-def test_log_config_masks_read_database_url(monkeypatch, caplog):
-    """Read-replica URL credentials must be masked in startup logs, same as
-    the primary URL.
-    """
-    from remember_api.config import RememberConfig
-
-    monkeypatch.setenv("REMEMBER_API_DATABASE_URL", "postgresql://remember:pw@primary:5432/db")
-    monkeypatch.setenv("REMEMBER_API_READ_DATABASE_URL", "postgresql://reader:replica-secret@replica:5432/db")
-    monkeypatch.setenv("REMEMBER_API_RETAIN_MAX_COMPLETION_TOKENS", "64000")
-    monkeypatch.setenv("REMEMBER_API_RETAIN_CHUNK_SIZE", "3000")
-    monkeypatch.setenv("REMEMBER_API_LLM_PROVIDER", "mock")
-
-    caplog.set_level(logging.INFO, logger="remember_api.config")
-
-    config = RememberConfig.from_env()
-    config.log_config()
-
-    log_output = "\n".join(record.getMessage() for record in caplog.records)
-    assert "reader" not in log_output
-    assert "replica-secret" not in log_output
-    assert "Read database" in log_output
-    assert "postgresql://***:***@replica:5432/db" in log_output
+    with pytest.raises(ValueError, match=message):
+        RememberConfig.from_env()
 
 
 # Note: The BadRequestError wrapping is implemented in fact_extraction.py

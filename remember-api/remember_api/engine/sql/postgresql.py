@@ -7,7 +7,7 @@ and other non-portable patterns.
 
 from dataclasses import dataclass
 
-from .base import SQLDialect, bm25_score_gate
+from .base import bm25_score_gate
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ def page_bm25_arm(*, table_alias: str, text_param: str) -> PageBm25Arm:
     )
 
 
-class PostgreSQLDialect(SQLDialect):
+class PostgreSQLDialect:
     """SQL dialect for PostgreSQL (asyncpg)."""
 
     # -- Parameter binding -----------------------------------------------

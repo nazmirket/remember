@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from remember_api.api.observability import HttpObservabilityMiddleware
 from remember_api.api.unknown_params import UnknownParamsRoute
-from remember_api.extensions.tenant import AuthenticationError
+from remember_api.auth import AuthenticationError
 
 
 class ItemRequest(BaseModel):

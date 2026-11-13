@@ -11,12 +11,11 @@ from unittest.mock import AsyncMock, patch
 import asyncpg
 import pytest
 
-from remember_api.engine.db import DatabaseBackend, DatabaseConnection, create_database_backend
+from remember_api.engine.db import DatabaseBackend, DatabaseConnection
 from remember_api.engine.db import postgresql as pg_backend
 from remember_api.engine.db.ops import UpdatedWindow
 from remember_api.engine.db.postgresql import PostgreSQLBackend, apply_session_settings
 from remember_api.engine.db.result import DictResultRow as ResultRow
-from remember_api.engine.sql import SQLDialect, create_sql_dialect
 from remember_api.engine.sql.postgresql import PostgreSQLDialect
 
 # A recall with no created_after/created_before — the graph-expansion CTEs must
@@ -87,24 +86,9 @@ class TestResultRow:
 # ---------------------------------------------------------------------------
 
 
-class TestFactories:
-    def test_create_postgresql_backend(self):
-        backend = create_database_backend("postgresql")
-        assert isinstance(backend, PostgreSQLBackend)
-        assert isinstance(backend, DatabaseBackend)
-
-    def test_create_unknown_backend_raises(self):
-        with pytest.raises(ValueError, match="Unknown database backend"):
-            create_database_backend("mysql")
-
-    def test_create_postgresql_dialect(self):
-        dialect = create_sql_dialect("postgresql")
-        assert isinstance(dialect, PostgreSQLDialect)
-        assert isinstance(dialect, SQLDialect)
-
-    def test_create_unknown_dialect_raises(self):
-        with pytest.raises(ValueError, match="Unknown SQL dialect"):
-            create_sql_dialect("mysql")
+class TestPostgreSQLBackend:
+    def test_backend_is_a_database_backend(self):
+        assert isinstance(PostgreSQLBackend(), DatabaseBackend)
 
 
 # ---------------------------------------------------------------------------
@@ -453,22 +437,6 @@ class TestApplySessionSettings:
 # ---------------------------------------------------------------------------
 
 
-class TestConfig:
-    def test_database_backend_field_exists(self):
-        # Verify the field exists on the dataclass
-        import dataclasses
-
-        from remember_api.config import RememberConfig
-
-        field_names = {f.name for f in dataclasses.fields(RememberConfig)}
-        assert "database_backend" in field_names
-
-    def test_default_database_backend(self):
-        from remember_api.config import DEFAULT_DATABASE_BACKEND
-
-        assert DEFAULT_DATABASE_BACKEND == "postgresql"
-
-
 # ---------------------------------------------------------------------------
 # Entity expansion CTE tests
 # ---------------------------------------------------------------------------
@@ -643,13 +611,3 @@ class TestPostgreSQLSearchVector:
 # ---------------------------------------------------------------------------
 # normalize_schema tests
 # ---------------------------------------------------------------------------
-
-
-class TestNormalizeSchema:
-    """Verify Backend.normalize_schema() returns correct schema for each backend."""
-
-    def test_postgresql_passes_through(self):
-        backend = PostgreSQLBackend()
-        assert backend.normalize_schema("public") == "public"
-        assert backend.normalize_schema("tenant_abc") == "tenant_abc"
-        assert backend.normalize_schema(None) is None

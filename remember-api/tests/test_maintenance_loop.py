@@ -448,7 +448,6 @@ class TestOperationCleanupJob:
     @staticmethod
     def _make_engine(*, expired=None, tenants=(), fetch_error=None):
         from contextlib import asynccontextmanager
-        from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock
 
         conn = MagicMock()
@@ -472,7 +471,6 @@ class TestOperationCleanupJob:
 
         engine = MagicMock()
         engine._backend = backend
-        engine._tenant_extension.list_tenants = AsyncMock(return_value=[SimpleNamespace(schema=s) for s in tenants])
         return engine, backend, conn
 
     @staticmethod

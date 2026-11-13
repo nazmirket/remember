@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 
 from remember_api.engine.db.base import DatabaseConnection
-from remember_api.engine.db.ops import DataAccessOps
+from remember_api.engine.db.ops_postgresql import PostgreSQLOps
 from remember_api.engine.db.postgresql import PostgresConnection, PostgreSQLBackend
 from remember_api.engine.memories.pg.graph import relink_pass
 from remember_api.engine.memory_engine import MemoryEngine
@@ -73,8 +73,8 @@ async def delete_race(pg0_db_url):
             engine = MemoryEngine.__new__(MemoryEngine)
             engine._initialized = True
             engine._backend = backend
-            engine._tenant_extension = None
-            engine._authenticate_tenant = AsyncMock(return_value="public")
+            engine._authenticator = None
+            engine._authenticate_request = AsyncMock(return_value="public")
             engine._bank_stats_cache = SimpleNamespace(invalidate=AsyncMock())
             engine._config_resolver = SimpleNamespace(
                 resolve_full_config=AsyncMock(return_value=SimpleNamespace(enable_auto_consolidation=False))
@@ -166,7 +166,7 @@ async def test_document_mutation_and_relink_preserve_queue(
     original_finish = ops_type.finish_graph_maintenance_batch
 
     async def pause_finish(
-        ops: DataAccessOps,
+        ops: PostgreSQLOps,
         conn: DatabaseConnection,
         table: str,
         bank_id: str,

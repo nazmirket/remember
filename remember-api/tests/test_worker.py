@@ -2,7 +2,7 @@
 Tests for the distributed worker system.
 
 Tests cover:
-- BrokerTaskBackend task submission and storage
+- QueuedTaskBackend task submission and storage
 - WorkerPoller task claiming with FOR UPDATE SKIP LOCKED
 - Concurrent workers claiming different tasks (no duplicates)
 - Task completion and failure handling
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from remember_api.engine.task_backend import BrokerTaskBackend, SyncTaskBackend, WorkerTaskBackend
+from remember_api.engine.task_backend import QueuedTaskBackend, SyncTaskBackend
 
 
 async def _ensure_bank(pool, bank_id: str) -> None:
@@ -62,7 +62,7 @@ def isolated_ops_schema(pg0_db_url):
     at session end. ``search_path`` is set on the pool in :func:`backend`, so
     every unqualified table reference here resolves into it.
     """
-    from remember_api.engine.db import create_database_backend
+    from remember_api.engine.db.postgresql import PostgreSQLBackend
     from remember_api.pg0 import resolve_database_url
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
@@ -70,7 +70,7 @@ def isolated_ops_schema(pg0_db_url):
 
     async def _provision() -> str:
         url = await resolve_database_url(pg0_db_url)
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:
@@ -86,7 +86,7 @@ def isolated_ops_schema(pg0_db_url):
         return url
 
     async def _drop(url: str) -> None:
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:
@@ -112,7 +112,7 @@ def isolated_ops_schema(pg0_db_url):
 @pytest_asyncio.fixture
 async def backend(pg0_db_url, isolated_ops_schema):
     """Create a DatabaseBackend whose pool is pinned to this file's private schema."""
-    from remember_api.engine.db import create_database_backend
+    from remember_api.engine.db.postgresql import PostgreSQLBackend
     from remember_api.pg0 import resolve_database_url
 
     resolved_url = await resolve_database_url(pg0_db_url)
@@ -124,7 +124,7 @@ async def backend(pg0_db_url, isolated_ops_schema):
         # private schema, so claims and cleanup never see the shared public one.
         await conn.execute(f'SET search_path TO "{isolated_ops_schema}", public')
 
-    b = create_database_backend("postgresql")
+    b = PostgreSQLBackend()
     await b.initialize(resolved_url, min_size=2, max_size=10, command_timeout=30, init_callback=_use_isolated_schema)
     yield b
     await b.shutdown()
@@ -381,79 +381,13 @@ def test_all_operation_types_have_slot_reservation_config():
     )
 
 
-class TestBrokerTaskBackend:
-    """Tests for BrokerTaskBackend task storage."""
-
-    @pytest.mark.asyncio
-    async def test_submit_task_updates_existing_operation(self, pool, clean_operations):
-        """Test that submit_task updates task_payload for existing operations."""
-        # Create an operation record first
-        operation_id = uuid.uuid4()
-        bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
-        await _ensure_bank(pool, bank_id)
-
-        await pool.execute(
-            """
-            INSERT INTO async_operations (operation_id, bank_id, operation_type, status)
-            VALUES ($1, $2, 'test_operation', 'pending')
-            """,
-            operation_id,
-            bank_id,
-        )
-
-        # Submit task with same operation_id
-        backend = BrokerTaskBackend(pool_getter=lambda: pool)
-        await backend.initialize()
-
-        task_dict = {
-            "operation_id": str(operation_id),
-            "type": "test_task",
-            "bank_id": bank_id,
-            "data": {"key": "value"},
-        }
-        await backend.submit_task(task_dict)
-
-        # Verify task_payload was stored
-        row = await pool.fetchrow(
-            "SELECT task_payload, status FROM async_operations WHERE operation_id = $1",
-            operation_id,
-        )
-        assert row is not None
-        assert row["status"] == "pending"
-        payload = json.loads(row["task_payload"])
-        assert payload["type"] == "test_task"
-        assert payload["data"] == {"key": "value"}
-
-    @pytest.mark.asyncio
-    async def test_submit_task_creates_new_operation(self, pool, clean_operations):
-        """Test that submit_task creates new operation when no operation_id provided."""
-        backend = BrokerTaskBackend(pool_getter=lambda: pool)
-        await backend.initialize()
-
-        bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
-        await _ensure_bank(pool, bank_id)
-        task_dict = {
-            "type": "graph_maintenance",
-            "bank_id": bank_id,
-            "node_ids": ["node1", "node2"],
-        }
-        await backend.submit_task(task_dict)
-
-        # Verify new operation was created
-        row = await pool.fetchrow(
-            "SELECT operation_type, status, task_payload FROM async_operations WHERE bank_id = $1",
-            bank_id,
-        )
-        assert row is not None
-        assert row["operation_type"] == "graph_maintenance"
-        assert row["status"] == "pending"
-        payload = json.loads(row["task_payload"])
-        assert payload["node_ids"] == ["node1", "node2"]
+class TestQueuedTaskPersistence:
+    """Tests for QueuedTaskBackend task storage."""
 
     @pytest.mark.asyncio
     async def test_submit_task_preserves_existing_payload(self, pool, clean_operations):
         """Callers now INSERT task_payload atomically, then call submit_task as a
-        no-op for the BrokerTaskBackend path. submit_task must not overwrite a
+        no-op for the QueuedTaskBackend path. submit_task must not overwrite a
         payload that is already set, otherwise a stale updated_at bump on a
         possibly-already-processing row reintroduces noise the fix aimed to remove.
         """
@@ -477,7 +411,7 @@ class TestBrokerTaskBackend:
             operation_id,
         )
 
-        backend = BrokerTaskBackend(pool_getter=lambda: pool)
+        backend = QueuedTaskBackend(pool_getter=lambda: pool)
         await backend.initialize()
 
         await backend.submit_task(
@@ -2818,10 +2752,10 @@ class TestSyncTaskBackend:
             await backend.submit_task({"type": "test"})
 
 
-class TestWorkerTaskBackend:
-    """Tests for WorkerTaskBackend (used by worker processes).
+class TestQueuedTaskBackend:
+    """Tests for QueuedTaskBackend (used by worker processes).
 
-    WorkerTaskBackend.submit_task is a no-op: child tasks spawned during
+    QueuedTaskBackend.submit_task is a no-op: child tasks spawned during
     execution (e.g. consolidation triggered by retain) are left as pending
     rows in async_operations for the poller to pick up on the next cycle,
     instead of being executed inline which would block the parent task.
@@ -2829,20 +2763,20 @@ class TestWorkerTaskBackend:
 
     @pytest.mark.asyncio
     async def test_worker_backend_does_not_execute_inline(self):
-        """WorkerTaskBackend.submit_task must NOT call the executor."""
+        """QueuedTaskBackend.submit_task must NOT call the executor."""
         executed = []
 
         async def mock_executor(task_dict):
             executed.append(task_dict)
 
-        backend = WorkerTaskBackend()
+        backend = QueuedTaskBackend()
         backend.set_executor(mock_executor)
         await backend.initialize()
 
         await backend.submit_task({"type": "consolidation", "bank_id": "b1"})
 
         assert len(executed) == 0, (
-            "WorkerTaskBackend must not execute tasks inline — child tasks should be picked up by the poller"
+            "QueuedTaskBackend must not execute tasks inline — child tasks should be picked up by the poller"
         )
 
     @pytest.mark.asyncio
@@ -2878,7 +2812,7 @@ class TestWorkerTaskBackend:
 
     @pytest.mark.asyncio
     async def test_worker_backend_does_not_block_parent_on_child_task(self):
-        """With WorkerTaskBackend, a parent task that calls submit_task for a
+        """With QueuedTaskBackend, a parent task that calls submit_task for a
         child task is NOT blocked — submit_task is a no-op, so the parent
         completes immediately and the child row stays pending for the poller.
         """
@@ -2892,7 +2826,7 @@ class TestWorkerTaskBackend:
                 await backend.submit_task({"type": "child", "bank_id": "b1"})
             execution_order.append(f"{task_type}:end")
 
-        backend = WorkerTaskBackend()
+        backend = QueuedTaskBackend()
         backend.set_executor(mock_executor)
         await backend.initialize()
 
@@ -2903,7 +2837,7 @@ class TestWorkerTaskBackend:
         assert execution_order == [
             "parent:start",
             "parent:end",
-        ], f"WorkerTaskBackend must not execute child tasks inline. Got: {execution_order}"
+        ], f"QueuedTaskBackend must not execute child tasks inline. Got: {execution_order}"
 
     @pytest.mark.asyncio
     async def test_worker_backend_child_task_stays_pending_in_db(self, pool, backend, clean_operations):
@@ -2952,8 +2886,8 @@ class TestWorkerTaskBackend:
         )
 
         # The executor simulates retain: marks parent completed, then calls
-        # submit_task for the child (which WorkerTaskBackend should ignore).
-        task_backend = WorkerTaskBackend()
+        # submit_task for the child (which QueuedTaskBackend should ignore).
+        task_backend = QueuedTaskBackend()
 
         async def executor(task_dict):
             # Mark parent as completed
@@ -2961,7 +2895,7 @@ class TestWorkerTaskBackend:
                 "UPDATE async_operations SET status = 'completed', completed_at = now() WHERE operation_id = $1",
                 parent_op_id,
             )
-            # Trigger child task via submit_task (should be no-op for WorkerTaskBackend)
+            # Trigger child task via submit_task (should be no-op for QueuedTaskBackend)
             await task_backend.submit_task(child_payload)
 
         poller = WorkerPoller(

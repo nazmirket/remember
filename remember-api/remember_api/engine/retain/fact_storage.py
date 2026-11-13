@@ -107,7 +107,7 @@ async def ensure_bank_exists(conn, bank_id: str, *, ops) -> None:
     Args:
         conn: Database connection
         bank_id: Bank identifier
-        ops: Backend ``DataAccessOps``, needed for the per-bank vector index DDL
+        ops: Backend ``PostgreSQLOps``, needed for the per-bank vector index DDL
             a fresh bank gets while the size threshold is off. Required rather
             than defaulting to None, because it is dereferenced only in that
             branch — a caller that omitted it worked until the threshold was off.
@@ -191,7 +191,7 @@ async def handle_document_tracking(
             this document. Recorded on the document edge rather than the blob, since
             a filename describes the reference and the same bytes can carry a
             different name in another document.
-        ops: Backend-specific DataAccessOps. Required by the inner
+        ops: Backend-specific PostgreSQLOps. Required by the inner
             ``delete_stale_observations_for_memories`` call to choose the PG
             (native array) vs Oracle (junction table) read path. Defaults to
             None so older callers don't break, but the PG branch is only

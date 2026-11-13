@@ -51,19 +51,19 @@ def test_reset_without_argument_falls_back_to_noop():
 
 
 @pytest.mark.asyncio
-async def test_app_lifespan_restores_the_collector_it_replaced():
+async def test_app_lifespan_restores_the_collector_it_replaced(monkeypatch):
     """Starting and stopping the app must leave the global collector as it found it."""
     # A stub engine: the lifespan only needs the attributes it touches, and
-    # initialize_memory=False keeps it away from the database entirely. A backend
-    # that reports no worker-poller support keeps the poller from starting
-    # whatever REMEMBER_API_WORKER_ENABLED says.
+    # initialize_memory=False keeps it away from the database entirely.
     memory = MagicMock()
     memory._pool = None
-    memory._backend.supports_worker_poller = False
     memory.tenant_extension = None
-    memory._tenant_extension = None
+    memory._authenticator = None
     memory.close = AsyncMock()
 
+    from remember_api.config import _get_raw_config
+
+    monkeypatch.setattr(_get_raw_config(), "worker_enabled", False)
     before = NoOpMetricsCollector()
     reset_metrics_collector(before)
 

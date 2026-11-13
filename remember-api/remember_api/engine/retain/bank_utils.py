@@ -20,7 +20,7 @@ from ..schema import fq_table
 
 if TYPE_CHECKING:
     from ..db.base import DatabaseConnection
-    from ..db.ops import DataAccessOps
+    from ..db.ops_postgresql import PostgreSQLOps
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _vector_index_clause() -> str | None:
 
 
 async def create_bank_vector_indexes(
-    conn: "DatabaseConnection", bank_id: str, internal_id: str, *, ops: "DataAccessOps"
+    conn: "DatabaseConnection", bank_id: str, internal_id: str, *, ops: "PostgreSQLOps"
 ) -> None:
     """Create per-(bank, fact_type) partial vector indexes for a newly created bank.
 
@@ -97,7 +97,7 @@ async def create_bank_vector_indexes(
     )
 
 
-async def drop_bank_vector_indexes(conn: "DatabaseConnection", internal_id: str, *, ops: "DataAccessOps") -> None:
+async def drop_bank_vector_indexes(conn: "DatabaseConnection", internal_id: str, *, ops: "PostgreSQLOps") -> None:
     """Drop per-(bank, fact_type) partial vector indexes for a bank being deleted.
 
     Called before the bank row is deleted so internal_id is still known.
@@ -271,7 +271,7 @@ def validate_new_bank_id(bank_id: str) -> None:
         raise OperationValidationError("Bank id must not start with '_': that prefix is reserved", status_code=400)
 
 
-async def create_bank_row_on_conn(conn: "DatabaseConnection", bank_id: str, *, ops: "DataAccessOps") -> bool:
+async def create_bank_row_on_conn(conn: "DatabaseConnection", bank_id: str, *, ops: "PostgreSQLOps") -> bool:
     """Idempotently insert a default bank row and its vector indexes on conn.
 
     Uses ``INSERT ... ON CONFLICT (bank_id) DO NOTHING RETURNING bank_id``.
@@ -374,7 +374,7 @@ async def get_or_create_bank_profile(pool, bank_id: str) -> BankProfileResult:
 
 
 async def get_or_create_bank_profile_on_conn(
-    conn: "DatabaseConnection", bank_id: str, *, ops: "DataAccessOps"
+    conn: "DatabaseConnection", bank_id: str, *, ops: "PostgreSQLOps"
 ) -> BankProfileResult:
     """
     Connection-bound variant of ``get_or_create_bank_profile``.

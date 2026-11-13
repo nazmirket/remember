@@ -19,7 +19,7 @@ submitted consolidation, the accumulated tags are folded into the surviving op s
 they are not lost (`test_requeue_dedupe_merges_pending_refresh_tags`).
 
 This test drives a real multi-round consolidation chain through the worker
-executor (``WorkerTaskBackend`` so re-queues don't recurse) with a small round
+executor (``QueuedTaskBackend`` so re-queues don't recurse) with a small round
 limit, and asserts EVERY entity-scoped model is refreshed exactly once as the
 backlog drains. Before the fix only the final round's model was refreshed and the
 "not dropped" assertion failed (7/8 models left stale); it is the regression guard
@@ -36,7 +36,7 @@ from remember_api.config import _get_raw_config
 from remember_api.engine.consolidation import consolidator as consolidator_module
 from remember_api.engine.consolidation.consolidator import run_consolidation_job
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.engine.task_backend import WorkerTaskBackend
+from remember_api.engine.task_backend import QueuedTaskBackend
 
 
 def _make_config(**overrides):
@@ -163,10 +163,10 @@ async def test_multi_round_consolidation_refreshes_all_entity_models(
     monkeypatch.setattr(memory, "submit_async_refresh_mental_model", _record)
 
     # 4. Drive the full consolidation chain with a SMALL round limit so the
-    #    backlog needs several rounds. WorkerTaskBackend makes the in-job
+    #    backlog needs several rounds. QueuedTaskBackend makes the in-job
     #    re-queue land as a pending row instead of recursing (worker semantics).
     original_backend = memory._task_backend
-    memory._task_backend = WorkerTaskBackend()
+    memory._task_backend = QueuedTaskBackend()
     await memory._task_backend.initialize()
 
     fake_cfg = _make_config(consolidation_max_memories_per_round=3, enable_observations=True)
@@ -241,9 +241,9 @@ async def test_requeue_dedupe_merges_pending_refresh_tags(memory: MemoryEngine, 
     bank_id = f"mm3411dedupe-{uuid.uuid4().hex[:8]}"
     await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
 
-    # WorkerTaskBackend so submit_async_consolidation only enqueues rows (no execution).
+    # QueuedTaskBackend so submit_async_consolidation only enqueues rows (no execution).
     original_backend = memory._task_backend
-    memory._task_backend = WorkerTaskBackend()
+    memory._task_backend = QueuedTaskBackend()
     await memory._task_backend.initialize()
     try:
         # A plain consolidation already pending for the bank (e.g. enqueued by a retain

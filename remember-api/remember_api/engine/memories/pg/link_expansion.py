@@ -389,7 +389,7 @@ class LinkExpansionRetriever(GraphRetriever):
 
         The entity/source traversal is fused into the semantic/causal CTE query
         (#3857): one fetch carries all three arms behind a `source` discriminator,
-        which DataAccessOps.expand_observations splits into per-signal rows.
+        which PostgreSQLOps.expand_observations splits into per-signal rows.
         """
         source_ids_found: list = []
         if logger.isEnabledFor(logging.DEBUG):
@@ -415,7 +415,7 @@ class LinkExpansionRetriever(GraphRetriever):
         mu = fq_table("memory_units")
         per_entity_limit = config.link_expansion_per_entity_limit
 
-        # Delegate to DataAccessOps. Both backends now use the observation_sources
+        # Delegate to PostgreSQLOps. Both backends now use the observation_sources
         # junction table with standard SQL joins (previously PG used native array
         # ops and Oracle used JSON_TABLE).
         # $1 seeds, $2 budget — the window binds after them.

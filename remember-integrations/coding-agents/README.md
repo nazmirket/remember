@@ -42,7 +42,7 @@ Useful settings include `disabled`, `retainSessions`, `autoInject`, `gitIngest`,
 
 The supported configuration fields and their definitions are in `src/core/config.ts` (`RawConfig`):
 
-`serverMode`, `apiUrl`, `apiToken`, `apiPort`, `embedPackagePath`, `bankId`, `dynamicBankId`, `bankIdTemplate`, `mapPathToBank`, `resolveWorktrees`, `optInOnly`, `optInPaths`, `harness`, `disabled`, `retainSessions`, `maxParallelRetains`, `reflectTimeoutMs`, `reflectToolTimeoutMs`, `injectTimeoutMs`, `reflectBudget`, `autoInject`, `autoReflect`, `pageSearchLimit`, `recallOptions`, `toolGuideExtra`, `pageRefreshEveryTurns`, `pageTriggerType`, `pageTriggerCron`, `pages`, `customPages`, `autoSeed`, `seedLimit`, `codebaseSurvey`, `surveyModel`, `surveyBudgetUsd`, `logLevel`, `surveyRefreshCommits`, `gitIngest`, `retainTags`, `retainMetadata`, `retainContext`, `manageBankConfig`, `retainExtractionMode`, `defaultBankConfig`, `observationScopes`, `harnesses`, `banks`, `paths`
+`apiToken`, `apiPort`, `embedPackagePath`, `bankId`, `dynamicBankId`, `bankIdTemplate`, `mapPathToBank`, `resolveWorktrees`, `optInOnly`, `optInPaths`, `harness`, `disabled`, `retainSessions`, `maxParallelRetains`, `reflectTimeoutMs`, `reflectToolTimeoutMs`, `injectTimeoutMs`, `reflectBudget`, `autoInject`, `autoReflect`, `pageSearchLimit`, `recallOptions`, `toolGuideExtra`, `pageRefreshEveryTurns`, `pageTriggerType`, `pageTriggerCron`, `pages`, `customPages`, `autoSeed`, `seedLimit`, `codebaseSurvey`, `surveyModel`, `surveyBudgetUsd`, `logLevel`, `surveyRefreshCommits`, `gitIngest`, `retainTags`, `retainMetadata`, `retainContext`, `manageBankConfig`, `retainExtractionMode`, `defaultBankConfig`, `observationScopes`, `harnesses`, `banks`, `paths`
 
 ## Troubleshooting
 

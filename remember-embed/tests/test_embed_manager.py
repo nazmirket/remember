@@ -16,7 +16,6 @@ from remember_embed._http_probe import ProbeResponse
 from remember_embed.daemon_embed_manager import (
     DaemonEmbedManager,
     _detach_popen_kwargs,
-    _runs_a_foreign_interpreter,
     _strip_parent_interpreter_env,
     _terminate_startup_process,
 )
@@ -99,27 +98,8 @@ def _spawned_env(manager, tmp_path, monkeypatch) -> dict:
     return popen.call_args.kwargs["env"]
 
 
-def test_uvx_fallback_does_not_inherit_the_parent_interpreter_env(tmp_path, monkeypatch):
-    """A host that finds its own site-packages via PYTHONPATH (Hermes' package-manager install
-    exports its Python 3.14 generation) must not hand that directory to uvx's own interpreter:
-    remember-api would import the host's pydantic and fail on the missing compiled extension."""
-    monkeypatch.setenv("PYTHONPATH", "/host/venv/lib/python3.14/site-packages")
-    monkeypatch.setenv("PYTHONHOME", "/host/python")
-    monkeypatch.setenv("VIRTUAL_ENV", "/host/venv")
-    monkeypatch.setenv("PATH", "/host/venv/bin:/usr/bin")
-    manager = _startup_manager(MagicMock(return_value=False))
-    manager._find_api_command = MagicMock(return_value=["uvx", "remember-api@0.0.0"])
-
-    env = _spawned_env(manager, tmp_path, monkeypatch)
-
-    assert "PYTHONPATH" not in env and "PYTHONHOME" not in env and "VIRTUAL_ENV" not in env
-    assert env["PATH"] == "/host/venv/bin:/usr/bin"  # uvx itself is found through PATH
-    assert env["REMEMBER_API_DAEMON_LOG"] == str(tmp_path / "daemon.log")
-
-
-def test_the_dev_uv_run_command_does_not_inherit_it_either(tmp_path, monkeypatch):
-    """`uv run --project <api>` resolves that project's own environment, so it is as foreign
-    as uvx: a monorepo checkout under a host that exports PYTHONPATH would hit the same crash."""
+def test_checkout_launch_does_not_inherit_parent_interpreter(tmp_path, monkeypatch):
+    """The API checkout must not import packages from the parent interpreter."""
     monkeypatch.setenv("PYTHONPATH", "/host/venv/lib/python3.14/site-packages")
     manager = _startup_manager(MagicMock(return_value=False))
     manager._find_api_command = MagicMock(
@@ -127,36 +107,6 @@ def test_the_dev_uv_run_command_does_not_inherit_it_either(tmp_path, monkeypatch
     )
 
     assert "PYTHONPATH" not in _spawned_env(manager, tmp_path, monkeypatch)
-
-
-def test_a_resolved_launcher_path_is_still_recognised(tmp_path, monkeypatch):
-    """The guard matches the basename: the sibling candidates in _find_api_command are returned
-    resolved, so resolving the launcher too must not silently stop the scrub."""
-    monkeypatch.setenv("PYTHONPATH", "/host/site-packages")
-    manager = _startup_manager(MagicMock(return_value=False))
-    manager._find_api_command = MagicMock(return_value=["/opt/tools/uvx", "remember-api@0.0.0"])
-
-    assert "PYTHONPATH" not in _spawned_env(manager, tmp_path, monkeypatch)
-
-
-def test_only_uv_launchers_count_as_foreign():
-    assert _runs_a_foreign_interpreter(["uvx", "remember-api@1.0.0"])
-    assert _runs_a_foreign_interpreter(["uv", "run", "--project", "/x", "remember-api"])
-    assert _runs_a_foreign_interpreter(["/opt/bin/uvx.exe", "remember-api@1.0.0"])
-    assert not _runs_a_foreign_interpreter(["/venv/bin/remember-api"])
-    assert not _runs_a_foreign_interpreter(["/target/bin/remember-api"])
-
-
-def test_installed_binary_keeps_the_parent_interpreter_env(tmp_path, monkeypatch):
-    """A `pip install --target` layout (issue #1240) needs PYTHONPATH to import remember_api;
-    the scrub applies only to the uvx fallback."""
-    monkeypatch.setenv("PYTHONPATH", "/target")
-    manager = _startup_manager(MagicMock(return_value=False))
-    manager._find_api_command = MagicMock(return_value=["/target/bin/remember-api"])
-
-    env = _spawned_env(manager, tmp_path, monkeypatch)
-
-    assert env["PYTHONPATH"] == "/target"
 
 
 def test_strip_parent_interpreter_env_leaves_everything_else():
@@ -446,8 +396,8 @@ def test_api_command_uses_checkout():
     assert command[-1] == "remember-api"
 
 
-def test_api_command_rejects_missing_checkout(monkeypatch):
+def test_api_command_rejects_missing_checkout(monkeypatch, tmp_path):
     manager = DaemonEmbedManager()
-    monkeypatch.setattr(manager, "_dev_api_command", lambda: None)
+    monkeypatch.setattr("remember_embed.daemon_embed_manager.__file__", str(tmp_path / "remember-embed" / "manager.py"))
     with pytest.raises(RuntimeError, match="checkout is required"):
         manager._find_api_command()

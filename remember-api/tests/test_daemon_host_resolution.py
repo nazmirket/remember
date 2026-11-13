@@ -39,23 +39,11 @@ def test_rejects_alternate_deployment_options(option):
         _parse_cli_args([option], _config())
 
 
-@pytest.mark.parametrize(
-    ("database_url", "read_database_url", "migration_database_url"),
-    [
-        ("postgresql://remote/remember", None, None),
-        ("pg0", "postgresql://remote/replica", None),
-        ("pg0", None, "postgresql://remote/migrations"),
-    ],
-)
-def test_main_rejects_remote_database_routes(
-    monkeypatch, capsys, database_url, read_database_url, migration_database_url
-):
+def test_main_rejects_remote_database_routes(monkeypatch, capsys):
     from remember_api import main as main_module
 
     config = _config()
-    config.database_url = database_url
-    config.read_database_url = read_database_url
-    config.migration_database_url = migration_database_url
+    config.database_url = "postgresql://remote/remember"
     monkeypatch.setattr(main_module, "_get_raw_config", lambda: config)
     monkeypatch.setattr(main_module, "load_dotenv_for_entrypoint", lambda: None)
     monkeypatch.setattr(main_module, "_wait_for_port", lambda *_: None)

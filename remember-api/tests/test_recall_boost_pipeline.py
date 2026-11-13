@@ -75,7 +75,7 @@ def recall_harness(monkeypatch: pytest.MonkeyPatch) -> _RecallHarness:
     engine.embeddings = object()
     engine.query_analyzer = object()
     engine._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=_Primary())
-    engine._authenticate_tenant = AsyncMock()
+    engine._authenticate_request = AsyncMock()
     engine._require_bank_exists = AsyncMock()
 
     async def embeddings(*_args: object, **_kwargs: object) -> list[list[float]]:

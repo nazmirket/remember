@@ -558,7 +558,6 @@ async def _run_migration(
         run_local_migrations,
         resolved_url,
         target_schema,
-        migration_database_url=config.migration_database_url,
         embedding_dimension=embedding_dimension,
         vector_extension=config.vector_extension,
         text_search_extension=config.text_search_extension,

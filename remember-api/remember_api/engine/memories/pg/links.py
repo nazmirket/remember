@@ -19,7 +19,7 @@ from ...causal_links import (
     CausalLinkDescriptor,
 )
 from ...db.base import DatabaseConnection
-from ...db.ops import DataAccessOps
+from ...db.ops_postgresql import PostgreSQLOps
 from ...db.postgresql import setting_rejected_by_server
 from ...retain.entity_processing import _MAX_ENTITY_NAME_CHARS, _normalize_entity_name
 from ...retain.types import CausalRelation, EmbeddingLike, EntityResolutionResult, embedding_to_pgvector
@@ -185,7 +185,7 @@ async def _bulk_insert_links(
         bank_id: Bank identifier stored on memory_links for fast filtering.
         chunk_size: Max rows per INSERT statement to avoid query timeouts on
                     very large tables (100M+ rows).
-        ops: DataAccessOps instance for backend-specific bulk operations.
+        ops: PostgreSQLOps instance for backend-specific bulk operations.
     """
     if not links:
         return
@@ -917,7 +917,7 @@ async def create_causal_links_batch(
     bank_id: str,
     unit_ids: list[str],
     causal_relations_per_fact: list[list[CausalRelation]],
-    ops: DataAccessOps | None = None,
+    ops: PostgreSQLOps | None = None,
 ) -> int:
     """Create canonical causal links for the retain pipeline.
 
@@ -939,7 +939,7 @@ async def restore_legacy_causal_links_batch(
     bank_id: str,
     unit_ids: list[str],
     causal_relations_per_fact: list[list[CausalRelation]],
-    ops: DataAccessOps | None = None,
+    ops: PostgreSQLOps | None = None,
 ) -> int:
     """Restore historical causal links while importing a transfer archive.
 
@@ -962,7 +962,7 @@ async def _write_causal_links_batch(
     unit_ids: list[str],
     causal_relations_per_fact: list[list[CausalRelation]],
     allowed_relation_types: frozenset[str],
-    ops: DataAccessOps | None = None,
+    ops: PostgreSQLOps | None = None,
 ) -> int:
     """Write causal links after the caller has selected its allowed taxonomy.
 
@@ -1090,7 +1090,7 @@ async def rematerialize_causal_links(
     conn: DatabaseConnection,
     bank_id: str,
     stored_descriptors: list,
-    ops: DataAccessOps | None = None,
+    ops: PostgreSQLOps | None = None,
 ) -> int:
     """Recreate archived causal edges whose endpoints are both live again.
 

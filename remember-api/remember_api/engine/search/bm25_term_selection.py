@@ -37,7 +37,7 @@ from remember_api.schema_context import get_current_schema
 
 if TYPE_CHECKING:
     from ...config import ConfigLike
-    from ..sql import SQLDialect
+    from ..sql import PostgreSQLDialect
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ async def select_selective_bm25_tokens(
 
 async def build_bm25_query_text(
     conn,
-    dialect: SQLDialect,
+    dialect: PostgreSQLDialect,
     *,
     tokens: list[str],
     query_text: str,
@@ -155,7 +155,6 @@ async def build_bm25_query_text(
         and max_query_terms > 0
         and len(tokens) > max_query_terms
         and config.bm25_selective_terms
-        and getattr(conn, "backend_type", "postgresql") == "postgresql"
     ):
         bm25_tokens = await select_selective_bm25_tokens(
             conn,

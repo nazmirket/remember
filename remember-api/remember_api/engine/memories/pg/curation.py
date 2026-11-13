@@ -21,6 +21,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from ...db import get_postgres_ops
 from ...search.tags import (
     TagGroup,
     TagsMatch,
@@ -30,7 +31,7 @@ from ...search.tags import (
     tag_filter_active,
 )
 from ...time_filter import MEMORY_TIME_FIELDS, build_time_clause
-from .graph import _entity_rows_for_units_sql, _ops_for
+from .graph import _entity_rows_for_units_sql
 
 
 async def list_memory_units(
@@ -686,7 +687,7 @@ async def _list_entities_tag_filtered(
     # entities row directly: Oracle cannot GROUP BY the `metadata` JSON column.
     from_sql = f"""
         FROM {fq_table("entities")} e
-        JOIN ({visible_entity_stats_sql(fq_table, _ops_for(conn), built.sql, matching_ids_sql)}) s ON s.entity_id = e.id
+        JOIN ({visible_entity_stats_sql(fq_table, get_postgres_ops(), built.sql, matching_ids_sql)}) s ON s.entity_id = e.id
         WHERE e.bank_id = $1 {search_clause}
     """
 

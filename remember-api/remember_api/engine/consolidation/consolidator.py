@@ -217,16 +217,8 @@ single observation that preserves EVERY detail from both. If they differ in ANY 
 
 
 def _dedup_active(config: Any) -> bool:
-    """Whether create/update semantic dedup runs for this consolidation.
-
-    Enabled when the resolved threshold is < 1.0, EXCEPT on Oracle: the merge path uses
-    Postgres-only SQL (``unnest``/``array_agg``, ``UPDATE ... FROM``), so on Oracle dedup is
-    skipped — it behaves exactly as it did before this feature, regardless of the configured
-    threshold. This is why the feature can ship enabled-by-default without breaking Oracle.
-    """
-    if config is None or config.consolidation_dedup_threshold >= 1.0:
-        return False
-    return get_config().database_backend != "oracle"
+    """Dedup is enabled when a threshold below 1 is configured."""
+    return config is not None and config.consolidation_dedup_threshold < 1.0
 
 
 @dataclass(frozen=True)

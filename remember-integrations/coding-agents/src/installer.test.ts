@@ -617,7 +617,7 @@ describe("local server setup", () => {
     const ctx = makeCtx();
     expect(run(["install", harness], ctx)).toBe(0);
     const cfg = readJson(configPath(ctx));
-    expect(cfg.serverMode).toBe("daemon");
+    expect(cfg.serverMode).toBeUndefined();
     expect(cfg.embedPackagePath).toContain("remember-embed");
     expect(cfg.apiUrl).toBeUndefined();
   });
@@ -627,7 +627,7 @@ describe("local server setup", () => {
     const override = join(ctx.home, "elsewhere", "config.json");
     vi.stubEnv("REMEMBER_CONFIG", override);
     expect(run(["install", "claude-code", "--server", "daemon"], ctx)).toBe(0);
-    expect(readJson(override).serverMode).toBe("daemon");
+    expect(readJson(override).serverMode).toBeUndefined();
     expect(existsSync(configPath(ctx))).toBe(false);
   });
 

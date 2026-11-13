@@ -53,7 +53,7 @@ from pathlib import Path
 import pytest
 
 from remember_api.config import get_config
-from remember_api.engine.db import create_database_backend
+from remember_api.engine.db.postgresql import PostgreSQLBackend
 from remember_api.engine.memories.pg.entity_resolver import EntityResolver
 from remember_api.pg0 import resolve_database_url
 
@@ -216,7 +216,7 @@ async def test_entity_resolution_case(case: Case, strategy: str, pg0_db_url):
         pytest.xfail(f"known limitation: {case.known_limitation} — {case.pins}")
 
     resolved_url = await resolve_database_url(pg0_db_url)
-    backend = create_database_backend("postgresql")
+    backend = PostgreSQLBackend()
     await backend.initialize(resolved_url, min_size=1, max_size=2, command_timeout=30)
     bank_id = f"eval-entities-{uuid.uuid4().hex[:8]}"
     other_bank_id = f"eval-other-{uuid.uuid4().hex[:8]}"

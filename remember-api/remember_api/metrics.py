@@ -21,7 +21,6 @@ _resource_mod = importlib.import_module("resource") if importlib.util.find_spec(
 import threading
 import time
 from contextlib import contextmanager
-from contextvars import ContextVar
 from enum import StrEnum
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
@@ -40,21 +39,6 @@ if TYPE_CHECKING:
 def _get_tenant() -> str:
     """Get current tenant (schema) from context for metrics labeling."""
     return get_current_schema()
-
-
-#: The memories backend serving the operation in progress, set by ``record_operation`` for the
-#: length of the operation so phase metrics recorded inside it carry the same label without
-#: threading a bank id down to every call site. Empty outside an operation.
-_current_memories_backend: ContextVar[str] = ContextVar("remember_metrics_memories_backend", default="")
-
-
-def memories_backend_for(bank_id: str) -> str:
-    """The local store does not need an additional backend label."""
-    return ""
-
-
-def _backend_attrs(backend: str) -> dict[str, str]:
-    return {"memories_backend": backend} if backend else {}
 
 
 class OperationOutcome(StrEnum):
@@ -288,7 +272,6 @@ class MetricsCollectorBase:
         source: str = "api",
         budget: str | None = None,
         max_tokens: int | None = None,
-        memories_backend: str | None = None,
     ):
         """Record a single completed operation with an explicit outcome (see OperationOutcome)."""
         raise NotImplementedError
@@ -398,7 +381,6 @@ class NoOpMetricsCollector(MetricsCollectorBase):
         source: str = "api",
         budget: str | None = None,
         max_tokens: int | None = None,
-        memories_backend: str | None = None,
     ):
         """No-op operation result recording."""
         pass
@@ -689,11 +671,6 @@ class MetricsCollector(MetricsCollectorBase):
         """
         start_time = time.perf_counter()
         outcome = OperationOutcome.SUCCESS
-        # Resolved once, and published for the length of the operation so the recall phases
-        # recorded inside it carry the same backend label. (Retain phases label their store
-        # themselves, in timed_retain.)
-        backend = memories_backend_for(bank_id)
-        backend_token = _current_memories_backend.set(backend)
         try:
             yield
         except Exception as exc:
@@ -705,7 +682,6 @@ class MetricsCollector(MetricsCollectorBase):
             outcome = _outcome_of_error(exc)
             raise
         finally:
-            _current_memories_backend.reset(backend_token)
             self.record_operation_result(
                 operation,
                 bank_id,
@@ -714,7 +690,6 @@ class MetricsCollector(MetricsCollectorBase):
                 source=source,
                 budget=budget,
                 max_tokens=max_tokens,
-                memories_backend=backend,
             )
 
     def record_operation_result(
@@ -726,7 +701,6 @@ class MetricsCollector(MetricsCollectorBase):
         source: str = "api",
         budget: str | None = None,
         max_tokens: int | None = None,
-        memories_backend: str | None = None,
     ):
         """Record a single completed operation (duration + count) with its outcome.
 
@@ -739,7 +713,6 @@ class MetricsCollector(MetricsCollectorBase):
             "operation": operation,
             "source": source,
             **self._tenant_attrs(),
-            **_backend_attrs(memories_backend_for(bank_id) if memories_backend is None else memories_backend),
         }
         if self._include_bank_id:
             attributes["bank_id"] = bank_id
@@ -917,7 +890,6 @@ class MetricsCollector(MetricsCollectorBase):
         attrs = {
             "phase": phase,
             **self._tenant_attrs(),
-            **_backend_attrs(_current_memories_backend.get()),
             "diagnostic": str(bool(diagnostic)).lower(),
         }
         # One instrument, not two: the histogram already carries `_count` for this attribute set,

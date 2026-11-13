@@ -9,15 +9,14 @@ import asyncio
 import uuid
 
 import pytest
-import pytest_asyncio
 
 from remember_api.engine.schema import fq_store_table
-from remember_api.extensions import RequestContext, TenantContext, TenantExtension
+from remember_api.models import RequestContext
 from remember_api.migrations import run_migrations
 from remember_api.schema_context import _current_schema
 
 
-class MultiSchemaTestTenantExtension(TenantExtension):
+class MultiSchemaTestAuthenticator:
     """
     Test tenant extension that maps API keys to schema names.
 
@@ -26,16 +25,15 @@ class MultiSchemaTestTenantExtension(TenantExtension):
     """
 
     def __init__(self, config: dict):
-        super().__init__(config)
         self.db_url = config.get("db_url")
         # Pre-configured valid schemas for test
         self.valid_schemas = config.get("valid_schemas", set())
         # Track provisioned schemas
         self._provisioned: set[str] = set()
 
-    async def authenticate(self, context: RequestContext) -> TenantContext:
+    async def authenticate(self, context: RequestContext) -> str:
         if not context.api_key:
-            from remember_api.extensions import AuthenticationError
+            from remember_api.auth import AuthenticationError
 
             raise AuthenticationError("API key required")
 
@@ -47,9 +45,9 @@ class MultiSchemaTestTenantExtension(TenantExtension):
                 if schema not in self._provisioned and self.db_url:
                     run_migrations(self.db_url, schema=schema)
                     self._provisioned.add(schema)
-                return TenantContext(schema_name=schema)
+                return schema
 
-        from remember_api.extensions import AuthenticationError
+        from remember_api.auth import AuthenticationError
 
         raise AuthenticationError(f"Unknown API key: {context.api_key}")
 
@@ -103,20 +101,20 @@ class TestSchemaIsolation:
             await conn.close()
 
         # Configure tenant extension that provisions schemas via run_migrations
-        tenant_ext = MultiSchemaTestTenantExtension(
+        tenant_ext = MultiSchemaTestAuthenticator(
             {
                 "db_url": pg0_db_url,
                 "valid_schemas": set(schemas),
             }
         )
-        memory._tenant_extension = tenant_ext
+        memory._authenticator = tenant_ext
 
         # Define concurrent insert tasks for each tenant
         async def insert_for_tenant(schema_name: str, content_prefix: str):
             """Insert memories for a specific tenant using schema context."""
             # Authenticate to set the schema context
             tenant_request = RequestContext(api_key=f"key-{schema_name}")
-            await memory._authenticate_tenant(tenant_request)
+            await memory._authenticate_request(tenant_request)
 
             # Now fq_store_table will use the correct schema
             pool = await memory._get_pool()
@@ -171,7 +169,7 @@ class TestSchemaIsolation:
             await conn.close()
 
         # Reset tenant extension
-        memory._tenant_extension = None
+        memory._authenticator = None
         _current_schema.set("public")
 
     @pytest.mark.asyncio
@@ -273,18 +271,18 @@ class TestSchemaIsolation:
             await conn.close()
 
         # Configure tenant extension
-        tenant_ext = MultiSchemaTestTenantExtension(
+        tenant_ext = MultiSchemaTestAuthenticator(
             {
                 "db_url": pg0_db_url,
                 "valid_schemas": set(schemas),
             }
         )
-        memory._tenant_extension = tenant_ext
+        memory._authenticator = tenant_ext
 
         try:
             # Query as tenant_list_a - should only see tenant_list_a's data
             tenant_a_request = RequestContext(api_key="key-tenant_list_a")
-            await memory._authenticate_tenant(tenant_a_request)
+            await memory._authenticate_request(tenant_a_request)
 
             result_a = await memory.list_memory_units(bank_id=bank_id, request_context=tenant_a_request)
             texts_a = [item["text"] for item in result_a.get("items", [])]
@@ -294,7 +292,7 @@ class TestSchemaIsolation:
 
             # Query as tenant_list_b - should only see tenant_list_b's data
             tenant_b_request = RequestContext(api_key="key-tenant_list_b")
-            await memory._authenticate_tenant(tenant_b_request)
+            await memory._authenticate_request(tenant_b_request)
 
             result_b = await memory.list_memory_units(bank_id=bank_id, request_context=tenant_b_request)
             texts_b = [item["text"] for item in result_b.get("items", [])]
@@ -311,7 +309,7 @@ class TestSchemaIsolation:
             finally:
                 await conn.close()
 
-            memory._tenant_extension = None
+            memory._authenticator = None
             _current_schema.set("public")
 
     @pytest.mark.asyncio
@@ -343,7 +341,7 @@ class TestSchemaIsolation:
             run_migrations(pg0_db_url, schema=schema)
 
         # Configure tenant extension (schemas already provisioned)
-        tenant_ext = MultiSchemaTestTenantExtension(
+        tenant_ext = MultiSchemaTestAuthenticator(
             {
                 "db_url": pg0_db_url,
                 "valid_schemas": set(schemas),
@@ -351,7 +349,7 @@ class TestSchemaIsolation:
         )
         # Mark schemas as already provisioned so extension doesn't re-run migrations
         tenant_ext._provisioned = set(schemas)
-        memory._tenant_extension = tenant_ext
+        memory._authenticator = tenant_ext
 
         errors = []
 
@@ -360,7 +358,7 @@ class TestSchemaIsolation:
             try:
                 # Authenticate to set the schema context
                 tenant_request = RequestContext(api_key=f"key-{schema}")
-                await memory._authenticate_tenant(tenant_request)
+                await memory._authenticate_request(tenant_request)
 
                 # Insert using fq_store_table
                 pool = await memory._get_pool()
@@ -419,5 +417,5 @@ class TestSchemaIsolation:
                 await drop_schema(conn, schema)
             await conn.close()
 
-        memory._tenant_extension = None
+        memory._authenticator = None
         _current_schema.set("public")

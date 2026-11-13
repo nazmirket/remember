@@ -1,4 +1,4 @@
-"""PostgreSQL implementation of DataAccessOps.
+"""PostgreSQL data access operations.
 
 Uses unnest(), LATERAL, DISTINCT ON, and native array operations for
 efficient batch operations.
@@ -13,7 +13,6 @@ from .base import DatabaseConnection
 from .ops import (
     ChunkIdOwnedByAnotherBank,
     ClaimedOperations,
-    DataAccessOps,
     LinkExpansionRows,
     TagListingParts,
     UpdatedWindow,
@@ -89,8 +88,13 @@ def pg_search_vector_expr(
     return None
 
 
-class PostgreSQLOps(DataAccessOps):
+class PostgreSQLOps:
     """PostgreSQL-specific data access operations using unnest and LATERAL."""
+
+    def _get_mu_table(self) -> str:
+        from ..schema import fq_store_table
+
+        return fq_store_table("memory_units")
 
     def __init__(self) -> None:
         # Per-table serialization of per-bank vector-index DDL within this

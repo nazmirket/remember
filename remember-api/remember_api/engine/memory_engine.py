@@ -39,6 +39,7 @@ from .._vector_index import (
     per_bank_index_min_submit_interval_seconds,
     per_bank_indexes_are_eager,
 )
+from ..auth import AuthenticationError, LocalAuthenticator
 from ..cancellation import OperationCancelledError
 from ..config import (
     DEFAULT_MENTAL_MODEL_MIN_REFRESH_INTERVAL_SECONDS,
@@ -58,9 +59,7 @@ from ..config import (
 )
 from ..errors import OperationValidationError
 from ..extensions.builtin.memory_defense_regex import MemoryDefenseRegexExtension
-from ..extensions.builtin.tenant import DefaultTenantExtension
 from ..extensions.memory_defense import parse_policy
-from ..extensions.tenant import AuthenticationError
 from ..metrics import get_metrics_collector
 from ..schema_context import _current_bank_id, _current_schema, get_current_schema
 from ..tracing import create_operation_span, extract_task_trace_context, inject_task_trace_context
@@ -70,7 +69,7 @@ from ..worker.stage import set_stage
 from .audit import AuditLogger, audit_context
 from .bank_stats_cache import DistributedBankStatsCache
 from .chunk_ids import parse_chunk_id
-from .db import DatabaseBackend, DatabaseConnection, ResultRow, create_database_backend
+from .db import DatabaseBackend, DatabaseConnection, ResultRow
 from .db.ops_postgresql import pg_search_vector_expr
 from .db.postgresql import PostgreSQLBackend
 from .db.postgresql import apply_session_settings as _apply_session_settings
@@ -112,7 +111,7 @@ from .operation_metadata import (
     RetainOutcomeAggregate,
     RetainOutcomeMetadata,
 )
-from .sql import SQLDialect, create_sql_dialect
+from .sql import PostgreSQLDialect
 from .sql.postgresql import page_bm25_arm
 
 # How long a retain waits when it stopped because the embeddings backend is down (#5999).
@@ -2832,7 +2831,7 @@ class MemoryEngine(MemoryEngineInterface):
             pool_max_size: Maximum number of connections in the pool. Defaults to REMEMBER_API_DB_POOL_MAX_SIZE.
             db_command_timeout: PostgreSQL command timeout in seconds. Defaults to REMEMBER_API_DB_COMMAND_TIMEOUT.
             db_acquire_timeout: Connection acquisition timeout in seconds. Defaults to REMEMBER_API_DB_ACQUIRE_TIMEOUT.
-            task_backend: Custom task backend. If not provided, uses BrokerTaskBackend for distributed processing.
+            task_backend: Custom task backend. If not provided, uses the local PostgreSQL queue.
             run_migrations: Whether to run database migrations during initialize(). Default: True
             skip_llm_verification: Skip LLM connection verification during initialization.
                                   Defaults to REMEMBER_API_SKIP_LLM_VERIFICATION env var or False.
@@ -2884,13 +2883,10 @@ class MemoryEngine(MemoryEngineInterface):
                 memory_llm_base_url = ""
 
         # Database backend and SQL dialect (created during initialize())
-        self._database_backend_type = config.database_backend
         self._backend: DatabaseBackend | None = None
-        self._dialect: SQLDialect | None = None
+        self._dialect: PostgreSQLDialect | None = None
         # Connection pool — set from backend.get_pool() for backward compatibility
         self._pool = None
-        if config.read_database_url:
-            raise ValueError("A separate read database is not supported by the local daemon")
         self._initialized = False
         self._pool_min_size = pool_min_size if pool_min_size is not None else config.db_pool_min_size
         self._pool_max_size = pool_max_size if pool_max_size is not None else config.db_pool_max_size
@@ -3197,17 +3193,14 @@ class MemoryEngine(MemoryEngineInterface):
         self._reflect_decision_model_client: TypeSafeCrossEncoder | None = None
         self._reflect_decision_model_unsupported_logged = False
 
-        # Initialize task backend.
-        # All backends use BrokerTaskBackend + WorkerPoller for async background execution.
-        # Create the backend object early so we can query its capabilities.
-        self._backend = create_database_backend(self._database_backend_type)
+        # The local worker claims tasks persisted in PostgreSQL.
+        self._backend = PostgreSQLBackend()
         if task_backend:
             self._task_backend = task_backend
         else:
-            self._task_backend = self._backend.create_task_backend(
-                pool_getter=lambda: self._backend,
-                schema_getter=get_current_schema,
-            )
+            from .task_backend import QueuedTaskBackend
+
+            self._task_backend = QueuedTaskBackend(pool_getter=lambda: self._backend, schema_getter=get_current_schema)
 
         # Audit logger for feature usage tracking
         config = get_config()
@@ -3260,7 +3253,7 @@ class MemoryEngine(MemoryEngineInterface):
         count_tokens("")
 
         # The local daemon authenticates against its configured optional token.
-        self._tenant_extension = DefaultTenantExtension(config={})
+        self._authenticator = LocalAuthenticator()
 
         # Local memory defense uses the built-in detector.
         self._memory_defense = MemoryDefenseRegexExtension({})
@@ -3391,9 +3384,9 @@ class MemoryEngine(MemoryEngineInterface):
         everyone (as in reflect); tagged ones only inside the caller's scope."""
         return not tags or tags_satisfy_groups(tags, tag_scope)
 
-    async def _authenticate_tenant(self, request_context: "RequestContext | None") -> str:
+    async def _authenticate_request(self, request_context: "RequestContext | None") -> str:
         """
-        Authenticate tenant and set schema in context variable.
+        Authenticate the request and set the schema context.
 
         The schema is stored in a contextvar for async-safe, per-task isolation.
         Use fq_table(table_name) to get fully-qualified table names.
@@ -3411,14 +3404,14 @@ class MemoryEngine(MemoryEngineInterface):
         if request_context is None:
             raise AuthenticationError("RequestContext is required")
 
-        # For internal/background operations (e.g., worker tasks), skip extension authentication.
+        # Internal worker tasks were authenticated when submitted.
         # The task was already authenticated at submission time, and execute_task sets _current_schema
         # from the task's _schema field.
         if request_context.internal:
             return _current_schema.get()
 
         # Already authenticated on this request: reuse the schema rather than asking
-        # the tenant extension again. One request can reach the engine through
+        # the local authenticator again. One request can reach the engine through
         # several entry points (alias resolution on the route class, `precheck_for`,
         # then the endpoint's own call), and each extra round trip is a real
         # identity lookup for a caller that was already identified.
@@ -3427,11 +3420,11 @@ class MemoryEngine(MemoryEngineInterface):
             return request_context.authenticated_schema
 
         # Authenticate with the local token when one is configured.
-        tenant_context = await self._tenant_extension.authenticate(request_context)
+        schema = await self._authenticator.authenticate(request_context)
 
-        _current_schema.set(tenant_context.schema_name)
-        request_context.authenticated_schema = tenant_context.schema_name
-        return tenant_context.schema_name
+        _current_schema.set(schema)
+        request_context.authenticated_schema = schema
+        return schema
 
     async def _handle_batch_retain(self, task_dict: dict[str, Any]):
         """
@@ -4493,11 +4486,10 @@ class MemoryEngine(MemoryEngineInterface):
             run_local_migrations,
             db_url,
             config.database_schema,
-            migration_database_url=config.migration_database_url,
             embedding_dimension=self.embeddings.dimension,
             vector_extension=config.vector_extension,
             text_search_extension=config.text_search_extension,
-            ensure_extensions=self._backend.supports_bm25,
+            ensure_extensions=True,
         )
 
     async def initialize(self):
@@ -4659,7 +4651,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         # Create SQL dialect via abstraction layer
         # (backend was created in __init__ so we can use it for migrations and task backend)
-        self._dialect = create_sql_dialect(self._database_backend_type)
+        self._dialect = PostgreSQLDialect()
 
         stmt_timeout_s = self._db_statement_timeout
         max_parallel_gather = self._db_max_parallel_workers_per_gather
@@ -5090,7 +5082,7 @@ class MemoryEngine(MemoryEngineInterface):
             return []
 
         # Authenticate tenant and set schema in context (for fq_table())
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         await self._ensure_bank_exists(bank_id, request_context)
 
@@ -6193,7 +6185,7 @@ class MemoryEngine(MemoryEngineInterface):
         from .memories import get_memories
         from .retain.attachment_store import reclaim_unreferenced_attachments
 
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         async with backend.acquire() as conn:
             return await reclaim_unreferenced_attachments(
@@ -6364,7 +6356,7 @@ class MemoryEngine(MemoryEngineInterface):
             return {}
 
         self._require_vision_capable_retain_llm()
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         await self._ensure_bank_exists(bank_id, request_context)
 
@@ -6527,7 +6519,7 @@ class MemoryEngine(MemoryEngineInterface):
         # wall time (store hop 32ms, embedding 5ms of a 356ms mean) while event-loop lag stayed at
         # 0.2ms — so the other 90% is a real await, and every untimed await here is a candidate.
         _auth_t0 = time.perf_counter()
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         _auth_s = time.perf_counter() - _auth_t0
         get_metrics_collector().record_recall_phase("engine_auth", _auth_s)
         if _auth_s > 0.025:
@@ -8111,7 +8103,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with document info or None if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         backend = await self._get_backend()
@@ -8180,7 +8172,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with counts of deleted items
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Opt-in (#6098): the prompts and answers that quote this document go with it instead of
         # waiting for the retention sweep. PG-only table.
         delete_traces = get_config().llm_trace_delete_with_document
@@ -8399,7 +8391,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             True if the document was found and updated, False if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         partial = add_tags is not None or remove_tags is not None
         if partial and tags is not None:
             raise OperationValidationError("Send either tags or add_tags/remove_tags, not both", status_code=422)
@@ -8590,7 +8582,7 @@ class MemoryEngine(MemoryEngineInterface):
             unit_uuid = uuid.UUID(unit_id)
         except ValueError:
             raise ValueError(f"Invalid unit_id: '{unit_id}' is not a valid UUID")
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         invalidated_obs = 0
         bank_id_for_consolidation: str | None = None
@@ -8801,7 +8793,7 @@ class MemoryEngine(MemoryEngineInterface):
             except (ValueError, AttributeError, TypeError):
                 raise ValueError(f"Invalid unit_id: {raw!r} is not a valid UUID")
 
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
 
         per_bank: dict[str, dict[str, int]] = {}
@@ -8970,7 +8962,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with counts of deleted items
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         if not _knowledge_bank:
             # Same id space, different API: the memory endpoint must not delete a knowledge bank, which
             # answers to its own validator hooks and keeps files only the knowledge service removes.
@@ -9182,7 +9174,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with count of deleted observations
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         from .memories import get_memories
 
         store = get_memories()
@@ -9288,7 +9280,7 @@ class MemoryEngine(MemoryEngineInterface):
             Dict with ``scopes`` (list of ``{"tags": list[str], "count": int}``),
             ``total`` (distinct scopes in the bank), ``limit`` and ``offset``.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -9320,7 +9312,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with count of memories queued for retry.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         from .memories import get_memories
 
         store = get_memories()
@@ -9356,7 +9348,7 @@ class MemoryEngine(MemoryEngineInterface):
             memory_id = str(uuid.UUID(memory_id))
         except ValueError:
             raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID") from None
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         deleted_count = 0
 
@@ -9540,7 +9532,7 @@ class MemoryEngine(MemoryEngineInterface):
             for v in (text, context, occurred_start, occurred_end, mentioned_at, new_fact_type, new_entities)
         )
 
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         backend = await self._get_backend()
         from .graph_maintenance import enqueue_entity_prune_candidates, enqueue_relink_victims
@@ -10000,7 +9992,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dictionary with consolidation stats
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # A bank-wide write, not narrowed to a tag scope: refuse scoped callers.
 
         from .consolidation import run_consolidation_job
@@ -10050,7 +10042,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with nodes, edges, table_rows, total_units, and limit
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Declared optional for backwards compatibility, but every path below requires a bank:
         # the existence check, the store's `graph_view`, and the authorization context all take
         # `str`. Without this the call fails later and less clearly -- the only caller is an HTTP
@@ -10221,7 +10213,7 @@ class MemoryEngine(MemoryEngineInterface):
         from .retain import fact_extraction
 
         # Resolve the tenant schema before touching any bank-scoped data (config).
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # The extraction runs under this bank's settings, so it sits behind the same
         # gate as reading them (GET /config, the prompt preview) — otherwise a
         # validator scoping callers to their banks can't stop it (issue #5448).
@@ -10452,7 +10444,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with items (list of memory units) and total count
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -10509,7 +10501,7 @@ class MemoryEngine(MemoryEngineInterface):
             memory_uuid = uuid.UUID(memory_id)
         except ValueError:
             raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         from .memories import get_memories
 
@@ -10566,7 +10558,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with items (list of documents without original_text), total count and ``total_is_estimate``
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -10613,7 +10605,7 @@ class MemoryEngine(MemoryEngineInterface):
             memory_uuid = uuid.UUID(memory_id)
         except ValueError:
             raise ValueError(f"Invalid memory_id: '{memory_id}' is not a valid UUID")
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         backend = await self._get_backend()
@@ -10734,7 +10726,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with chunk details including chunk_text, or None if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         from .memories import get_memories
 
@@ -10777,7 +10769,7 @@ class MemoryEngine(MemoryEngineInterface):
     ) -> DocumentHistoryResponse | None:
         """A document's change history, newest first: what each retain, fact edit and consolidation
         did to its facts and observations. None when the document is outside the caller's tag scope."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         backend = await self._get_backend()
         return await list_document_events(backend, bank_id, document_id, limit=limit, offset=offset)
@@ -10804,7 +10796,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with items (list of chunks) and total count
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         from .memories import get_memories
 
@@ -10835,7 +10827,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with operation result or None if document not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Fetch the document. Outside the caller's tag scope this reads as missing (404).
         doc = await self.get_document(document_id, bank_id, request_context=request_context)
@@ -11414,7 +11406,7 @@ class MemoryEngine(MemoryEngineInterface):
             Dict with bank_id, name, disposition traits and mission, or None when
             the bank does not exist.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._authorize_bank_profile_read(bank_id, request_context)
         return await self._get_bank_profile_authenticated(
             bank_id,
@@ -11442,7 +11434,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with bank_id, name, disposition traits and mission.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._authorize_bank_profile_read(bank_id, request_context)
         # The Optional in _get_bank_profile_authenticated's signature is for its read half only:
         # on the create path it raises rather than returning None, so there is nothing to handle.
@@ -11635,7 +11627,7 @@ class MemoryEngine(MemoryEngineInterface):
         The prompt preview renders those settings as prompt text, which is the same
         disclosure by another route — it must not be reachable when this one is not.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Existence is checked here too, so a preview of a bank that does not exist
         # 404s exactly as reading its config does, rather than rendering the prompts a
         # hypothetical bank on server defaults would send.
@@ -11659,7 +11651,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> BankConfigState:
         """Create a bank if needed and persist validated configuration overrides."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._update_bank_config_authenticated(
             bank_id,
             updates,
@@ -11674,7 +11666,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> BankConfigState:
         """Remove all bank configuration overrides after authorization."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._config_resolver.reset_bank_config(bank_id)
         return await self._get_bank_config_authenticated(bank_id, request_context)
 
@@ -11822,7 +11814,7 @@ class MemoryEngine(MemoryEngineInterface):
             disposition: Dict with skepticism, literalism, empathy (all 1-5)
             request_context: Request context for authentication.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         await self._ensure_bank_exists(bank_id, request_context)
         await self._get_backend()
@@ -11846,7 +11838,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with bank_id and mission.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # A bank-wide write, not narrowed to a tag scope: refuse scoped callers.
 
         await self._ensure_bank_exists(bank_id, request_context)
@@ -11876,7 +11868,7 @@ class MemoryEngine(MemoryEngineInterface):
             created_at, updated_at and stats), ``total`` (banks matching the search
             that are visible to the caller, before paging), ``limit`` and ``offset``.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._get_backend()
         # Clamped because the page is a Python slice, not a SQL LIMIT: a negative value
         # from a caller the HTTP layer doesn't validate (the MCP tool) would silently
@@ -12096,7 +12088,7 @@ class MemoryEngine(MemoryEngineInterface):
             )
 
         # Authenticate tenant and set schema in context (for fq_table())
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Cooperative cancellation checkpoint: if the client already disconnected
         # while this request waited to be scheduled, abort before doing any work
@@ -12686,7 +12678,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with items, total, limit, offset
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         await self._require_bank_exists(bank_id)
         tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
@@ -12731,7 +12723,7 @@ class MemoryEngine(MemoryEngineInterface):
         Keeping the stored edges and only dropping hidden nodes would still leak
         how often visible entities appear together out of scope (#5031).
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         await self._require_bank_exists(bank_id)
         tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
@@ -12817,7 +12809,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with items (list of {tag, count}), total, limit, offset
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -12852,7 +12844,7 @@ class MemoryEngine(MemoryEngineInterface):
         Same wildcard semantics as list_tags. Useful to populate tag autocompletion
         for UIs filtering mental models by tag.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -12960,7 +12952,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             EntityState with empty observations (summaries now in mental models)
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         return EntityState(entity_id=entity_id, canonical_name=entity_name, observations=[])
 
     # =========================================================================
@@ -12982,7 +12974,7 @@ class MemoryEngine(MemoryEngineInterface):
         bypass the cached value and recompute (the fresh result also refreshes
         the cache for subsequent callers).
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Answered for the whole bank, not narrowed to a tag scope: refuse scoped callers.
         await self._require_bank_exists(bank_id)
 
@@ -13092,7 +13084,7 @@ class MemoryEngine(MemoryEngineInterface):
         failed. reflect() calls this on every invocation, so it must not pay for
         any cross-table joins or link aggregations.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Answered for the whole bank, not narrowed to a tag scope: refuse scoped callers.
         return await self._bank_freshness(bank_id)
 
@@ -13158,7 +13150,7 @@ class MemoryEngine(MemoryEngineInterface):
         provider/model/base_url/api_key) and the result fanned out. Returns status only —
         never the provider/model/endpoint or the raw error (those are logged server-side).
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # The mental-model-refresh group is deliberately absent: this list is the
         # LlmHealthOperation enum on the public API, so adding it would change the
@@ -13210,7 +13202,7 @@ class MemoryEngine(MemoryEngineInterface):
         ``created_at`` per-row via ``COALESCE`` so records that lack an event
         timestamp still show up in the chart.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -13309,7 +13301,7 @@ class MemoryEngine(MemoryEngineInterface):
             entity_uuid = uuid.UUID(entity_id)
         except ValueError:
             raise ValueError(f"Invalid entity_id: '{entity_id}' is not a valid UUID")
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         tag_groups = await self._resolve_fuzzy_tag_groups(bank_id, tag_groups)
         from .memories import get_memories
 
@@ -13384,7 +13376,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             The requested page and the total number of matching models
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         tag_scope = None
         await self._require_bank_exists(bank_id)
@@ -13496,7 +13488,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Pinned mental model dict or None if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Pre-operation validation (credit check / usage metering)
         tag_scope = None
@@ -13545,7 +13537,7 @@ class MemoryEngine(MemoryEngineInterface):
         A failure produced no version, so its ``previous_content`` is always None —
         read ``kind`` to tell them apart.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         tag_scope = None
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
@@ -13701,7 +13693,7 @@ class MemoryEngine(MemoryEngineInterface):
         """
         if mental_model_id:
             check_mental_model_id(mental_model_id)
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         tag_scope = None
         _refuse_tags_outside_scope(tags, tag_scope)
         self._refuse_unwritable(tags, None, "a mental model")
@@ -14955,7 +14947,7 @@ class MemoryEngine(MemoryEngineInterface):
                 again, and the reason is recorded on the operation and in the model's
                 history.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Get the current mental model
         mental_model = await self.get_mental_model(bank_id, mental_model_id, request_context=request_context)
@@ -15192,7 +15184,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         Returns None if the mental model does not exist.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         mental_model = await self.get_mental_model(bank_id, mental_model_id, request_context=request_context)
         if not mental_model:
@@ -15303,7 +15295,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Updated pinned mental model dict or None if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
 
         tag_scope = None
@@ -15735,7 +15727,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Updated mental model dict or None if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
 
         # The dense vector has to be rebuilt from the name alone as well: leaving the
@@ -15805,7 +15797,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             True if deleted, False if not found
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
 
         tag_scope = None
@@ -16011,7 +16003,7 @@ class MemoryEngine(MemoryEngineInterface):
         The pages is managed by clients (CRUD over folders/pages);
         ``managed`` lets a client tag a node as system-owned vs. hand-authored.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         folder_id = f"kf-{uuid.uuid4().hex}"
 
@@ -16065,7 +16057,7 @@ class MemoryEngine(MemoryEngineInterface):
         folder (a uniqueness violation) — the caller should treat that as
         "already exists" (surfaced by the API as a 409).
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         mental_model_id = mental_model_id or f"mm-{uuid.uuid4().hex}"
         embedding_vec = await self._mental_model_embedding_vector(bank_id, name, content)
         embedding = str(embedding_vec) if embedding_vec else None
@@ -16152,7 +16144,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> PageTagFilter:
         """Authenticate a Page read and resolve its explicit tag filter."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._require_bank_exists(bank_id)
         # Fuzzy tokens resolve against the bank's *memory* tags (the vocabulary recall uses);
         # page tags are scopes over those memories, so the two vocabularies coincide in practice.
@@ -16232,7 +16224,7 @@ class MemoryEngine(MemoryEngineInterface):
 
     async def get_page(self, bank_id: str, page_id: str, *, request_context: "RequestContext") -> dict[str, Any] | None:
         """Return a page node merged with its mental model's content (for markdown rendering)."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             row = await conn.fetchrow(
@@ -16363,10 +16355,9 @@ class MemoryEngine(MemoryEngineInterface):
                 # config (see migrations), so its stats are read with 'english' too.
                 from .search.bm25_term_selection import build_bm25_query_text
 
-                backend_type = getattr(conn, "backend_type", "postgresql")
                 bm25_text = await build_bm25_query_text(
                     conn,
-                    create_sql_dialect(backend_type),
+                    PostgreSQLDialect(),
                     tokens=tokens,
                     query_text=query,
                     table="mental_models",
@@ -16479,7 +16470,7 @@ class MemoryEngine(MemoryEngineInterface):
         schedules an async refresh so the page re-synthesizes against the new
         question.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Bind the destination once, so the rest of the method reads a plain
         # `str | None` and never has to re-narrow the sentinel out of it.
         moving = not isinstance(parent_id, KeepParentSentinel)
@@ -16600,7 +16591,7 @@ class MemoryEngine(MemoryEngineInterface):
         CASCADE); deleting the node then cascades any remaining descendant folder
         rows. The subtree is gathered in Python so the logic is dialect-agnostic.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Readable-but-unwritable is refused before anything is touched; an unreadable node
         # reads as missing below.
         backend = await self._get_backend()
@@ -16653,7 +16644,7 @@ class MemoryEngine(MemoryEngineInterface):
 
     async def export_pages(self, bank_id: str, *, request_context: "RequestContext") -> PagesExport:
         """Gather every node, page content, and refresh history for an export bundle."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._require_bank_exists(bank_id)
 
         nodes = await self.list_page_nodes(bank_id=bank_id, request_context=request_context)
@@ -17017,7 +17008,7 @@ class MemoryEngine(MemoryEngineInterface):
         The one entry point for alias resolution, called by the HTTP route class and
         the MCP tools before either hands the id onward. It lives here rather than in
         those layers because the lookup is a database read, and because it has to run
-        after ``_authenticate_tenant`` — aliases are per-schema, and the schema comes
+        after ``_authenticate_request`` — aliases are per-schema, and the schema comes
         from authenticating the caller.
 
         An id that names a real bank, or names nothing at all, comes back unchanged,
@@ -17030,7 +17021,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             The bank's own id.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         from . import bank_aliases
 
         return await bank_aliases.resolve(await self._get_backend(), bank_id)
@@ -17051,7 +17042,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             The bank's aliases, which is empty for a bank that has none.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._require_bank_exists(bank_id)
         from . import bank_aliases
 
@@ -17081,7 +17072,7 @@ class MemoryEngine(MemoryEngineInterface):
             OperationValidationError: 409 when the name is taken, 400 when it is
                 not a usable id.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         await self._require_bank_exists(bank_id)
         from . import bank_aliases
@@ -17112,7 +17103,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             False when the bank has no such alias, which the caller turns into a 404.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         await self._require_bank_exists(bank_id)
         from . import bank_aliases
@@ -17136,7 +17127,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             False when the bank has no such alias, which the caller turns into a 404.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         await self._require_bank_exists(bank_id)
         from . import bank_aliases
@@ -17182,7 +17173,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             The requested page and the total number of matching directives
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         await self._require_bank_exists(bank_id)
         # The caller's tag scope joins the groups below, so it gets the same untagged-OR rule:
         # bank-wide directives still apply, tagged ones only inside the scope. Isolation mode
@@ -17290,7 +17281,7 @@ class MemoryEngine(MemoryEngineInterface):
             directive_id = str(uuid.UUID(directive_id))
         except ValueError:
             raise ValueError(f"Invalid directive_id: '{directive_id}' is not a valid UUID") from None
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         backend = await self._get_backend()
 
         async with acquire_with_retry(backend) as conn:
@@ -17334,7 +17325,7 @@ class MemoryEngine(MemoryEngineInterface):
             The created directive dict
         """
         _check_directive_priority(priority)
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # An untagged directive steers everyone's reflect, so a restricted writer cannot make one.
         self._refuse_unwritable(tags, None, "a directive")
         backend = await self._get_backend()
@@ -17391,7 +17382,7 @@ class MemoryEngine(MemoryEngineInterface):
             directive_id = str(uuid.UUID(directive_id))
         except ValueError:
             raise ValueError(f"Invalid directive_id: '{directive_id}' is not a valid UUID") from None
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         if not True:
             return None
         if tags is not None:
@@ -17464,7 +17455,7 @@ class MemoryEngine(MemoryEngineInterface):
             directive_id = str(uuid.UUID(directive_id))
         except ValueError:
             raise ValueError(f"Invalid directive_id: '{directive_id}' is not a valid UUID") from None
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         if not True:
             return False
         backend = await self._get_backend()
@@ -17517,7 +17508,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with total count and list of operations, sorted by most recent first
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Answered for the whole bank, not narrowed to a tag scope: refuse scoped callers.
         await self._require_bank_exists(bank_id)
         backend = await self._get_backend()
@@ -17620,7 +17611,7 @@ class MemoryEngine(MemoryEngineInterface):
             - completed_at: completion timestamp (if completed)
             - child_operations: (for parent operations) list of child operation statuses
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # An operation row is not tagged, but its payload is the raw request — a retain's
         # payload is the text someone else stored. A scoped caller never gets payloads.
@@ -17782,7 +17773,7 @@ class MemoryEngine(MemoryEngineInterface):
         overwriting 'cancelled', so a task that runs to completion past the
         flip, or fails, cannot resurrect the row.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         backend = await self._get_backend()
 
@@ -17845,7 +17836,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """Re-queue a failed or cancelled async operation, or run a deferred one now."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         backend = await self._get_backend()
@@ -17983,7 +17974,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """Delete a terminal (failed/cancelled/completed) async operation row."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Acts on the whole bank, not narrowed to a tag scope: refuse scoped callers.
         backend = await self._get_backend()
@@ -18036,7 +18027,7 @@ class MemoryEngine(MemoryEngineInterface):
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """Update bank profile and configuration with one tenant authentication."""
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         backend = None
         if not create_if_missing:
@@ -18426,9 +18417,7 @@ class MemoryEngine(MemoryEngineInterface):
                 )
 
         # For SyncTaskBackend: executes the task immediately.
-        # For BrokerTaskBackend: no-op (submit_task's UPDATE skips rows whose
-        # task_payload is already set, which it is after the INSERT above). The call
-        # is kept for symmetry and to support any future notification mechanisms.
+        # For QueuedTaskBackend the committed row is already available to the poller.
         await self._task_backend.submit_task(full_payload)
 
         logger.info(f"{operation_type} task queued for bank_id={bank_id}, operation_id={operation_id}")
@@ -18513,7 +18502,7 @@ class MemoryEngine(MemoryEngineInterface):
         acknowledgement does not enqueue a duplicate. The parent primary key is
         the concurrency authority; no extra bookkeeping columns are needed.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Sanitize at the same ingress point the synchronous path does, and for a
         # second reason on top of it: the whole item is serialized into
@@ -18634,7 +18623,7 @@ class MemoryEngine(MemoryEngineInterface):
         #
         # submit_task() must run AFTER the transaction commits. SyncTaskBackend
         # (used in tests) executes the task synchronously, which would not see
-        # the still-uncommitted child row. BrokerTaskBackend / WorkerTaskBackend
+        # the still-uncommitted child row. QueuedTaskBackend
         # are effectively no-ops for already-populated task_payload, but we
         # defer them all uniformly for clarity.
         deferred_child_payloads: list[dict[str, Any]] = []
@@ -18743,8 +18732,8 @@ class MemoryEngine(MemoryEngineInterface):
 
         logger.info(f"Created parent operation {parent_operation_id} with {len(sub_batches)} child sub-batch(es)")
 
-        # Notify the task backend after commit. For BrokerTaskBackend /
-        # WorkerTaskBackend in production this is a no-op because task_payload
+        # Notify the task backend after commit. For QueuedTaskBackend in production
+        # this is a no-op because task_payload
         # is already populated; for SyncTaskBackend in tests this kicks off
         # synchronous execution against the now-committed rows.
         for full_payload in deferred_child_payloads:
@@ -18785,7 +18774,7 @@ class MemoryEngine(MemoryEngineInterface):
         Returns:
             Dict with operation_id
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Pass tenant_id and api_key_id through task payload so the worker
         # can provide request context to extension hooks (e.g., usage metering
@@ -18842,7 +18831,7 @@ class MemoryEngine(MemoryEngineInterface):
             Dict with ``operation_id``. May contain ``no_work=True`` (and a
             null operation_id) when both queues were already empty.
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Cheap pre-check on the two (bank_id, enqueued_at) indexes. Lets every
         # retain call this unconditionally without paying for an async_operations
@@ -18917,7 +18906,7 @@ class MemoryEngine(MemoryEngineInterface):
         A no-op on backends without per-bank indexes (ScaNN keeps one global
         index) and on Oracle (partitioned by bank, no partial vector indexes).
         """
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         # Threshold off: coverage is settled at bank creation, so there is
         # nothing to reconcile and nothing to look at. Checked before anything
@@ -18930,15 +18919,7 @@ class MemoryEngine(MemoryEngineInterface):
         if index_clause is None:
             return {"operation_id": None, "no_work": True}
 
-        # Postgres-only, and gated on the backend rather than on the configured
-        # extension name: an Oracle deployment leaves REMEMBER_API_VECTOR_EXTENSION
-        # at its pgvector default, so the clause above is not None there. Without
-        # this the planner would run asyncpg-shaped SQL against Oracle on every
-        # write, and the job would then find no DSN to build with and re-queue
-        # itself on the next one, forever.
         backend = await self._get_backend()
-        if not isinstance(backend, PostgreSQLBackend):
-            return {"operation_id": None, "no_work": True}
 
         # Cheap pre-check: one catalog lookup plus, for the partitions this
         # direction cannot settle from the catalog, one capped count. Mirrors
@@ -19039,25 +19020,16 @@ class MemoryEngine(MemoryEngineInterface):
         if index_clause is None:
             return
 
-        # REMEMBER_API_MIGRATION_DATABASE_URL first when set — CREATE/DROP INDEX
-        # CONCURRENTLY needs a real backend session for the whole statement, which
-        # a transaction-pooled URL cannot give, and that env var is the documented
-        # direct-connection escape hatch (migrations use it for the same reason).
-        # Otherwise the DSN this engine is actually attached to, NOT
-        # config.database_url: the two differ whenever the engine was handed a DSN
-        # directly rather than reading the env var — embedders, and the test suite,
-        # which resolves pg0 in a fixture. Reading config there connected to a
-        # different database entirely and every reconcile died on
-        # `relation "public.banks" does not exist`.
+        # Use the engine's actual database, which can differ from the configured URL in tests.
         backend = await self._get_backend()
-        url = get_config().migration_database_url or getattr(backend, "dsn", None)
+        url = getattr(backend, "dsn", None)
         if not url:
             # Not transient, unlike a failed build: nothing about the next write
             # will produce a DSN. Warn rather than debug so the operator sees why
             # coverage never converges, and return without the hand-off below.
             logger.warning(
                 f"Vector index maintenance for bank {bank_id} skipped: no direct database URL available. "
-                f"Set REMEMBER_API_MIGRATION_DATABASE_URL to a session-pooled connection."
+                "Restart the daemon and retry."
             )
             return
 
@@ -19193,7 +19165,7 @@ class MemoryEngine(MemoryEngineInterface):
         """
         self._raise_if_mental_model_refresh_unavailable()
 
-        await self._authenticate_tenant(request_context)
+        await self._authenticate_request(request_context)
 
         if automatic and await self._automatic_refresh_paused(bank_id, mental_model_id):
             return {"paused": True}

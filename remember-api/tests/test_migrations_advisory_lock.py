@@ -331,7 +331,7 @@ def test_waiting_worker_logs_while_polling(monkeypatch: pytest.MonkeyPatch, capl
     message = waiting_logs[0].getMessage()
     assert "pid=4242" in message, "the log must name the backend holding the lock"
     # The remedy it points at has to be a knob that exists.
-    assert "REMEMBER_API_MIGRATION_DATABASE_URL" in message
+    assert "database connection" in message
 
 
 def test_a_brief_wait_is_not_reported(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:

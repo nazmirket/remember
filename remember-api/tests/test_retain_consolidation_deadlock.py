@@ -282,8 +282,8 @@ def _engine(backend: PostgreSQLBackend) -> MemoryEngine:
     engine = MemoryEngine.__new__(MemoryEngine)
     engine._initialized = True
     engine._backend = backend
-    engine._tenant_extension = None
-    engine._authenticate_tenant = AsyncMock(return_value="public")
+    engine._authenticator = None
+    engine._authenticate_request = AsyncMock(return_value="public")
     engine._bank_stats_cache = types.SimpleNamespace(invalidate=AsyncMock())
     engine._config_resolver = types.SimpleNamespace(
         resolve_full_config=AsyncMock(return_value=types.SimpleNamespace(enable_auto_consolidation=False))

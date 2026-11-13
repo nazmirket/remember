@@ -117,7 +117,7 @@ async def insert_facts(
         # them, and the reason this is per fact rather than per chunk.
         attachment_ids_list.append(json.dumps(list(dict.fromkeys(fact.attachment_ids))))
 
-    # Batch insert all facts — delegates to DataAccessOps which handles
+    # Batch insert all facts — delegates to PostgreSQLOps which handles
     # unnest (PG) vs row-by-row (Oracle) transparently.
     config = get_config()
 
@@ -448,9 +448,9 @@ async def invalidate_memory(*, conn, fq_table, bank_id: str, unit_id: str, reaso
     if inserted is None:
         return False
     # Links in lock order (see delete_unit_links) — after the causal snapshot above reads them.
-    from .graph import _ops_for
+    from ...db import get_postgres_ops
 
-    await _ops_for(conn).delete_unit_links(conn, fq_table("memory_links"), bank_id, [str(unit_id)])
+    await get_postgres_ops().delete_unit_links(conn, fq_table("memory_links"), bank_id, [str(unit_id)])
     # The cascade prunes `unit_entities` with the row.
     await conn.execute(f"DELETE FROM {mu} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id)
     return True
@@ -503,7 +503,7 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
         str(unit_id),
         bank_id,
     )
-    from .graph import _ops_for
+    from ...db import get_postgres_ops
 
     # Restore the entity postings for entities that still exist — some may have
     # been swept as orphans while the memory was archived — and give each one
@@ -511,7 +511,7 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
     # has to follow the postings actually written, so the two cannot be decided
     # separately.
     if arch_row["entity_ids"]:
-        await _ops_for(conn).restore_entity_postings(
+        await get_postgres_ops().restore_entity_postings(
             conn,
             ue,
             ent,
@@ -528,7 +528,7 @@ async def restore_memory(*, conn, fq_table, bank_id: str, unit_id: str) -> Store
         f"SELECT causal_links FROM {arch} WHERE id = $1 AND bank_id = $2", str(unit_id), bank_id
     )
     if causal_json:
-        await rematerialize_causal_links(conn, bank_id, conn.parse_json(causal_json) or [], ops=_ops_for(conn))
+        await rematerialize_causal_links(conn, bank_id, conn.parse_json(causal_json) or [], ops=get_postgres_ops())
     # Invalidation cascaded away this unit's derived outgoing links; queue it so graph maintenance
     # rebuilds them (the drain only touches queued units — it never scans for missing adjacency).
     from .graph import enqueue_graph_maintenance_at_commit
@@ -620,9 +620,11 @@ async def apply_edit(
     # Drop only the DERIVED links — graph maintenance recomputes temporal/semantic. Causal edges
     # are retain-time extraction output that nothing recreates, so an edit preserves them (#2864).
     # In lock order, like every other link delete (see delete_unit_links).
-    from .graph import _ops_for
+    from ...db import get_postgres_ops
 
-    await _ops_for(conn).delete_unit_links(conn, ml, bank_id, [str(unit_id)], keep_link_types=list(CAUSAL_LINK_TYPES))
+    await get_postgres_ops().delete_unit_links(
+        conn, ml, bank_id, [str(unit_id)], keep_link_types=list(CAUSAL_LINK_TYPES)
+    )
 
 
 __all__ = [

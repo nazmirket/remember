@@ -152,8 +152,7 @@ def test_daemon_preserves_uv_python_for_local_uv(temp_home, monkeypatch):
     captured = {}
     popen_called = [False]
 
-    def fake_find_api_command(env=None):
-        captured["find_env"] = env
+    def fake_find_api_command():
         return ["uv", "run", "--project", "/fork/remember-api", "remember-api"]
 
     def fake_popen(cmd, env, **kwargs):
@@ -177,7 +176,6 @@ def test_daemon_preserves_uv_python_for_local_uv(temp_home, monkeypatch):
             config={"llm_provider": "openai", "llm_api_key": "sk-x", "llm_model": "gpt-4o-mini"},
         )
 
-    assert captured["find_env"]["UV_PYTHON"] == "3.13"
     assert captured["popen_env"]["UV_PYTHON"] == "3.13"
 
 

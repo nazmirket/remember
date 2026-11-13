@@ -8,7 +8,6 @@ import re
 import signal
 import subprocess
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import IO
 
@@ -143,21 +142,6 @@ def _probe(url: str, read: float) -> ProbeResponse | None:
 _PARENT_INTERPRETER_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH", "VIRTUAL_ENV")
 
 
-def _runs_a_foreign_interpreter(cmd: list[str]) -> bool:
-    """Whether *cmd* launches remember-api on an interpreter that is not ours.
-
-    True for uv-launched commands, including the
-    monorepo ``uv run --project <api> ... remember-api`` dev command — because uv resolves
-    an environment of its own, usually on a different Python than the caller. False for the
-    installed-binary paths, which are a single executable from an environment we already share.
-
-    Matched on the basename, not the literal string: the sibling candidate paths in
-    ``_find_api_command`` are returned resolved (``[str(candidate)]``), so a future change that
-    resolves the launcher the same way must not silently stop scrubbing the env.
-    """
-    return Path(cmd[0]).stem in {"uv", "uvx"}
-
-
 def _strip_parent_interpreter_env(env: dict[str, str]) -> dict[str, str]:
     """Drop the parent interpreter's PYTHONPATH/PYTHONHOME/VIRTUAL_ENV from *env*.
 
@@ -286,19 +270,12 @@ class DaemonEmbedManager:
         response = _probe(f"{self.get_url()}/health", LIVENESS_PROBE_TIMEOUT)
         return response is not None and response.status_code == 200
 
-    def _dev_api_command(self) -> list[str] | None:
-        """Return the dev-mode launch command when running inside the monorepo."""
-        dev_api_path = Path(__file__).parent.parent.parent / "remember-api"
-        if dev_api_path.exists() and (dev_api_path / "pyproject.toml").exists():
-            return ["uv", "run", "--project", str(dev_api_path), "--extra", "all", "remember-api"]
-        return None
-
-    def _find_api_command(self, env: Mapping[str, str] | None = None) -> list[str]:
-        """Launch only the API from this Remember checkout."""
-        command = self._dev_api_command()
-        if command is None:
+    def _find_api_command(self) -> list[str]:
+        """Launch the API from the adjacent Remember checkout."""
+        api_path = Path(__file__).parent.parent.parent / "remember-api"
+        if not (api_path / "pyproject.toml").is_file():
             raise RuntimeError("The Remember API checkout is required beside remember-embed")
-        return command
+        return ["uv", "run", "--project", str(api_path), "--extra", "all", "remember-api"]
 
     @staticmethod
     def _is_port_in_use(port: int) -> bool:
@@ -787,7 +764,7 @@ class DaemonEmbedManager:
         # daemonize() (#1519) fork on it, which can deadlock native libraries
         # on macOS.
         try:
-            cmd = self._find_api_command(env=env)
+            cmd = self._find_api_command()
         except RuntimeError as exc:
             logger.error("Cannot start local daemon: %s", exc)
             console.print(f"[red]Cannot start local daemon: {exc}[/red]")
@@ -796,8 +773,7 @@ class DaemonEmbedManager:
             "--port",
             str(port),
         ]
-        if _runs_a_foreign_interpreter(cmd):
-            env = _strip_parent_interpreter_env(env)
+        env = _strip_parent_interpreter_env(env)
 
         try:
             # Start daemon. Redirect stdout/stderr to the daemon log so that

@@ -179,26 +179,13 @@ def timed_retain(fn):
 
     @functools.wraps(fn)
     async def wrapper(self, bank_id, contents, *args, **kwargs):
-        # The store the extension names for this bank, falling back to the extension's class -- the
-        # label's value before backend_name_for existed, so a store that names nothing keeps its
-        # existing series. Behind a router this is what lets one backend's retains be told apart.
-        from ...metrics import memories_backend_for
-
-        store = memories_backend_for(bank_id)
-        if not store:
-            try:
-                from ..memories import get_memories
-
-                store = type(get_memories()).__name__
-            except Exception:
-                store = ""
         try:
             content_bytes = sum(len(c.get("content") or "") for c in contents)
         except Exception:
             content_bytes = 0
         async with retain_timing(
             bank_id=bank_id,
-            store=store,
+            store="PostgresMemories",
             documents=len(contents) if contents else 0,
             content_bytes=content_bytes,
         ):

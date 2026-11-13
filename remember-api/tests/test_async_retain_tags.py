@@ -17,13 +17,13 @@ async def test_submit_async_retain_includes_document_tags_in_task_payload():
     task backend after commit. The test verifies document_tags propagates
     through to the task backend's submit_task call, which is the post-commit
     notification that drives SyncTaskBackend in tests and is a no-op for
-    BrokerTaskBackend / WorkerTaskBackend in production.
+    QueuedTaskBackend in production.
     """
     import json
 
     engine = MemoryEngine.__new__(MemoryEngine)
     engine._initialized = True
-    engine._authenticate_tenant = AsyncMock()
+    engine._authenticate_request = AsyncMock()
     # Children are now inserted inline (no _submit_async_operation hop), and
     # submit_task fires post-commit. Mock both so the inline path runs cleanly
     # without the test needing real DB or task backend.
@@ -74,7 +74,7 @@ async def test_submit_async_retain_includes_document_tags_in_task_payload():
     assert result["items_count"] == 1
 
     # Verify authentication was called
-    engine._authenticate_tenant.assert_awaited_once_with(request_context)
+    engine._authenticate_request.assert_awaited_once_with(request_context)
 
     # The parent + child INSERTs both went through mock_conn.execute. There
     # should be exactly two: one for the parent (no task_payload), one for the

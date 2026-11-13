@@ -33,6 +33,7 @@ from remember_api.api.diagnostics import register_diagnostics_routes
 from remember_api.api.disconnect import ClientDisconnectCancellationMiddleware, get_scope_cancellation_token
 from remember_api.api.observability import HttpObservabilityMiddleware
 from remember_api.api.unknown_params import UnknownParamsRoute
+from remember_api.auth import AuthenticationError
 from remember_api.cancellation import OperationCancelledError
 from remember_api.engine import page_markdown
 from remember_api.engine.audit import (
@@ -44,7 +45,6 @@ from remember_api.engine.audit import (
 )
 from remember_api.engine.document_history import DocumentHistoryResponse
 from remember_api.engine.llm_trace import LLMCallType, LLMRequestListResponse, LLMRequestStatsResponse, LLMStatsSplit
-from remember_api.extensions import AuthenticationError
 
 
 def _parse_metadata(metadata: Any) -> dict[str, Any]:
@@ -4137,7 +4137,7 @@ def create_app(
 
         # Start worker poller if the backend supports it.
         # All current backends (PostgreSQL, Oracle) support async worker/poller.
-        if config.worker_enabled and memory._backend.supports_worker_poller:
+        if config.worker_enabled:
             from ..config import DEFAULT_DATABASE_SCHEMA
             from ..utils import warn_if_container_default_worker_id
 
@@ -4163,12 +4163,6 @@ def create_app(
             poller_task = asyncio.create_task(poller.run())
             _stop_claiming_on_sigterm(poller, asyncio.get_running_loop())
             logging.info(f"Worker poller started (worker_id={worker_id})")
-        elif config.worker_enabled and not memory._backend.supports_worker_poller:
-            logging.warning(
-                "Worker poller disabled — backend does not support async operations. "
-                "Tasks (mental model refresh, consolidation) will run synchronously."
-            )
-
         yield
 
         # Stop the loop watchdog first so it doesn't fire during teardown.
@@ -7741,7 +7735,7 @@ def _register_routes(app: FastAPI):
                 raise HTTPException(status_code=404, detail=f"Bank '{bank_id}' not found")
             # Get bank-specific config overrides (not the fully resolved config,
             # so the template only contains what was explicitly set on this bank)
-            await app.state.memory._authenticate_tenant(request_context)
+            await app.state.memory._authenticate_request(request_context)
             # Fresh, not cached: this exports what is stored ON the bank, and a template taken
             # right after a config edit must not carry the values that edit replaced.
             bank_overrides = await app.state.memory._config_resolver._load_bank_config(bank_id, cached=False)

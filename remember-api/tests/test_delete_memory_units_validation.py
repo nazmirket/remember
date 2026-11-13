@@ -27,7 +27,7 @@ def _stub_engine() -> MemoryEngine:
     """
     engine = object.__new__(MemoryEngine)
     # Only attributes touched by the validation branches need to exist.
-    engine._authenticate_tenant = AsyncMock()
+    engine._authenticate_request = AsyncMock()
     engine._get_backend = AsyncMock(return_value=MagicMock())
     return engine
 
@@ -44,7 +44,7 @@ async def test_empty_unit_ids_returns_zero_without_auth():
     )
 
     assert result == {"requested": 0, "deleted": 0, "per_bank": {}}
-    engine._authenticate_tenant.assert_not_awaited()
+    engine._authenticate_request.assert_not_awaited()
     engine._get_backend.assert_not_awaited()
 
 
@@ -61,7 +61,7 @@ async def test_invalid_uuid_raises_value_error_before_auth():
             request_context=RequestContext(api_key="k"),
         )
 
-    engine._authenticate_tenant.assert_not_awaited()
+    engine._authenticate_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio

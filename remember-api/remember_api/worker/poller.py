@@ -2169,10 +2169,6 @@ class WorkerPoller:
 
         pg_stat_activity is PostgreSQL-specific; skip on other backends.
         """
-        # pg_stat_activity is PG-specific — skip on non-PG backends.
-        if self._backend.backend_type != "postgresql":
-            return
-
         try:
             async with self._backend.acquire() as conn:
                 rows = await conn.fetch(

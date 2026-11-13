@@ -1,4 +1,4 @@
-"""Regression tests for DataAccessOps.lock_document_for_write.
+"""Regression tests for PostgreSQLOps.lock_document_for_write.
 
 Covers vectorize-io/remember#1944: the retain document-ownership gate used a
 single ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING`` upsert. PostgreSQL

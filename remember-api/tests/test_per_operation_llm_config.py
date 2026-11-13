@@ -316,7 +316,7 @@ class TestReflectUsesReflectLLMConfig:
             skip_llm_verification=True,
         )
 
-        engine._authenticate_tenant = AsyncMock()  # type: ignore[method-assign]
+        engine._authenticate_request = AsyncMock()  # type: ignore[method-assign]
         engine.get_bank_profile = AsyncMock(return_value={"name": "Test", "mission": ""})  # type: ignore[method-assign]
         engine.get_bank_stats = AsyncMock(
             return_value=SimpleNamespace(last_consolidated_at=None, pending_consolidation=0)

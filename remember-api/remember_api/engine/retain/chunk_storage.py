@@ -53,7 +53,7 @@ async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str, ops=Non
     in `chunk_ids.py` -- see #4244) would otherwise let a delta retain here cascade that
     bank's facts away. Every call below passes it on, down to the store's own statements.
 
-    ``ops`` is the backend-specific DataAccessOps the observation sweep below needs to choose
+    ``ops`` is the backend-specific PostgreSQLOps the observation sweep below needs to choose
     the PG (native array) vs Oracle (junction table) read path — pass ``pool.ops``.
 
     Returns the number of observations invalidated by the sweep, so the caller can log it.
@@ -119,7 +119,7 @@ async def store_chunks_batch(
         bank_id: Bank identifier
         document_id: Document identifier
         chunks: List of ChunkMetadata objects
-        ops: DataAccessOps instance (from backend.ops)
+        ops: PostgreSQLOps instance (from backend.ops)
         store_document_text: Whether to persist raw chunk text — the bank's
             resolved value, never a server-wide fallback (#6249).
 

@@ -114,7 +114,7 @@ class TestBindBankIdDecorator:
         with (
             patch.object(
                 engine,
-                "_authenticate_tenant",
+                "_authenticate_request",
                 AsyncMock(side_effect=lambda _context: observed_bank_ids.append(get_current_bank_id())),
             ),
             patch.object(engine, "_get_backend", AsyncMock(side_effect=RuntimeError("stop after authentication"))),

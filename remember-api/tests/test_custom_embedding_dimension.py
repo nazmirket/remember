@@ -19,7 +19,6 @@ from remember_api.engine.cross_encoder import LocalSTCrossEncoder
 from remember_api.engine.embeddings import OpenAIEmbeddings
 from remember_api.engine.query_analyzer import DateparserQueryAnalyzer
 from remember_api.engine.task_backend import SyncTaskBackend
-from remember_api.extensions import TenantContext, TenantExtension
 from remember_api.migrations import ensure_embedding_dimension, run_migrations
 
 # The whole point of this module is the physical embedding column: it counts
@@ -31,14 +30,14 @@ pytestmark = pytest.mark.memory_backend_incompatible
 # =============================================================================
 
 
-class SchemaTenantExtension(TenantExtension):
+class SchemaTestAuthenticator:
     """Tenant extension that routes all requests to a specific schema (for testing)."""
 
     def __init__(self, schema_name: str):
         self.schema_name = schema_name
 
-    async def authenticate(self, request_context: RequestContext) -> TenantContext:
-        return TenantContext(schema_name=self.schema_name)
+    async def authenticate(self, request_context: RequestContext) -> str:
+        return self.schema_name
 
 
 def get_test_schema(prefix: str, worker_id: str) -> str:
@@ -493,7 +492,7 @@ class TestOpenAIEmbeddings:
             run_migrations=False,
             task_backend=SyncTaskBackend(),
         )
-        memory._tenant_extension = SchemaTenantExtension(schema_name)
+        memory._authenticator = SchemaTestAuthenticator(schema_name)
 
         try:
             await memory.initialize()
@@ -563,7 +562,7 @@ class TestOpenAIEmbeddings:
             run_migrations=False,
             task_backend=SyncTaskBackend(),
         )
-        memory._tenant_extension = SchemaTenantExtension(schema_name)
+        memory._authenticator = SchemaTestAuthenticator(schema_name)
 
         try:
             await memory.initialize()

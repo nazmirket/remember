@@ -80,7 +80,7 @@ async def test_recall_async_passes_question_date_to_combined_scoring(monkeypatch
     engine.embeddings = object()
     engine.query_analyzer = object()
     engine._cross_encoder_reranker = _Reranker()
-    engine._authenticate_tenant = AsyncMock()
+    engine._authenticate_request = AsyncMock()
     # This engine has no pool; recall's bank-existence check (#4442) is not what's under test.
     engine._require_bank_exists = AsyncMock()
 

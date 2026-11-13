@@ -1204,42 +1204,6 @@ class TestHandlerGuards:
             await memory.delete_bank(bank_id, request_context=request_context)
 
 
-class TestBackendGate:
-    """Only PostgreSQL has per-bank partial vector indexes to maintain."""
-
-    @pytest.mark.asyncio
-    async def test_a_non_postgresql_backend_never_queues(
-        self, memory: MemoryEngine, request_context: RequestContext, low_threshold, monkeypatch
-    ):
-        """Oracle leaves the extension setting at its pgvector default.
-
-        So the index clause is not None there, and gating on it alone let the
-        planner run asyncpg-shaped SQL against Oracle on every write — after
-        which the job found no DSN to build with and re-queued itself on the next
-        one, forever. The backend itself is the honest gate.
-        """
-        bank_id = await _seed_bank(memory, request_context, _BUILD_AT)
-        try:
-
-            class _NotPostgres:
-                """Stands in for a backend the per-bank index layout does not apply to."""
-
-            async def _not_postgres():
-                return _NotPostgres()
-
-            monkeypatch.setattr(memory, "_get_backend", _not_postgres)
-
-            result = await memory.submit_async_vector_index_maintenance(
-                bank_id=bank_id, request_context=request_context, trigger=CoverageTrigger.GREW
-            )
-
-            assert result["no_work"] is True
-            assert result["operation_id"] is None
-        finally:
-            monkeypatch.undo()
-            await memory.delete_bank(bank_id, request_context=request_context)
-
-
 class TestDeletionDropsCoverage:
     """Losing rows has to take the indexes with it, not just gaining them.
 

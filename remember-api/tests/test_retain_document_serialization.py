@@ -310,7 +310,7 @@ def isolated_ops_schema(pg0_db_url):
     Only the queue tests take ``backend``; the end-to-end append tests build their
     own engine on ``memory_stub_emb`` and are unaffected.
     """
-    from remember_api.engine.db import create_database_backend
+    from remember_api.engine.db.postgresql import PostgreSQLBackend
     from remember_api.pg0 import resolve_database_url
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
@@ -318,7 +318,7 @@ def isolated_ops_schema(pg0_db_url):
 
     async def _provision() -> str:
         url = await resolve_database_url(pg0_db_url)
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:
@@ -334,7 +334,7 @@ def isolated_ops_schema(pg0_db_url):
         return url
 
     async def _drop(url: str) -> None:
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:

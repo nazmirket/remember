@@ -65,7 +65,7 @@ def search(monkeypatch):
         # for a bank that exists, so the stub says it does.
         return None
 
-    engine._authenticate_tenant = fake_authenticate
+    engine._authenticate_request = fake_authenticate
     engine._get_backend = fake_get_backend
     engine._require_bank_exists = fake_require_bank_exists
     engine._config_resolver = SimpleNamespace(get_bank_config=fake_get_bank_config)

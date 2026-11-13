@@ -77,7 +77,7 @@ async def _run_recall(
     engine.embeddings = object()
     engine.query_analyzer = object()
     engine._cross_encoder_reranker = _Reranker()
-    engine._authenticate_tenant = AsyncMock()
+    engine._authenticate_request = AsyncMock()
     # Recall 404s for a bank that was never created (#4442); this engine has no
     # database behind it, so the existence check is stubbed along with auth.
     engine._require_bank_exists = AsyncMock()

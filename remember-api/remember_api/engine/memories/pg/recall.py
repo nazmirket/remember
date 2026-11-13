@@ -19,7 +19,7 @@ from ...search.bm25_term_selection import build_bm25_query_text
 from ...search.retrieval import tokenize_query
 from ...search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, build_tags_where_clause_simple
 from ...search.types import RetrievalResult
-from ...sql import create_sql_dialect
+from ...sql import PostgreSQLDialect
 from ...stored_dates import finite_utc
 from ..base import GRAPH_SEED_LIMIT, SemanticBm25Result
 
@@ -119,11 +119,7 @@ async def retrieve_semantic_bm25_combined_sql(
     )
     table = fq_table("memory_units")
 
-    # Use the SQL dialect to build backend-specific query arms, avoiding
-    # inline if/else branches for each database.
-    # Use getattr for backward compat: raw asyncpg connections (used in some
-    # tests) lack backend_type; default to "postgresql".
-    dialect = create_sql_dialect(getattr(conn, "backend_type", "postgresql"))
+    dialect = PostgreSQLDialect()
 
     # --- Parameter layout ---
     # $1 = query_emb_str  (semantic arms)
@@ -598,13 +594,7 @@ async def retrieve_temporal_combined_sql(
             first_param_index=spreading_groups_param_start + len(spreading_groups_params),
         )
 
-        # Multi-hop temporal spreading expands a batch of seed ids with
-        # ``FROM unnest($2::uuid[])``, which has no Oracle equivalent. On backends
-        # without unnest, skip the spread: the temporal entry points are still
-        # returned above, and the semantic/keyword/graph retrievers cover the rest.
-        supports_unnest = getattr(conn, "backend_type", "postgresql") != "oracle"
-
-        while frontier and budget_remaining > 0 and iteration < max_iterations and supports_unnest:
+        while frontier and budget_remaining > 0 and iteration < max_iterations:
             iteration += 1
             batch_ids = frontier[:batch_size]
             frontier = frontier[batch_size:]

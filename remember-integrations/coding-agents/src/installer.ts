@@ -492,9 +492,9 @@ function configureServer(
   }
   const next: Record<string, unknown> = {
     ...existing,
-    serverMode: "daemon",
     embedPackagePath,
   };
+  delete next.serverMode;
   delete next.apiUrl;
   delete next.apiToken;
   writeJson(configPath, next);

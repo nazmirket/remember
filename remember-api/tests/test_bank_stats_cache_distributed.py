@@ -60,16 +60,11 @@ def _pin_distributed_cache(memory: MemoryEngine) -> DistributedBankStatsCache:
 class TestDistributedBankStatsCache:
     @pytest.mark.asyncio
     async def test_pg_engine_selects_distributed_cache(self, memory: MemoryEngine):
-        if memory._database_backend_type != "postgresql":
-            pytest.skip("distributed cache is PostgreSQL-only")
         assert isinstance(memory._bank_stats_cache, DistributedBankStatsCache)
 
     @pytest.mark.asyncio
     @pytest.mark.memory_backend_incompatible
     async def test_result_is_written_and_served_from_table(self, memory: MemoryEngine, request_context: RequestContext):
-        if memory._database_backend_type != "postgresql":
-            pytest.skip("distributed cache is PostgreSQL-only")
-
         bank_id = f"test-dist-stats-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)
         pool = await memory._get_pool()
@@ -108,9 +103,6 @@ class TestDistributedBankStatsCache:
     async def test_force_refresh_bypasses_and_updates_cache(
         self, memory: MemoryEngine, request_context: RequestContext
     ):
-        if memory._database_backend_type != "postgresql":
-            pytest.skip("distributed cache is PostgreSQL-only")
-
         bank_id = f"test-dist-stats-fresh-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)
         pool = await memory._get_pool()
@@ -141,9 +133,6 @@ class TestDistributedBankStatsCache:
     @pytest.mark.asyncio
     @pytest.mark.memory_backend_incompatible
     async def test_degrades_when_cache_table_unreachable(self, memory: MemoryEngine, request_context: RequestContext):
-        if memory._database_backend_type != "postgresql":
-            pytest.skip("distributed cache is PostgreSQL-only")
-
         bank_id = f"test-dist-stats-degrade-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)
         pool = await memory._get_pool()
@@ -166,8 +155,6 @@ async def test_stats_read_before_a_delete_are_not_cached_for_the_recreated_bank(
     memory: MemoryEngine, request_context: RequestContext
 ):
     """A stats load that started before the bank was deleted and recreated must not be stored."""
-    if memory._database_backend_type != "postgresql":
-        pytest.skip("distributed cache is PostgreSQL-only")
     bank_id = f"test-dist-stats-race-{uuid.uuid4().hex[:8]}"
     await _ensure_bank(memory, bank_id, request_context)
     cache = DistributedBankStatsCache(backend=memory._backend, ttl_seconds=_PINNED_TTL_SECONDS)

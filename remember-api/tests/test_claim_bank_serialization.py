@@ -58,7 +58,7 @@ def isolated_ops_schema(pg0_db_url):
     created + migrated once and dropped at session end. ``search_path`` is set on
     the pool in :func:`backend`, so every table reference here resolves into it.
     """
-    from remember_api.engine.db import create_database_backend
+    from remember_api.engine.db.postgresql import PostgreSQLBackend
     from remember_api.pg0 import resolve_database_url
 
     worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
@@ -66,7 +66,7 @@ def isolated_ops_schema(pg0_db_url):
 
     async def _provision() -> str:
         url = await resolve_database_url(pg0_db_url)
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:
@@ -82,7 +82,7 @@ def isolated_ops_schema(pg0_db_url):
         return url
 
     async def _drop(url: str) -> None:
-        b = create_database_backend("postgresql")
+        b = PostgreSQLBackend()
         await b.initialize(url, min_size=1, max_size=2)
         try:
             async with b.get_pool().acquire() as conn:
@@ -108,7 +108,7 @@ def isolated_ops_schema(pg0_db_url):
 @pytest_asyncio.fixture
 async def backend(pg0_db_url, isolated_ops_schema):
     """Create a DatabaseBackend whose pool is pinned to this file's private schema."""
-    from remember_api.engine.db import create_database_backend
+    from remember_api.engine.db.postgresql import PostgreSQLBackend
     from remember_api.pg0 import resolve_database_url
 
     resolved_url = await resolve_database_url(pg0_db_url)
@@ -120,7 +120,7 @@ async def backend(pg0_db_url, isolated_ops_schema):
         # private schema, so claims and cleanup never see the shared public one.
         await conn.execute(f'SET search_path TO "{isolated_ops_schema}", public')
 
-    b = create_database_backend("postgresql")
+    b = PostgreSQLBackend()
     await b.initialize(resolved_url, min_size=2, max_size=10, command_timeout=30, init_callback=_use_isolated_schema)
     yield b
     await b.shutdown()

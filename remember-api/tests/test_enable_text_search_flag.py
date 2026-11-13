@@ -86,7 +86,7 @@ def harness(monkeypatch):
         selective_lookups.append(True)
         return tokens[:5]
 
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: dialect)
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: dialect)
     monkeypatch.setattr(recall_mod, "tokenize_query", counting_tokenize)
     monkeypatch.setattr(bm25_mod, "select_selective_bm25_tokens", fake_select_selective)
     monkeypatch.setattr(bm25_mod, "get_current_schema", lambda: "public")

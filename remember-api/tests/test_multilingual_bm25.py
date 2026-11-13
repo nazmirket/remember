@@ -408,7 +408,7 @@ async def test_combined_retrieval_rejects_config_missing_bm25_cap(monkeypatch):
         text_search_extension_native_language="english",
     )
     monkeypatch.setattr(recall_mod, "get_config", lambda: legacy_config)
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: fake_dialect)
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: fake_dialect)
 
     with pytest.raises(AttributeError, match="bm25_max_query_terms"):
         await recall_mod.retrieve_semantic_bm25_combined_sql(
@@ -465,7 +465,7 @@ async def test_selective_terms_flag_gates_the_pg_stats_lookup(monkeypatch, selec
         bm25_selective_terms=selective,
     )
     monkeypatch.setattr(recall_mod, "get_config", lambda: config)
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: fake_dialect)
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: fake_dialect)
     monkeypatch.setattr(bm25_mod, "get_current_schema", lambda: "public")
     monkeypatch.setattr(bm25_mod, "select_selective_bm25_tokens", fake_select)
 
@@ -498,7 +498,7 @@ async def test_combined_retrieval_reuses_raw_semantic_pool_for_graph_seeds(monke
 
     config = SimpleNamespace(semantic_min_similarity=0.1, bm25_min_score=0.0)
     monkeypatch.setattr(recall_mod, "get_config", lambda: config)
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: FakeDialect())
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: FakeDialect())
 
     result = await recall_mod.retrieve_semantic_bm25_combined_sql(
         FakeConn(),
@@ -528,7 +528,7 @@ async def test_combined_retrieval_keeps_graph_query_when_semantic_threshold_is_s
 
     config = SimpleNamespace(semantic_min_similarity=0.7, bm25_min_score=0.0)
     monkeypatch.setattr(recall_mod, "get_config", lambda: config)
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: FakeDialect())
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: FakeDialect())
 
     result = await recall_mod.retrieve_semantic_bm25_combined_sql(
         FakeConn(),

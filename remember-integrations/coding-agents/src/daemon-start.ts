@@ -27,7 +27,6 @@ async function main(): Promise<void> {
   const cfg = loadConfig({ harness });
   setLogLevel(cfg.logLevel);
 
-  if (cfg.serverMode !== "daemon") return;
   // Several sessions can race to start one daemon; whoever loses simply finds it healthy.
   if (await isServerHealthy(cfg.apiUrl)) return;
   if (await isPortOccupied(cfg.apiPort))

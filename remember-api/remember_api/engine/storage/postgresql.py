@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from ..db_utils import acquire_with_retry
 from ..schema import fq_table_explicit as fq_table
-from .base import FileStorage
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ def _chunk_key(key: str, index: int) -> str:
     return f"{key}#chunk={index:06d}"
 
 
-class PostgreSQLFileStorage(FileStorage):
+class PostgreSQLFileStorage:
     """Store local attachment bytes in PostgreSQL BYTEA columns."""
 
     def __init__(

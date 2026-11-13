@@ -35,7 +35,7 @@ import pytest
 
 from remember_api.config import _get_raw_config
 from remember_api.engine.memory_engine import MemoryEngine
-from remember_api.engine.task_backend import WorkerTaskBackend
+from remember_api.engine.task_backend import QueuedTaskBackend
 from remember_api.worker.exceptions import RetryTaskAt
 
 
@@ -116,7 +116,7 @@ async def test_requeue_failure_propagates_to_worker_retry(memory: MemoryEngine, 
         )
 
     original_backend = memory._task_backend
-    memory._task_backend = WorkerTaskBackend()
+    memory._task_backend = QueuedTaskBackend()
     await memory._task_backend.initialize()
 
     fake_config = _make_config(consolidation_max_memories_per_round=round_limit)

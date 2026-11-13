@@ -277,9 +277,7 @@ export interface RawConfig {
 
 /** Fully-resolved config: every field present. */
 export interface Config {
-  serverMode: "daemon";
-  /** The EFFECTIVE base URL. In daemon mode this is already 127.0.0.1:{apiPort}, so every caller
-   *  that builds a client keeps working without knowing which mode is active. */
+  /** Loopback URL derived from apiPort. */
   apiUrl: string;
   apiToken?: string;
   apiPort: number;
@@ -560,11 +558,9 @@ export function resolveConfig(raw: RawConfig = {}): Config {
   if ((raw.serverMode && raw.serverMode !== "daemon") || raw.apiUrl) {
     throw new Error("Only the local daemon is supported; use apiPort to change its port");
   }
-  const serverMode = "daemon" as const;
   const apiPort = raw.apiPort || DEFAULT_DAEMON_PORT;
   const pageTrigger = resolvePageTrigger(raw);
   return {
-    serverMode,
     apiUrl: `http://127.0.0.1:${apiPort}`,
     apiToken: raw.apiToken || undefined,
     apiPort,
@@ -896,16 +892,13 @@ function resolvePartial(cfg: Config, patch: RawConfig): Partial<Config> {
   }
   // The legacy key resolves into a differently-named field, so the loop above can't carry it.
   if ("autoReflect" in patch && !("autoInject" in patch)) out.autoInject = full.autoInject;
-  // `apiUrl` is derived from `serverMode` + `apiPort`, so an override naming any of the three
-  // re-derives all three against the current cfg: `{ serverMode: "daemon" }` alone must also move
-  // the URL to the local daemon, and `{ apiUrl }` under a global daemon mode stays ignored.
+  // Revalidate unsupported connection settings and derive the local URL from the selected port.
   if ("serverMode" in patch || "apiUrl" in patch || "apiPort" in patch) {
     const conn = resolveConfig({
-      serverMode: patch.serverMode ?? cfg.serverMode,
+      serverMode: patch.serverMode,
       apiPort: patch.apiPort ?? cfg.apiPort,
       apiUrl: patch.apiUrl,
     });
-    out.serverMode = conn.serverMode;
     out.apiUrl = conn.apiUrl;
     out.apiPort = conn.apiPort;
   }

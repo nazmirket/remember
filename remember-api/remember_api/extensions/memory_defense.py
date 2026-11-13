@@ -2,7 +2,7 @@
 
 Lives in extensions/ (not engine/) because it defines the public contract
 between the retain orchestrator and any installed Memory Defense extension —
-the same shape as TenantExtension.
+used by the local retain pipeline.
 
 api ships the :class:`MemoryDefenseExtension` protocol and a regex default
 that scrubs known secret/PII patterns from retained content.

@@ -254,7 +254,6 @@ export async function ensureDaemon(
   harness: string,
   opts: { waitMs?: number; spawnFn?: typeof realSpawn } = {}
 ): Promise<void> {
-  if (cfg.serverMode !== "daemon") return;
   if (await isServerHealthy(cfg.apiUrl)) return;
   if (!preflightDaemon(cfg, harness)) return;
 

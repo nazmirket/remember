@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ....config import get_config
+from ...db import get_postgres_ops
 from ...db.base import DatabaseConnection
 from ...db_utils import acquire_with_retry
 from ...search.tags import TagGroup, TagsMatch, build_tag_filter_clause
@@ -117,24 +118,6 @@ _GRAPH_UNIT_COLUMNS = (
 )
 
 
-def _ops_for(conn: DatabaseConnection) -> Any:
-    """The ``DataAccessOps`` matching the connection's SQL dialect.
-
-    This is the SQL memories store, and SQL means Postgres *or* Oracle — the two
-    speak different dialects (Oracle inherits entity links through the
-    ``observation_sources`` junction, Postgres through ``source_memory_ids``
-    arrays), so the ops must follow the connection rather than assume Postgres.
-    The ops go by ``conn.backend_type`` — the connection objects carry the dialect
-    but not the backend's ``ops`` handle, so resolve through the per-dialect cache
-    of ``create_data_access_ops`` (a dict lookup after the first call, and the same
-    instance the backend holds). The default covers callers that hand in a bare
-    asyncpg connection with no dialect to report.
-    """
-    from ...db import create_data_access_ops
-
-    return create_data_access_ops(getattr(conn, "backend_type", "postgresql"))
-
-
 def _as_uuids(unit_ids: list) -> list:
     """Coerce a mixed list of uuid strings / UUIDs to UUIDs for a ``uuid[]`` bind."""
     return [uuid_module.UUID(uid) if isinstance(uid, str) else uid for uid in unit_ids]
@@ -196,7 +179,7 @@ async def graph_units(
     """
     from ...search.tags import build_tag_groups_where_clause, build_tags_where_clause_simple
 
-    ops = _ops_for(conn)
+    ops = get_postgres_ops()
     conditions: list[str] = []
     params: list[Any] = []
 
@@ -460,7 +443,7 @@ async def entities_for_units(
         return {}
 
     rows = await conn.fetch(
-        _entity_rows_for_units_sql(fq_table, _ops_for(conn), unit_ids_placeholder=1),
+        _entity_rows_for_units_sql(fq_table, get_postgres_ops(), unit_ids_placeholder=1),
         _as_uuids(unit_ids),
     )
 
@@ -494,7 +477,7 @@ async def entity_map_for_units(
         return {}
 
     rows = await conn.fetch(
-        _entity_rows_for_units_sql(fq_table, _ops_for(conn), unit_ids_placeholder=1),
+        _entity_rows_for_units_sql(fq_table, get_postgres_ops(), unit_ids_placeholder=1),
         _as_uuids(unit_ids),
     )
     by_unit: dict[str, list[dict[str, str]]] = {}
@@ -568,7 +551,7 @@ async def enqueue_graph_maintenance_at_commit(
     table = fq_table("graph_maintenance_queue")
 
     async def _flush(c: DatabaseConnection, ids: list[Any]) -> None:
-        await _ops_for(c).enqueue_graph_maintenance(c, table, bank_id, ids)
+        await get_postgres_ops().enqueue_graph_maintenance(c, table, bank_id, ids)
 
     if isinstance(conn, DatabaseConnection):
         await conn.add_before_commit(f"graph_maintenance:{table}:{bank_id}", unit_ids, _flush)
@@ -886,7 +869,7 @@ async def enqueue_entity_prune_candidates(
     if not affected_unit_ids:
         return 0
 
-    ops = _ops_for(conn)
+    ops = get_postgres_ops()
     queue_table = fq_table("entity_maintenance_queue")
     ue_table = fq_table("unit_entities")
     entities_table = fq_table("entities")

@@ -555,30 +555,9 @@ def _gate_cfg(threshold: float):
     return types.SimpleNamespace(consolidation_dedup_threshold=threshold)
 
 
-def _patch_backend(name: str):
-    return patch(
-        "remember_api.engine.consolidation.consolidator.get_config",
-        return_value=types.SimpleNamespace(database_backend=name),
-    )
-
-
-def test_dedup_active_enabled_on_postgres() -> None:
-    with _patch_backend("postgresql"):
-        assert _dedup_active(_gate_cfg(0.97)) is True
-
-
-def test_dedup_active_disabled_when_threshold_is_one() -> None:
-    with _patch_backend("postgresql"):
-        assert _dedup_active(_gate_cfg(1.0)) is False
-
-
-def test_dedup_active_skipped_on_oracle() -> None:
-    # PG-only merge path → dedup is skipped on Oracle even with a sub-1.0 threshold.
-    with _patch_backend("oracle"):
-        assert _dedup_active(_gate_cfg(0.97)) is False
-
-
-def test_dedup_active_none_config() -> None:
+def test_dedup_active_respects_threshold() -> None:
+    assert _dedup_active(_gate_cfg(0.97)) is True
+    assert _dedup_active(_gate_cfg(1.0)) is False
     assert _dedup_active(None) is False
 
 

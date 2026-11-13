@@ -525,7 +525,7 @@ def test_recall_async_wires_stage2_and_keeps_interleave(monkeypatch):
         engine.embeddings = object()
         engine.query_analyzer = object()
         engine._cross_encoder_reranker = _Reranker()
-        engine._authenticate_tenant = AsyncMock()
+        engine._authenticate_request = AsyncMock()
         engine._require_bank_exists = AsyncMock()
 
         async def generate_embeddings_batch(*_args: object, **_kwargs: object) -> list[list[float]]:

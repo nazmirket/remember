@@ -32,6 +32,6 @@ def _build_engine(**kwargs) -> MemoryEngine:
 
 def test_built_in_services_need_no_external_context() -> None:
     engine = _build_engine()
-    assert engine._tenant_extension is not None
+    assert engine._authenticator is not None
     assert engine._memory_defense is not None
     assert not hasattr(engine, "_ext_ctx")

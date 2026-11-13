@@ -1,6 +1,6 @@
 """Content-addressed persistence for attachments retained inline with document content.
 
-Bytes go to the existing :class:`~remember_api.engine.storage.base.FileStorage`
+Bytes go to the existing :class:`~remember_api.engine.storage.postgresql.PostgreSQLFileStorage`
 abstraction — the same one uploaded files use — so a deployment on S3, GCS or
 Azure keeps attachment bytes out of the database without any new backend. The
 ``attachments`` row records what the bytes are and where they live, keyed by

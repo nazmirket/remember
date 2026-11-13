@@ -117,7 +117,7 @@ class _StubEngine:
         self._doc = doc
         self.submitted: list[tuple[dict[str, Any], str | None]] = []
 
-    async def _authenticate_tenant(self, request_context) -> None:
+    async def _authenticate_request(self, request_context) -> None:
         return None
 
     async def _require_writable(self, bank_id, request_context, **kwargs) -> None:

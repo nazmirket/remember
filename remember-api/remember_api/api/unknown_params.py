@@ -40,7 +40,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.routing import APIRoute, request_response
 from pydantic import BaseModel
 
-from ..extensions.tenant import AuthenticationError
+from ..auth import AuthenticationError
 from .observability import SCOPE_IGNORED_PARAMS, SCOPE_RESOLVED_ALIAS
 
 logger = logging.getLogger(__name__)

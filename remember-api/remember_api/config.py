@@ -2780,12 +2780,7 @@ class RememberConfig:
     """Configuration container for Remember API."""
 
     # Database
-    database_backend: Literal["postgresql"]
     database_url: str
-    # Optional read-replica URL for recall queries. When set, the engine opens
-    # a second pool and routes recall SELECTs through it.
-    read_database_url: str | None
-    migration_database_url: str | None
     # ``module.path:function`` naming an async callable with asyncpg.connect's
     # signature. Every new physical connection goes through it, so rotated or
     # short-lived credentials (RDS IAM, Secrets Manager rotation) are picked up
@@ -3623,8 +3618,6 @@ class RememberConfig:
 
     def validate(self) -> None:
         """Validate configuration values and raise errors for invalid combinations."""
-        if self.database_backend != "postgresql":
-            raise ValueError("Only the PostgreSQL database backend is supported")
         for operation in DECISION_MODEL_OPERATIONS:
             self.decision_model_config(operation)  # raises on an unknown provider or a missing key
         # Validate vector_extension
@@ -3781,6 +3774,13 @@ class RememberConfig:
     @classmethod
     def from_env(cls) -> "RememberConfig":
         """Create configuration from environment variables."""
+        backend = os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower()
+        if backend != "postgresql":
+            raise ValueError("Only the PostgreSQL database backend is supported")
+        if os.getenv(ENV_READ_DATABASE_URL):
+            raise ValueError("A separate read database is not supported by the local daemon")
+        if os.getenv(ENV_MIGRATION_DATABASE_URL):
+            raise ValueError("A separate migration database is not supported by the local daemon")
         config = cls._read_env(os.getenv)
         # Sides first: when both replace the main embeddings config, its provider never
         # embeds anything, and validate() skips its dependency checks.
@@ -3842,15 +3842,7 @@ class RememberConfig:
 
         config = cls(
             # Database
-            # `.lower()` returns a plain `str`; the field declares the two backends it accepts,
-            # and an unknown value is rejected by that field rather than here.
-            database_backend=cast(
-                'Literal["postgresql"]',
-                os.getenv(ENV_DATABASE_BACKEND, DEFAULT_DATABASE_BACKEND).lower(),
-            ),
             database_url=os.getenv(ENV_DATABASE_URL, DEFAULT_DATABASE_URL),
-            read_database_url=os.getenv(ENV_READ_DATABASE_URL) or None,
-            migration_database_url=os.getenv(ENV_MIGRATION_DATABASE_URL) or None,
             database_connect_hook=os.getenv(ENV_DATABASE_CONNECT_HOOK) or None,
             database_schema=os.getenv(ENV_DATABASE_SCHEMA, DEFAULT_DATABASE_SCHEMA),
             vector_extension=os.getenv(ENV_VECTOR_EXTENSION, DEFAULT_VECTOR_EXTENSION).lower(),
@@ -4912,10 +4904,6 @@ class RememberConfig:
     def log_config(self) -> None:
         """Log the current configuration (without sensitive values)."""
         logger.info(f"Database: {mask_network_location(self.database_url)} (schema: {self.database_schema})")
-        if self.read_database_url:
-            logger.info(f"Read database (recall queries only): {mask_network_location(self.read_database_url)}")
-        if self.migration_database_url:
-            logger.info(f"Migration database: {mask_network_location(self.migration_database_url)}")
         logger.info(f"LLM: provider={self.llm_provider}, model={self.llm_model}")
         if self.retain_llm_provider or self.retain_llm_model:
             retain_provider = self.retain_llm_provider or self.llm_provider

@@ -2,7 +2,7 @@
 
 This module defines the public API that HTTP endpoints and extensions should use
 to interact with the memory system. All methods require a RequestContext for
-authentication when a TenantExtension is configured.
+local authentication.
 """
 
 from abc import ABC, abstractmethod

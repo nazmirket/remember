@@ -11,11 +11,6 @@ from remember_api.extensions.memory_defense import (
     apply_redaction,
     parse_policy,
 )
-from remember_api.extensions.tenant import (
-    AuthenticationError,
-    TenantContext,
-    TenantExtension,
-)
 from remember_api.models import RequestContext
 from remember_api.worker.exceptions import DeferOperation
 
@@ -24,11 +19,8 @@ __all__ = [
     "Extension",
     "DeferOperation",
     "OperationValidationError",
-    # Tenant/Auth
-    "AuthenticationError",
+    # Request context
     "RequestContext",
-    "TenantContext",
-    "TenantExtension",
     # Memory Defense
     "DefenseAction",
     "DefenseDecision",

@@ -310,9 +310,9 @@ async def list_tags(
     ``build_tag_listing_parts`` (``unnest`` on Postgres, ``JSON_TABLE`` on Oracle):
     this module backs both dialects, so it must not inline either one's SQL.
     """
-    from ...db import create_data_access_ops
+    from ...db import get_postgres_ops
 
-    ops = create_data_access_ops(getattr(conn, "backend_type", "postgresql"))
+    ops = get_postgres_ops()
     tag_parts = ops.build_tag_listing_parts(fq_table("memory_units"))
     tag_source = tag_parts.tag_source
     non_empty_check = tag_parts.non_empty_check
@@ -552,16 +552,7 @@ async def any_memory_updated_since(
     # `since` is bound as $2 either way: in the WHERE for the LIMIT 1 shape, in the
     # aggregate's own expression for the indexable one.
     #
-    # Postgres only. The aggregate shape exists to reach a GIN index that Oracle has
-    # no counterpart for — its rewriter turns `tags @>` / `&&` into JSON_TABLE
-    # existence predicates, which no index serves either way — and `bool_or` is not
-    # an Oracle aggregate at all, so on Oracle this would be a syntax error rather
-    # than a slower plan. Oracle keeps the LIMIT 1 shape, which rewrites cleanly.
-    indexable = (
-        getattr(conn, "backend_type", "postgresql") == "postgresql"
-        and not tag_groups
-        and tag_clause_is_index_only(tags, tags_match)
-    )
+    indexable = not tag_groups and tag_clause_is_index_only(tags, tags_match)
     params: list[Any] = [bank_id, since]
     where = ["bank_id = $1"] if indexable else ["bank_id = $1", "updated_at > $2"]
 
@@ -801,21 +792,6 @@ async def any_memory_updated_since_batch(
     """
     if not scopes:
         return {}
-
-    if getattr(conn, "backend_type", "postgresql") != "postgresql":
-        return {
-            scope.key: await any_memory_updated_since(
-                conn=conn,
-                fq_table=fq_table,
-                bank_id=bank_id,
-                since=scope.since,
-                fact_types=scope.fact_types,
-                tags=scope.tags,
-                tags_match=scope.tags_match,
-                tag_groups=scope.tag_groups,
-            )
-            for scope in scopes
-        }
 
     table = fq_table("memory_units")
     results: dict[str, bool] = {}

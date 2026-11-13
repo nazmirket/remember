@@ -171,21 +171,6 @@ class TestMainModuleExtensionLoading:
         )
 
 
-# Mock extensions for testing
-from remember_api.extensions import (
-    RequestContext,
-    TenantContext,
-    TenantExtension,
-)
-
-
-class MockTenantExtension(TenantExtension):
-    """Mock tenant extension for testing main.py extension loading."""
-
-    async def authenticate(self, request_context: RequestContext) -> TenantContext:
-        return TenantContext(schema_name="public")
-
-
 class TestPortPreflight:
     """#4281: an occupied port must fail before MemoryEngine, embedded PG, models or migrations."""
 

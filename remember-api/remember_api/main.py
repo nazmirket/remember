@@ -239,7 +239,7 @@ def main():
 
     from .pg0 import parse_pg0_url
 
-    if not parse_pg0_url(config.database_url).is_pg0 or config.read_database_url or config.migration_database_url:
+    if not parse_pg0_url(config.database_url).is_pg0:
         print("Error: the local daemon requires its embedded pg0 database", file=sys.stderr)
         sys.exit(1)
 

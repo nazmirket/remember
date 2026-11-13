@@ -49,7 +49,6 @@ describe("connection modes", () => {
 
   it("defaults to the local daemon and disables upstream automatic updates", () => {
     const cfg = resolveConfig({});
-    expect(cfg.serverMode).toBe("daemon");
     expect(cfg.apiUrl).toBe("http://127.0.0.1:9077");
   });
 

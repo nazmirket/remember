@@ -1,8 +1,4 @@
-"""Abstract base classes for database backend abstraction.
-
-Defines the interfaces that all database backends (PostgreSQL, Oracle, etc.)
-must implement. Business logic depends only on these interfaces.
-"""
+"""PostgreSQL connection and pool lifecycle interfaces."""
 
 import json
 from abc import ABC, abstractmethod
@@ -10,9 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
-# TYPE_CHECKING-only import to avoid circular import at runtime.
-# DataAccessOps lives in ops.py which imports nothing from base.py,
-# so the cycle is: base -> ops (type-only) and ops -> (nothing from base).
+# Type-only imports avoid a cycle with PostgreSQL operations.
 from typing import TYPE_CHECKING, Any
 
 from .result import ResultRow
@@ -29,7 +23,7 @@ class _HeldWrite:
 
 
 if TYPE_CHECKING:
-    from .ops import DataAccessOps
+    from .ops_postgresql import PostgreSQLOps
 
 
 class DatabaseConnection(ABC):
@@ -42,11 +36,6 @@ class DatabaseConnection(ABC):
     def __init__(self) -> None:
         # Keyed by the caller's key: one held write per key, flushed at commit.
         self._before_commit: dict[str, _HeldWrite] = {}
-
-    @property
-    def backend_type(self) -> str:
-        """Return ``"postgresql"`` or ``"oracle"``."""
-        return "postgresql"
 
     def parse_json(self, value: Any) -> Any:
         """Parse a JSON column value into a Python object.
@@ -259,23 +248,14 @@ class DatabaseBackend(ABC):
 
     The ``ops`` property provides backend-specific data access operations
     (the Strategy pattern — like Django's ``connection.ops``). All business
-    logic should use ``backend.ops`` instead of creating DataAccessOps
+    logic should use ``backend.ops`` instead of creating PostgreSQLOps
     instances directly.
     """
 
-    _ops_instance: "DataAccessOps | None" = None
-
-    # -- Backend capabilities --------------------------------------------
-    # Subclasses override these to advertise what the platform supports.
-    # Callers use these instead of checking ``config.database_backend``.
+    _ops_instance: "PostgreSQLOps | None" = None
 
     @property
-    def backend_type(self) -> str:
-        """Return ``"postgresql"`` or ``"oracle"``."""
-        return "postgresql"
-
-    @property
-    def ops(self) -> "DataAccessOps":
+    def ops(self) -> "PostgreSQLOps":
         """Backend-specific data access operations (cached).
 
         Follows the Django pattern: ``connection.ops`` provides the
@@ -283,65 +263,17 @@ class DatabaseBackend(ABC):
         first access and cached for the lifetime of the backend.
         """
         if self._ops_instance is None:
-            from . import create_data_access_ops
+            from . import get_postgres_ops
 
-            self._ops_instance = create_data_access_ops(self.backend_type)
+            self._ops_instance = get_postgres_ops()
         return self._ops_instance
-
-    @property
-    def supports_partial_indexes(self) -> bool:
-        """Can CREATE INDEX … WHERE <predicate>."""
-        return True
-
-    @property
-    def supports_bm25(self) -> bool:
-        """Has BM25 / tsvector full-text search."""
-        return True
-
-    @property
-    def supports_unnest(self) -> bool:
-        """Supports ``unnest()`` for expanding arrays into rows."""
-        return True
-
-    @property
-    def supports_pg_trgm(self) -> bool:
-        """Platform *might* have pg_trgm (must still be checked at runtime)."""
-        return True
-
-    @property
-    def supports_worker_poller(self) -> bool:
-        """Whether this backend supports the async WorkerPoller.
-
-        WorkerPoller is backend-agnostic (uses DatabaseBackend.acquire()).
-        All current backends (PostgreSQL, Oracle) support it.
-        """
-        return True
-
-    def normalize_schema(self, schema: str | None) -> str | None:
-        """Normalize a schema name for this backend.
-
-        Returns the schema as-is by default. Oracle overrides this to
-        convert ``"public"`` (a PG-specific default) to ``None`` (use the
-        connecting user's default schema).
-        """
-        return schema
 
     def run_migrations(self, dsn: str, *, schema: str | None = None) -> None:
         """Run database migrations for this backend.
 
-        PG uses Alembic migrations. Oracle uses its own idempotent DDL runner.
-        Subclasses must override this method.
+        The PostgreSQL implementation uses Alembic.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement run_migrations()")
-
-    def create_task_backend(self, *, pool_getter: Any = None, schema_getter: Any = None) -> Any:
-        """Create the task backend for this database.
-
-        All backends use BrokerTaskBackend for async worker/poller execution.
-        """
-        from ..task_backend import BrokerTaskBackend
-
-        return BrokerTaskBackend(pool_getter=pool_getter, schema_getter=schema_getter)
 
     @abstractmethod
     async def initialize(

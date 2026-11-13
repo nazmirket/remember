@@ -111,7 +111,7 @@ def search_path(monkeypatch):
         text_search_extension="native",
         text_search_extension_native_language="english",
     )
-    monkeypatch.setattr(recall_mod, "create_sql_dialect", lambda backend: dialect)
+    monkeypatch.setattr(recall_mod, "PostgreSQLDialect", lambda: dialect)
     monkeypatch.setattr(recall_mod, "get_config", lambda: config)
     monkeypatch.setattr(recall_mod, "fq_table", lambda name: name)
     monkeypatch.setattr(bm25_mod, "get_current_schema", lambda: None)

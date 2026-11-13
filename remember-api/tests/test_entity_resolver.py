@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from remember_api.engine.db import create_database_backend
+from remember_api.engine.db.postgresql import PostgreSQLBackend
 from remember_api.engine.db.result import DictResultRow as ResultRow
 from remember_api.engine.memories.pg.entity_resolver import EntityResolver, _canonical_cooccurrence_pairs
 from remember_api.engine.retain.types import ResolvedEntity
@@ -108,7 +108,7 @@ async def test_resolve_entities_batch_handles_unicode_lower_conflicts(pg0_db_url
     to the conflicted row instead of leaving a missing entity_id.
     """
     resolved_url = await resolve_database_url(pg0_db_url)
-    backend = create_database_backend("postgresql")
+    backend = PostgreSQLBackend()
     await backend.initialize(resolved_url, min_size=1, max_size=2, command_timeout=30)
     bank_id = f"test-entity-resolver-{uuid.uuid4().hex[:8]}"
     event_date = datetime(2024, 1, 15, tzinfo=timezone.utc)
@@ -171,7 +171,7 @@ async def test_label_entities_stored_and_reasserted_with_label_kind(pg0_db_url):
     resurrect path is the interesting one to pin, not just the insert.
     """
     resolved_url = await resolve_database_url(pg0_db_url)
-    backend = create_database_backend("postgresql")
+    backend = PostgreSQLBackend()
     await backend.initialize(resolved_url, min_size=1, max_size=2, command_timeout=30)
     bank_id = f"test-entity-kind-{uuid.uuid4().hex[:8]}"
     # Free-text label group: any "topic:..." text classifies as a label.
@@ -388,7 +388,7 @@ async def test_link_units_carries_event_date_into_cooccurrences(pg0_db_url):
     graph recency heat loses the underlying knowledge timeline.
     """
     resolved_url = await resolve_database_url(pg0_db_url)
-    backend = create_database_backend("postgresql")
+    backend = PostgreSQLBackend()
     await backend.initialize(resolved_url, min_size=1, max_size=2, command_timeout=30)
     bank_id = f"test-cooccurrence-evt-{uuid.uuid4().hex[:8]}"
     resolver = EntityResolver(pool=backend, entity_lookup="full")
