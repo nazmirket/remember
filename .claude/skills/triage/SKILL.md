@@ -71,7 +71,7 @@ Then prove it:
 **Performance issue:** recreate the reporter's situation at the same or a smaller scale (same data
 shape, same operation, same config), measure it before the change, then after, the same way, a few
 runs each. Use the repo's perf tools when they fit (`./scripts/benchmarks/`,
-`remember-dev/benchmarks/`), otherwise a small script. Show numbers side by side (before / after /
+`dev/benchmarks/`), otherwise a small script. Show numbers side by side (before / after /
 change). No numbers, no plan.
 
 **UI change:** start the API and the control plane so the user can see it. Use free ports (check

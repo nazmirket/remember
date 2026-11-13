@@ -9,14 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: remember-integrations/coding-agents
+        working-directory: integrations/coding-agents
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: remember-integrations/coding-agents/package-lock.json
+          cache-dependency-path: integrations/coding-agents/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
@@ -30,8 +30,8 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --all-packages --extra embedded-db --extra test
-      - run: PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests -q
-      - run: .venv/bin/python -m pytest remember-api/tests/test_health_probes.py remember-api/tests/test_migration_shape.py -q -n 0
+      - run: PYTHONPATH=embed .venv/bin/python -m pytest embed/tests -q
+      - run: .venv/bin/python -m pytest api/tests/test_health_probes.py api/tests/test_migration_shape.py -q -n 0
   memory-system:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -42,8 +42,8 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --extra embedded-db
-        working-directory: remember-api
+        working-directory: api
       - run: uv sync --frozen
-        working-directory: remember-system-tests
+        working-directory: system-tests
       - run: uv run pytest tests -q
-        working-directory: remember-system-tests
+        working-directory: system-tests

@@ -4,27 +4,27 @@ Remember is a local, headless memory layer for Codex and Claude Code, maintained
 
 ## Development
 
-- `remember-api/`: FastAPI service, memory engine, worker and PostgreSQL migrations.
-- `remember-embed/`: daemon lifecycle.
-- `remember-integrations/coding-agents/`: shared agent integration, Codex/Claude hooks and MCP tools.
-- `remember-clients/python/`: Python API client, including the system-test client.
-- `remember-system-tests/`: blackbox memory tests using pg0 and deterministic model stubs.
+- `api/`: FastAPI service, memory engine, worker and PostgreSQL migrations.
+- `embed/`: daemon lifecycle.
+- `integrations/coding-agents/`: shared agent integration, Codex/Claude hooks and MCP tools.
+- `clients/python/`: Python API client, including the system-test client.
+- `system-tests/`: blackbox memory tests using pg0 and deterministic model stubs.
 - `schemas/`: generated OpenAPI and bank-template schemas.
 
 ```sh
 ./scripts/dev/setup.sh
-(cd remember-integrations/coding-agents && npm test && npx tsc --noEmit && npm run build)
-PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests -q
-(cd remember-system-tests && uv run pytest tests/)
+(cd integrations/coding-agents && npm test && npx tsc --noEmit && npm run build)
+PYTHONPATH=embed .venv/bin/python -m pytest embed/tests -q
+(cd system-tests && uv run pytest tests/)
 ./scripts/hooks/lint.sh
 ```
 
-Run `./scripts/generate-openapi.sh` after changing API endpoints. Generated API data lives in `schemas/openapi.json`. The coding-agent companion skill is generated from the marked sections of its README: run `npm run skill:build` in `remember-integrations/coding-agents` after changing those sections.
+Run `./scripts/generate-openapi.sh` after changing API endpoints. Generated API data lives in `schemas/openapi.json`. The coding-agent companion skill is generated from the marked sections of its README: run `npm run skill:build` in `integrations/coding-agents` after changing those sections.
 
 ## Conventions
 
 Read `.claude/skills/code-review/SKILL.md` before code changes and perform its self-review before delivery. Python targets 3.11+, uses async I/O and Ruff with a 120-character line limit. Use typed structures for known structured data; preserve bank scoping in every database query. Avoid unrelated formatting or behavior changes.
 
-PostgreSQL migrations live in `remember-api/remember_api/alembic/versions/`. Preserve existing revision identifiers and the revision chain. New migrations must use `run_for_dialect(pg=...)` and provide `_pg_upgrade`; use an explicit no-op for historical PostgreSQL-free revisions. Test migrations against a fresh pg0 database as well as relevant upgrade behavior.
+PostgreSQL migrations live in `api/remember_api/alembic/versions/`. Preserve existing revision identifiers and the revision chain. New migrations must use `run_for_dialect(pg=...)` and provide `_pg_upgrade`; use an explicit no-op for historical PostgreSQL-free revisions. Test migrations against a fresh pg0 database as well as relevant upgrade behavior.
 
 Use deterministic tests for mechanics. Changes to model interpretation require a real-model evaluation, not assertions that rely on a mock model to reproduce language behavior. Add blackbox coverage when user-visible memory capabilities interact across components. Isolate test homes, ports and databases; synthetic hooks do not prove actual host capture/recall.

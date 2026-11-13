@@ -1,0 +1,202 @@
+"""Shared tokenizer used for token counting and chunking.
+
+Remember tokenizes purely to *count* and *chunk* arbitrary user content — never to
+feed a model that relies on the tokenizer's special-token vocabulary. That is what
+makes the two choices below safe, and it is why this module exposes exactly two
+operations: :func:`count_tokens` and :func:`truncate_to_tokens` (plus
+:func:`truncate_many_to_tokens`, the batched form of the latter). Every token budget
+in the engine is one or the other.
+
+**Why toktok and not tiktoken.** Counting is on the hot path of both retain and
+recall: recall counts once per candidate fact, per candidate chunk, per source fact
+and per reranker document, and retain counts whole documents. Measured on this
+repo's own text (``dev/benchmarks/micro/token_counting.py``), toktok
+counts 2-7x faster than tiktoken on cl100k_base and 10-16x faster on o200k_base,
+and its ids are byte-identical — the benchmark asserts that before it times
+anything. Two properties matter as much as the speed:
+
+* ``count()`` returns an ``int`` without building a Python list of ids. Counting an
+  80k-token document cost ~3 MB of transient allocation under tiktoken and costs
+  1 KiB here, because there was never a list. (tiktoken has no count-only API;
+  ``encode_to_numpy`` is the closest it comes.)
+* the vocabularies are compiled *into the extension module*, so nothing is
+  downloaded on first use. Air-gapped deployments no longer need the encoding
+  pre-baked into the image.
+
+toktok is a small project, so the risk is maintenance, not correctness. It is
+contained deliberately: this module is the only place that imports it, and it pulls
+in no dependency of its own (numpy is an optional extra Remember does not ask for).
+Replacing it means rewriting this file and nothing else.
+
+**Why o200k_base by default.** ``REMEMBER_API_TOKENIZER_ENCODING`` selects the
+vocabulary; it defaults to ``o200k_base``, which is what current OpenAI models
+tokenize with. On English and code it counts within a fraction of a percent of
+cl100k_base, but on non-Latin scripts and emoji it is far closer to what a modern
+model actually charges — ``🧠 … naïve café 東京 مرحبا`` is 19 tokens under
+cl100k_base and 13 under o200k_base. Since these counts drive budgets that stand in
+for a model's context window, the closer vocabulary is the more honest one. Set the
+variable to ``cl100k_base`` to restore the previous counts exactly.
+
+A caller that *knows* the vocabulary it is budgeting against passes it explicitly and
+bypasses the variable: the embedding input cap counts with the embedding model's own
+tokenizer, because a text cut to exactly the model's limit in some other vocabulary is
+still over the limit the provider enforces (#5234).
+
+**Special-token literals.** A tiktoken-shaped ``encode()`` defaults to
+``disallowed_special="all"``, which makes it *raise* on content that merely mentions
+a literal such as ``<|endoftext|>`` — which reached users as an HTTP 500 on
+retain/recall (issue #1883). Neither operation here can hit that: both go through
+toktok's ``count``/``truncate``, which have no special-token machinery to trigger.
+That is the reason to keep using the functions below rather than the tokenizer's own
+``encode()`` — that call is the raising one, and #1883 is what it looks like in
+production. It is also why the tokenizer itself is not part of this interface.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import lru_cache
+
+import toktok
+
+# Vocabularies toktok compiles into its extension module. Used to make a misconfigured
+# REMEMBER_API_TOKENIZER_ENCODING or REMEMBER_API_DECISION_MODEL_TOKENIZER fail with a
+# list of what would have worked, instead of a bare KeyError from the extension module
+# mid-request, and to bound the per-name cache below.
+BUNDLED_ENCODINGS = ("o200k_base", "cl100k_base", "o200k_harmony", "qwen3.5")
+
+# Estimates of a model's own count that have no ids: 'jev' is Jev's (TypeSafe). A caller
+# budgeting against that model's window can name one, but it only goes through toktok's
+# batch_count / truncate, never a loaded tokenizer, so it cannot be the configured encoding.
+ESTIMATED_ENCODINGS = ("jev",)
+
+
+# Cached like _load_encoding, and for the same reason — loading one parses a
+# multi-megabyte vocabulary — but keyed by name, bounded by the whole bundled set.
+@lru_cache(maxsize=len(BUNDLED_ENCODINGS))
+def _encoding_by_name(name: str) -> "toktok._Tokenizer":
+    """The tokenizer for an explicitly named encoding (see :func:`_load_encoding`)."""
+    try:
+        return toktok._encoding(name)
+    except Exception as err:
+        available = ", ".join((*BUNDLED_ENCODINGS, *ESTIMATED_ENCODINGS))
+        raise ValueError(f"Unknown tokenizer encoding {name!r}. Available: {available}.") from err
+
+
+def check_encoding(name: str) -> None:
+    """Raise ValueError unless ``name`` can be passed as ``encoding`` to the functions below."""
+    if name not in ESTIMATED_ENCODINGS:
+        _encoding_by_name(name)
+
+
+def _encoding_name(encoding: str | None) -> str:
+    return encoding if encoding in ESTIMATED_ENCODINGS else _encoding_for(encoding).name
+
+
+@lru_cache(maxsize=1)
+def _load_encoding() -> "toktok._Tokenizer":
+    """The tokenizer for ``REMEMBER_API_TOKENIZER_ENCODING``.
+
+    Private: the interface is :func:`count_tokens` and :func:`truncate_to_tokens`.
+    Handing the raw tokenizer out invites ``encode()``, which is the one spelling
+    that raises on special-token literals (#1883). Tests reach for it to name the
+    encoding in play and to clear this cache.
+
+    Cached: the tokenizer is immutable and loading one parses a multi-megabyte
+    vocabulary. Because the encoding name is read here, changing
+    ``REMEMBER_API_TOKENIZER_ENCODING`` after the first token count has no effect
+    until the cache is cleared — which is what tests do.
+    """
+    from ..config import get_config
+
+    name = get_config().tokenizer_encoding
+    try:
+        # toktok's supported API is ``batch_count``/``truncate``, both of which
+        # take an encoding *name*. Holding the loaded tokenizer instead lets
+        # count_tokens call ``count`` directly — no per-call list to wrap a single
+        # string in — and is where the resolved ``.name`` the other two need comes
+        # from. ``_encoding`` is the escape hatch toktok's own docstring points at,
+        # taken knowingly, and in this module only.
+        return toktok._encoding(name)
+    except Exception as err:
+        raise ValueError(
+            f"Unknown tokenizer encoding {name!r} (REMEMBER_API_TOKENIZER_ENCODING). "
+            f"Available: {', '.join(BUNDLED_ENCODINGS)}."
+        ) from err
+
+
+def _encoding_for(encoding: str | None) -> "toktok._Tokenizer":
+    """``encoding`` when a caller knows the model's own vocabulary, else the configured one.
+
+    The embedding cap passes one: a provider whose tokenizer is known (OpenAI's
+    text-embedding-* is cl100k_base) must be counted with *that*, not with whatever
+    REMEMBER_API_TOKENIZER_ENCODING says, or a text cut to exactly the model's limit
+    is still over it and the provider 400s (#5234). So does the decision model, whose
+    request ceiling is its own window.
+    """
+    return _encoding_by_name(encoding) if encoding else _load_encoding()
+
+
+def count_tokens(text: str, encoding: str | None = None) -> int:
+    """Count tokens in ``text`` under the configured encoding.
+
+    Tolerant of special-token literals, and never builds a list of ids — so this is
+    safe on a whole document, not just a fact or a chunk.
+
+    It did not used to be. Under tiktoken this was ``len(encode(text))``, whose
+    ``list[int]`` costs ~40 bytes per token: counting a 45 MB retain body built an
+    11.6M-element list purely to produce one integer (+472 MB peak, a third of which
+    the allocator never gave back). #3756 worked around that with a
+    ``count_tokens_windowed`` that encoded a megabyte at a time and accepted an
+    approximate answer, since a fixed character cut can split a token. ``count()``
+    removes the reason for both: it allocates nothing and it is exact.
+    """
+    if encoding in ESTIMATED_ENCODINGS:
+        return toktok.batch_count([text], encoding, threads=1)[0]
+    return _encoding_for(encoding).count(text)
+
+
+@dataclass(frozen=True)
+class TokenTruncation:
+    """Result of :func:`truncate_to_tokens`."""
+
+    text: str  # the (possibly truncated) text
+    original_tokens: int  # token count of the input before any truncation
+
+
+def truncate_to_tokens(text: str, max_tokens: int, encoding: str | None = None) -> TokenTruncation:
+    """Truncate ``text`` to at most ``max_tokens`` tokens.
+
+    The configured encoding is an approximation of any given provider's tokenizer,
+    so set ``max_tokens`` with a little headroom below the model's real limit.
+
+    ``original_tokens`` is the input's token count (so the caller can report how
+    much was dropped) whether or not truncation occurred.
+
+    The cut lands on a *character* boundary. This used to be
+    ``decode(encode(text)[:n])``, which cuts on a *token* boundary — and byte-level
+    BPE splits one character across several tokens (``🧠`` is three), so a cut
+    could land mid-character and leave a U+FFFD: ``"hello 🧠"`` truncated to two
+    tokens decoded to ``"hello \ufffd"``. toktok's ``truncate`` drops the partial
+    character instead, giving ``"hello "``, so the result can be one token under
+    the budget. Every caller here is a ceiling, so that is free.
+    """
+    # Negative budgets used to slice a list and silently drop tokens off the end;
+    # toktok takes an unsigned count and would raise. Clamp, so a misconfigured cap
+    # still degrades to "empty" rather than a 500 mid-request.
+    truncated, original_tokens = toktok.truncate(text, max(max_tokens, 0), _encoding_name(encoding))
+    return TokenTruncation(text=truncated, original_tokens=original_tokens)
+
+
+def truncate_many_to_tokens(
+    texts: Sequence[str], max_tokens: int, encoding: str | None = None
+) -> list[TokenTruncation]:
+    """:func:`truncate_to_tokens` over a list, in one call.
+
+    The two callers that truncate a whole list — every reranker document, every
+    embedding input — get the cut done in Rust across threads with the GIL
+    released, instead of one Python call per text.
+    """
+    return [
+        TokenTruncation(text=truncated, original_tokens=original_tokens)
+        for truncated, original_tokens in toktok.batch_truncate(texts, max(max_tokens, 0), _encoding_name(encoding))
+    ]

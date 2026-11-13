@@ -2,7 +2,7 @@
 
 This repository is a local, headless memory layer for Codex and Claude Code. See
 [README.md](README.md) for the project overview and the
-[coding-agent setup guide](remember-integrations/coding-agents/README.md) for
+[coding-agent setup guide](integrations/coding-agents/README.md) for
 installation and configuration.
 
 ## Set up a development checkout
@@ -29,9 +29,9 @@ For direct API development, start the service on loopback:
 Choose checks that cover the behavior changed. The main project checks are:
 
 ```sh
-(cd remember-integrations/coding-agents && npm test && npx tsc --noEmit && npm run build)
-PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests -q
-(cd remember-system-tests && uv run pytest tests/)
+(cd integrations/coding-agents && npm test && npx tsc --noEmit && npm run build)
+PYTHONPATH=embed .venv/bin/python -m pytest embed/tests -q
+(cd system-tests && uv run pytest tests/)
 ./scripts/hooks/lint.sh
 ```
 

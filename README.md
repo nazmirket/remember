@@ -8,7 +8,7 @@ The service runs on demand on loopback. Memory storage uses local PostgreSQL wit
 
 ## Setup
 
-See [the coding-agent setup guide](remember-integrations/coding-agents/README.md) for prerequisites, installation, configuration and diagnostics. Install from this checkout so the daemon runs Remember's API and embedded manager.
+See [the coding-agent setup guide](integrations/coding-agents/README.md) for prerequisites, installation, configuration and diagnostics. Install from this checkout so the daemon runs Remember's API and embedded manager.
 
 ## Configuration
 
@@ -16,18 +16,18 @@ Remember stores its configuration and local state in `~/.remember` by default. S
 
 ## Development
 
-- `remember-api/`: API, memory engine, worker and database migrations.
-- `remember-embed/`: local daemon lifecycle.
-- `remember-integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
-- `remember-system-tests/`: blackbox memory tests using local database and deterministic model stubs.
-- `remember-clients/python/`: the system-test API client.
+- `api/`: API, memory engine, worker and database migrations.
+- `embed/`: local daemon lifecycle.
+- `integrations/coding-agents/`: shared integration, Codex and Claude Code hooks and MCP tools.
+- `system-tests/`: blackbox memory tests using local database and deterministic model stubs.
+- `clients/python/`: the system-test API client.
 - `schemas/`: generated local API schema.
 
 ```sh
-(cd remember-integrations/coding-agents && npm ci && npm test && npm run build)
-(cd remember-api && uv sync --frozen --extra embedded-db)
-(cd remember-system-tests && uv run pytest tests/)
-PYTHONPATH=remember-embed .venv/bin/python -m pytest remember-embed/tests
+(cd integrations/coding-agents && npm ci && npm test && npm run build)
+(cd api && uv sync --frozen --extra embedded-db)
+(cd system-tests && uv run pytest tests/)
+PYTHONPATH=embed .venv/bin/python -m pytest embed/tests
 ```
 
 For direct API development, `./scripts/dev/start.sh` starts the API on loopback. Run `./scripts/hooks/lint.sh` after Python or TypeScript changes.

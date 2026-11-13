@@ -8,7 +8,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 echo "Generating bank template JSON Schema..."
-cd remember-dev
+cd dev
 uv run generate-bank-template-schema
 
 echo ""

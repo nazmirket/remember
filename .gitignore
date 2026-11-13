@@ -6,11 +6,11 @@ dist/
 wheels/
 *.egg-info
 # Release builds stage the canonical root license in each package context.
-/remember-clients/python/LICENSE
-/remember-api/LICENSE
+/clients/python/LICENSE
+/api/LICENSE
 /remember-all/LICENSE
 /remember-all-slim/LICENSE
-/remember-embed/LICENSE
+/embed/LICENSE
 .mcp.json
 .playwright-mcp/
 .osgrep
@@ -56,20 +56,20 @@ logs/
 remember-docs/static/llms-full.txt
 
 
-remember-dev/benchmarks/locomo/results/
-remember-dev/benchmarks/longmemeval/results/
-remember-dev/benchmarks/consolidation/results/
-remember-dev/benchmarks/perf/results/
-remember-dev/benchmarks/results/
+dev/benchmarks/locomo/results/
+dev/benchmarks/longmemeval/results/
+dev/benchmarks/consolidation/results/
+dev/benchmarks/perf/results/
+dev/benchmarks/results/
 benchmarks/results/
 remember-cli/target
-remember-clients/rust/target
+clients/rust/target
 .claude/*
 !.claude/skills/
 whats-next.md
 TASK.md
 # Parked / draft integrations that aren't ready to ship
-remember-integrations/_drafts/
+integrations/_drafts/
 # Changelog is now tracked in remember-docs/src/pages/changelog.md
 # CHANGELOG.md
 

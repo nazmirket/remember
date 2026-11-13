@@ -65,7 +65,7 @@ prettier_cmd() {
 # The two git lookups run side by side: each can take a second to start on macOS.
 # (Integrations used to be compared against HEAD only, and everything else was
 # always linted.)
-INTEGRATIONS_DIR="$REPO_ROOT/remember-integrations"
+INTEGRATIONS_DIR="$REPO_ROOT/integrations"
 if [ -n "$CI" ] || [ -n "$LINT_ALL" ] || [ -n "$LINT_ALL_INTEGRATIONS" ]; then
     LINT_ALL=1
 else
@@ -107,8 +107,8 @@ fi
 
 # The Python packages import each other (remember-dev and remember-embed use
 # remember_api), so a change to any of them type-checks all three.
-PYTHON_PACKAGES=(remember-api/ remember-dev/ remember-embed/ remember-clients/python/)
-if changed "${PYTHON_PACKAGES[@]}" remember-integrations/; then
+PYTHON_PACKAGES=(api/ dev/ embed/ clients/python/)
+if changed "${PYTHON_PACKAGES[@]}" integrations/; then
     echo "  Syncing Python dependencies..."
     # Run uv sync first so the environment is complete before the tools run.
     # Keep pre-commit from rewriting uv.lock. Dependency changes should update
@@ -127,27 +127,27 @@ echo "  Running lints in parallel..."
 # Node/TypeScript tasks
 if changed "${PYTHON_PACKAGES[@]}"; then
     # Python remember-api tasks
-    run_task "ruff-api-check" "$REPO_ROOT/remember-api" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-api-format" "$REPO_ROOT/remember-api" "$VENV_BIN/ruff format ."
-    run_task "ty-api" "$REPO_ROOT/remember-api" "$VENV_BIN/ty check remember_api"
+    run_task "ruff-api-check" "$REPO_ROOT/api" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-api-format" "$REPO_ROOT/api" "$VENV_BIN/ruff format ."
+    run_task "ty-api" "$REPO_ROOT/api" "$VENV_BIN/ty check remember_api"
 
     # Python remember-dev tasks
-    run_task "ruff-dev-check" "$REPO_ROOT/remember-dev" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-dev-format" "$REPO_ROOT/remember-dev" "$VENV_BIN/ruff format ."
-    run_task "ty-dev" "$REPO_ROOT/remember-dev" "$VENV_BIN/ty check remember_dev"
+    run_task "ruff-dev-check" "$REPO_ROOT/dev" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-dev-format" "$REPO_ROOT/dev" "$VENV_BIN/ruff format ."
+    run_task "ty-dev" "$REPO_ROOT/dev" "$VENV_BIN/ty check remember_dev"
 
     # Python remember-embed tasks
-    run_task "ruff-embed-check" "$REPO_ROOT/remember-embed" "$VENV_BIN/ruff check --fix ."
-    run_task "ruff-embed-format" "$REPO_ROOT/remember-embed" "$VENV_BIN/ruff format ."
-    run_task "ty-embed" "$REPO_ROOT/remember-embed" "$VENV_BIN/ty check remember_embed"
+    run_task "ruff-embed-check" "$REPO_ROOT/embed" "$VENV_BIN/ruff check --fix ."
+    run_task "ruff-embed-format" "$REPO_ROOT/embed" "$VENV_BIN/ruff format ."
+    run_task "ty-embed" "$REPO_ROOT/embed" "$VENV_BIN/ty check remember_embed"
 fi
 
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
-if [ -d "$INTEGRATIONS_DIR" ] && changed remember-integrations/; then
+if [ -d "$INTEGRATIONS_DIR" ] && changed integrations/; then
     for dir in "$INTEGRATIONS_DIR"/*/; do
         dir="${dir%/}"
         name="${dir##*/}"
-        changed "remember-integrations/$name/" || continue
+        changed "integrations/$name/" || continue
 
         if [ -f "$dir/pyproject.toml" ]; then
             run_task "ruff-int-$name-check" "$dir" "$VENV_BIN/ruff check --fix --config $REPO_ROOT/ruff.toml ."

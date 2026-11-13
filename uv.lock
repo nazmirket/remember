@@ -2964,7 +2964,7 @@ wheels = [
 [[package]]
 name = "remember-api"
 version = "1.2.1"
-source = { editable = "remember-api" }
+source = { editable = "api" }
 dependencies = [
     { name = "aiohttp" },
     { name = "alembic" },
@@ -3173,7 +3173,7 @@ dev = [
 [[package]]
 name = "remember-client"
 version = "1.2.1"
-source = { editable = "remember-clients/python" }
+source = { editable = "clients/python" }
 dependencies = [
     { name = "aiohttp" },
     { name = "aiohttp-retry" },
@@ -3209,7 +3209,7 @@ provides-extras = ["test"]
 [[package]]
 name = "remember-dev"
 version = "1.2.1"
-source = { editable = "remember-dev" }
+source = { editable = "dev" }
 dependencies = [
     { name = "httpx" },
     { name = "numpy" },
@@ -3241,7 +3241,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "python-dotenv", marker = "extra == 'test'", specifier = ">=1.0.0" },
-    { name = "remember-api", editable = "remember-api" },
+    { name = "remember-api", editable = "api" },
     { name = "rich", specifier = ">=13.0.0" },
 ]
 provides-extras = ["test"]
@@ -3255,7 +3255,7 @@ dev = [
 [[package]]
 name = "remember-embed"
 version = "1.2.1"
-source = { editable = "remember-embed" }
+source = { editable = "embed" }
 dependencies = [
     { name = "aiohttp" },
     { name = "rich" },

@@ -1,0 +1,309 @@
+"""Boot a real Remember server, wired to the stub, and tear it down again.
+
+The server runs as its own process, started the same way an operator starts it
+(``remember-api``), against its own embedded Postgres. Nothing about the
+process is special-cased for tests: the only thing the fixtures do is set
+environment variables that any deployment could set.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import signal
+import socket
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import httpx
+import uvicorn
+
+from .rulebook import Stubs
+from .stub_server import create_stub_app
+
+logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+API_DIR = REPO_ROOT / "api"
+
+# A pg0 instance of its own, on a port nothing else uses. The api suite and
+# the dev server share the default "remember" instance, and pointing system
+# tests at that one would both see their leftovers and block on their locks.
+PG0_INSTANCE = "remember-systest"
+PG0_PORT = int(os.environ.get("REMEMBER_TEST_PG_PORT", "15499"))
+
+SERVER_STARTUP_TIMEOUT = 180.0
+
+#: How often the server's worker looks for queued work. Stories that assert on what
+#: the worker has *not* claimed wait a multiple of this.
+WORKER_POLL_INTERVAL_MS = 500
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@dataclass
+class StubServer:
+    """The provider stub, running in this process on a real port."""
+
+    url: str
+    stubs: Stubs
+    _server: uvicorn.Server
+    _thread: threading.Thread
+
+    def stop(self) -> None:
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
+def start_stub_server(stubs: Stubs) -> StubServer:
+    port = free_port()
+    config = uvicorn.Config(
+        create_stub_app(stubs),
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        # uvicorn closes an idle connection after 5s, but the server's aiohttp pool keeps
+        # it for 15s and may write a request onto it just as the stub closes it
+        # ("Can not write request body", #6298). With retries off (see stub_environment)
+        # that race fails the operation, so the stub outlives the client's pool instead.
+        timeout_keep_alive=60,
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True, name="provider-stub")
+    thread.start()
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if server.started:
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("provider stub did not start")
+
+    return StubServer(url=f"http://127.0.0.1:{port}", stubs=stubs, _server=server, _thread=thread)
+
+
+@dataclass
+class RememberServer:
+    """A running ``remember-api`` process under test."""
+
+    url: str
+    log_path: Path
+    _process: subprocess.Popen
+
+    def stop(self) -> None:
+        self.terminate_like_a_platform(grace=30)
+
+    def terminate_like_a_platform(self, grace: float) -> bool:
+        """SIGTERM, then SIGKILL once ``grace`` seconds pass — what a rollout does.
+
+        True if the process exited on its own within the grace period. Kubernetes and
+        Docker give no more than this: whatever shutdown has not finished by then dies.
+        """
+        # SIGTERM to `uv run` alone: it forwards it to the server, and a second
+        # SIGTERM sent to the group would reach the server twice and force-exit it.
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=grace)
+            return True
+        except subprocess.TimeoutExpired:
+            # The whole group: SIGKILL is not forwarded, so killing `uv run` alone
+            # would leave the server itself running as an orphan.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._process.pid, signal.SIGKILL)
+            self._process.wait(timeout=10)
+            return False
+
+    def logs(self) -> str:
+        with contextlib.suppress(OSError):
+            return self.log_path.read_text()
+        return ""
+
+
+def stub_environment(stub_url: str) -> dict[str, str]:
+    """Everything needed to point a Remember server at the stub.
+
+    Deliberately expressed as plain configuration — this is the whole reason the
+    suite needs no production code changes.
+    """
+    return {
+        # LLM: the openai-compatible provider, aimed at the stub.
+        "REMEMBER_API_LLM_PROVIDER": "openai",
+        "REMEMBER_API_LLM_MODEL": "stub-model",
+        "REMEMBER_API_LLM_API_KEY": "stub-key",
+        "REMEMBER_API_LLM_BASE_URL": f"{stub_url}/v1",
+        # Embeddings: same trick, and it means no torch and no model download.
+        "REMEMBER_API_EMBEDDINGS_PROVIDER": "openai",
+        "REMEMBER_API_EMBEDDINGS_OPENAI_API_KEY": "stub-key",
+        "REMEMBER_API_EMBEDDINGS_OPENAI_BASE_URL": f"{stub_url}/v1",
+        "REMEMBER_API_EMBEDDINGS_OPENAI_MODEL": "stub-embeddings",
+        "REMEMBER_API_EMBEDDINGS_OPENAI_DIMENSIONS": "384",
+        # Exercise the local TEI-compatible interface without a real model.
+        "REMEMBER_API_RERANKER_PROVIDER": "tei",
+        "REMEMBER_API_RERANKER_TEI_URL": stub_url,
+        # Consolidation's decision model (triage), for consolidation only: set up globally it
+        # would also rank recall. Triage is on by default wherever one is set up; it is off
+        # here so no other story's consolidation changes, and test_22 turns it on per bank.
+        "REMEMBER_API_CONSOLIDATION_DECISION_MODEL_PROVIDER": "typesafe",
+        "REMEMBER_API_CONSOLIDATION_DECISION_MODEL_API_KEY": "stub-key",
+        "REMEMBER_API_CONSOLIDATION_DECISION_MODEL_BASE_URL": stub_url,
+        "REMEMBER_API_CONSOLIDATION_USE_DECISION_MODEL": "false",
+        # In production a retry earns its keep even on a 400: a model that
+        # returned malformed JSON often gets it right the second time. Against a
+        # deterministic stub it cannot — the same request gets the same answer —
+        # so retries here would only turn an unstubbed call into several rounds
+        # of exponential backoff before the same failure. Off, the "run, paste the
+        # rule, run again" loop takes milliseconds.
+        "REMEMBER_API_LLM_MAX_RETRIES": "0",
+        "REMEMBER_API_EMBEDDINGS_MAX_RETRIES": "0",
+        "REMEMBER_API_RERANKER_MAX_RETRIES": "0",
+        # Same reasoning one level up: the worker retries a failed operation on a
+        # backoff schedule, so an unstubbed call inside background work would sit
+        # in `pending` through several rounds before reaching `failed`. Against a
+        # deterministic stub the retry cannot change the answer, and the wait
+        # turns a fast loud-miss into a 90-second timeout.
+        "REMEMBER_API_WORKER_MAX_RETRIES": "0",
+        # Pinned, not inherited: story 33 waits a few poll intervals and then
+        # asserts that queued work is still pending *because it cannot be claimed*.
+        # A longer default would let that check pass without the worker ever
+        # having looked.
+        "REMEMBER_API_WORKER_POLL_INTERVAL_MS": str(WORKER_POLL_INTERVAL_MS),
+        # Bank stats are cached for 60s by default. A test that changes the bank
+        # and then asserts on a counter would be reading a value from before its
+        # own action — racy at best, a minute of waiting at worst.
+        "REMEMBER_API_BANK_STATS_CACHE_TTL_SECONDS": "0",
+        # Maintenance sweeps are what pick up recovered consolidations, and the
+        # default start jitter spreads them over a minute so a fleet of servers
+        # does not stampede the database on boot. One server in a test has nobody
+        # to stampede, and the jitter is otherwise a minute of a story waiting for
+        # work it already asked for.
+        "REMEMBER_API_MAINTENANCE_START_JITTER_SECONDS": "0",
+        "REMEMBER_API_CONSOLIDATION_RECONCILE_INTERVAL_SECONDS": "5",
+
+    }
+
+
+def start_remember_server(
+    *, stub_url: str, log_path: Path, extra_env: dict[str, str] | None = None
+) -> RememberServer:
+    port = free_port()
+    env = _server_env(stub_url, extra_env)
+    env.update({"REMEMBER_API_HOST": "127.0.0.1", "REMEMBER_API_PORT": str(port)})
+    return _start(["remember-api"], env=env, url=f"http://127.0.0.1:{port}", log_path=log_path)
+
+
+
+
+def run_remember_admin(
+    args: list[str], *, stub_url: str, log_path: Path, extra_env: dict[str, str] | None = None
+) -> str:
+    """Run one ``remember-admin`` command to completion, as an operator would; return its output.
+
+    Same environment and scratch directory as a server, so it reaches the same database and
+    providers. Raises with the output when the command fails.
+    """
+    run_dir = log_path.parent / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / ".env").write_text("# intentionally empty: see start_remember_server\n")
+    result = subprocess.run(
+        ["uv", "run", "--project", str(API_DIR), "remember-admin", *args],
+        cwd=run_dir,
+        env=_server_env(stub_url, extra_env),
+        capture_output=True,
+        text=True,
+        timeout=SERVER_STARTUP_TIMEOUT,
+    )
+    output = result.stdout + result.stderr
+    log_path.write_text(output)
+    if result.returncode != 0:
+        raise RuntimeError(f"remember-admin {' '.join(args)} exited {result.returncode}:\n{output}")
+    return output
+
+
+def _server_env(stub_url: str, extra_env: dict[str, str] | None) -> dict[str, str]:
+    env = os.environ.copy()
+    # The API has a separate workspace environment from the test runner.
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    # The repo .env is for the developer's own server; a system test must depend
+    # only on what it sets here, or it passes on one machine and fails on another.
+    for key in list(env):
+        # ANTHROPIC_* too: with no Remember key the Anthropic SDK reads its own
+        # variables, and a developer's ANTHROPIC_API_KEY would outrank the federation
+        # credentials a story sets.
+        if key.startswith(("REMEMBER_API_", "ANTHROPIC_")):
+            del env[key]
+
+    env.update(stub_environment(stub_url))
+
+    # A second server for a story that needs different server-level config — the
+    # reranker provider, say, which is not per-bank. It shares the stub and the
+    # database; banks are isolated by id, so two servers on one database do not
+    # collide.
+    env.update(extra_env or {})
+
+    env.update(
+        {
+            "REMEMBER_API_DATABASE_URL": f"pg0://{PG0_INSTANCE}:{PG0_PORT}",
+            "REMEMBER_API_LOG_LEVEL": "info",
+            # Everything the server does by default stays on, background work
+            # included. A retain enqueues observation extraction and can trigger
+            # consolidation, and those run in the worker after the request returns
+            # — but this is a real server with a real worker, so they *do* finish.
+            # Tests wait for them (see `waiting.py`) rather than switching them
+            # off: a suite that disables the asynchronous half of the system stops
+            # being a system test, and the composition bugs this suite exists to
+            # catch are mostly in that half.
+        }
+    )
+    return env
+
+
+def _start(command: list[str], *, env: dict[str, str], url: str, log_path: Path) -> RememberServer:
+    # `remember-api` calls load_dotenv(find_dotenv(usecwd=True), override=True) at
+    # startup, and a discovered .env deliberately wins over the ambient environment
+    # (see issue #2961). Started from anywhere inside the repo it would therefore
+    # pick up the developer's own .env and ignore every variable set above. Running
+    # it from a scratch directory that holds an empty .env stops the upward walk at
+    # a file with nothing in it, so the environment we pass is the whole config.
+    run_dir = log_path.parent / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / ".env").write_text("# intentionally empty: see start_remember_server\n")
+
+    log_file = log_path.open("w")
+    process = subprocess.Popen(
+        ["uv", "run", "--project", str(API_DIR), *command],
+        cwd=run_dir,
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        # Its own process group, so a kill reaches the server and not only `uv run`.
+        start_new_session=True,
+    )
+
+    server = RememberServer(url=url, log_path=log_path, _process=process)
+    _wait_until_healthy(server)
+    return server
+
+
+def _wait_until_healthy(server: RememberServer) -> None:
+    deadline = time.monotonic() + SERVER_STARTUP_TIMEOUT
+    while time.monotonic() < deadline:
+        if server._process.poll() is not None:
+            raise RuntimeError(f"{server._process.args} exited during startup:\n{server.logs()}")
+        with contextlib.suppress(httpx.HTTPError):
+            response = httpx.get(f"{server.url}/health", timeout=5)
+            if response.status_code == 200:
+                return
+        time.sleep(0.5)
+
+    server.stop()
+    raise RuntimeError(f"{server._process.args} was not healthy within {SERVER_STARTUP_TIMEOUT}s:\n{server.logs()}")
