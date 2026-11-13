@@ -13,6 +13,7 @@
  * argv[2] rather than as a Remember env setting.
  */
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -127,7 +128,16 @@ async function main() {
 
 // Only auto-run when this file is executed directly (e.g. `node dist/mcp-server.js`) — importing
 // it (as src/mcp-server.test.ts does) must not start a real server.
-if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+export function isDirectExecution(entry: string | undefined, moduleUrl: string): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution(process.argv[1], import.meta.url)) {
   main().catch((e) => {
     console.error("remember mcp-server failed:", e);
     process.exit(1);

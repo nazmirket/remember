@@ -266,6 +266,12 @@ class FactCausalRelation(BaseModel):
     )
 
 
+_WHY_FIELD_DESCRIPTION = (
+    "Significant context or rationale not already in what. "
+    "If what already includes it, use 'N/A'; do not repeat or translate what."
+)
+
+
 class ExtractedFact(BaseModel):
     """A single extracted fact."""
 
@@ -278,7 +284,7 @@ class ExtractedFact(BaseModel):
     when: str = Field(description="When it happened. 'N/A' if unknown.")
     where: str = Field(description="Location if relevant. 'N/A' if none.")
     who: str = Field(description="People involved with relationships. 'N/A' if general.")
-    why: str = Field(description="Context/significance if important. 'N/A' if obvious.")
+    why: str = Field(description=_WHY_FIELD_DESCRIPTION)
 
     fact_kind: str = Field(default="conversation", description="'event' or 'conversation'")
     occurred_start: str | None = Field(default=None, description="ISO timestamp for events")
@@ -412,15 +418,7 @@ class ExtractedFactVerbose(BaseModel):
         "NOT: 'my friend' or 'Emily and Sarah'"
     )
 
-    why: str = Field(
-        description="WHY it matters - ALL emotional, contextual, and motivational details. "
-        "Include EVERYTHING: feelings, preferences, motivations, observations, context, background, significance. "
-        "BE VERBOSE - capture all the nuance and meaning. "
-        "FOR ASSISTANT FACTS: MUST include what the user asked/requested that led to this interaction! "
-        "Example (world): 'The user felt thrilled and inspired, has always dreamed of an outdoor ceremony, mentioned wanting a similar garden venue, was particularly moved by the intimate atmosphere and personal vows' "
-        "Example (assistant): 'User asked how to fix slow API performance with 1000+ concurrent users, expected 70-80% reduction in database load' "
-        "NOT: 'User liked it' or 'To help user'"
-    )
+    why: str = Field(description=_WHY_FIELD_DESCRIPTION)
 
     fact_kind: str = Field(
         default="conversation",
@@ -485,7 +483,7 @@ class ExtractedFactNoCausal(BaseModel):
     when: str = Field(description="WHEN it happened - include temporal information if mentioned.")
     where: str = Field(description="WHERE it happened - SPECIFIC locations if applicable.")
     who: str = Field(description="WHO is involved - ALL people/entities with relationships.")
-    why: str = Field(description="WHY it matters - emotional, contextual, and motivational details.")
+    why: str = Field(description=_WHY_FIELD_DESCRIPTION)
 
     fact_kind: str = Field(
         default="conversation",
@@ -1057,8 +1055,16 @@ def _iter_jsonl_chunks(text: str, max_chars: int, structured_limit: int) -> Iter
 # Russian facts in ~18% of runs; this one holds English in 30/30. It names no language on
 # purpose: a variant mapping "English input gives English facts, Italian input gives
 # Italian facts" also fixed luna, but pushed gemini-2.5-flash-lite to translate Japanese
-# into English in 10/10 runs (the #181 priming effect). Shorter too: 31 tokens, from 67.
-_DEFAULT_LANGUAGE_RULE = """LANGUAGE: Write every fact in the same language and script as the input text. Never translate. Names, identifiers, code, and quoted text stay verbatim."""
+# into English in 10/10 runs (the #181 priming effect). Before the mixed-language guidance
+# below, this rule was also shorter: 31 tokens, down from 67.
+# A mixed-language sentence cannot be paraphrased into one language without translating part of
+# it. Preserve its wording in the fact; ordinary monolingual statements can still be summarized.
+_DEFAULT_LANGUAGE_RULE = """LANGUAGE: Write every fact in the same language and script as the input text. Never translate. If a sentence switches languages, preserve its original wording in the fact, including each clause, even when it mixes languages. Names, identifiers, code, and quoted text stay verbatim."""
+_VERBOSE_MIXED_LANGUAGE_REMINDER = (
+    "When a mixed-language sentence includes its own reason, keep the entire original sentence "
+    "in what and set why to N/A. Preserve each clause in its original language; do not translate "
+    "or repeat it. Keep separate reasons that are not already in what."
+)
 
 
 # Base prompt template (shared by concise and custom modes)
@@ -1075,7 +1081,7 @@ FACT FORMAT - BE CONCISE
 2. "when": Temporal info if mentioned. "N/A" if none. Use day name when known.
 3. "where": Location if relevant. "N/A" if none.
 4. "who": People involved with relationships. "N/A" if just general info.
-5. "why": Context/significance ONLY if important. "N/A" if obvious.
+5. "why": Context/significance ONLY if it adds information missing from "what". If the reason is already included in "what", use "N/A"; do not repeat or translate it.
 
 CONCISENESS: Capture the essence, not every word. One good sentence beats three mediocre ones.
 
@@ -1233,12 +1239,12 @@ FACT FORMAT - ALL FIVE DIMENSIONS REQUIRED - MAXIMUM VERBOSITY
 For EACH fact, CAPTURE ALL DETAILS - NEVER SUMMARIZE OR OMIT:
 
 1. **what**: WHAT happened - COMPLETE description with ALL specifics (objects, actions, quantities, details)
-2. **when**: WHEN it happened - ALWAYS include temporal info with DAY OF WEEK (e.g., "Monday, June 10, 2024")
+2. **when**: WHEN it happened - include a date or time only when the source states it or it is unambiguously resolved. Otherwise write "N/A" exactly; the Event Date is only a reference, not evidence of when a fact occurred. Timestamps on conversation turns show when messages were sent, not when their subject occurred; do not put them in when unless the speaker states that date.
    - Always include the day name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
    - Format: "day_name, month day, year" (e.g., "Saturday, June 9, 2024")
-3. **where**: WHERE it happened or is about - SPECIFIC locations, places, areas, regions (if applicable)
+3. **where**: WHERE it happened or is about - include only a specific location explicitly stated in the source. Otherwise write "N/A" exactly; an operational requirement is not a location.
 4. **who**: WHO is involved - ALL people/entities with FULL relationships and background
-5. **why**: WHY it matters - ALL emotions, preferences, motivations, significance, nuance
+5. **why**: WHY it matters - ALL emotions, preferences, motivations, significance, nuance not already in what. If what already includes it, write "N/A"; do not repeat or translate what.
    - For assistant facts: MUST include what the user asked/requested that triggered this!
 
 Plus: fact_type, fact_kind, entities, occurred_start/end (for structured dates), where (structured location)
@@ -1692,6 +1698,12 @@ def _build_extraction_prompt_and_schema(config) -> ExtractionPrompt:
     # tokenization and LLM output language are separate concerns.
     from ..prompt_utils import output_language_directive
 
+    if extraction_mode == "verbose" and not config.llm_output_language:
+        # Verbose instructions and examples are long; repeat this narrow rule at the end.
+        reminder = _VERBOSE_MIXED_LANGUAGE_REMINDER
+        if config.retain_optional_fact_dimensions:
+            reminder = reminder.replace("set why to N/A", "set why to null")
+        prompt = f"{prompt}\n\n{reminder}"
     prompt = prompt + output_language_directive(config.llm_output_language)
 
     response_schema = base_response_class

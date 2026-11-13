@@ -52,6 +52,22 @@ If your shell exports `PYTEST_ADDOPTS=-n ...`, clear it for this suite —
 `pytest-xdist` is not installed here, and the session-scoped server makes it
 pointless anyway.
 
+### Local recall benchmark
+
+With an isolated server already running and a bank containing synthetic test data,
+measure direct HTTP recall with:
+
+```sh
+python benchmarks/recall.py --base-url http://127.0.0.1:PORT \
+  --bank TEST_BANK --query 'the test question' --samples 30
+```
+
+The script only reads the selected bank. Save its JSON output together with the
+model and provider configuration, corpus size, machine, and cold or warm state.
+If the daemon requires a token, set `REMEMBER_API_TOKEN` in the environment.
+This measures recall requests, not capture-to-searchable time or LLM-backed
+reflection. Compare runs only when their workloads and environments match.
+
 **Background work is off by default.** Observation extraction and auto
 consolidation run in the worker after a retain returns, so their LLM calls would
 land at a moment no test controls — after the assertions, sometimes after the

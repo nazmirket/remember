@@ -73,7 +73,7 @@ The default bank identity combines the repository name with a stable hash of the
 
 ## Configuration
 
-The installer writes `~/.remember/coding-agent.json`. Set `REMEMBER_HOME` to choose a different data directory, or `REMEMBER_CONFIG` to select a configuration file. Edit settings there and restart the agent for changes to take effect. Scalar fields can also use `REMEMBER_` plus the field name in uppercase snake case, for example `REMEMBER_API_PORT`. Maps such as `mapPathToBank`, `harnesses`, `banks` and `retainMetadata` are file-only.
+The installer writes `~/.remember/coding-agent.json`. Set `REMEMBER_HOME` to choose a different directory for this configuration and daemon state, or `REMEMBER_CONFIG` to select a configuration file. The embedded database is stored separately under `~/.pg0/instances/remember-embed-coding-agent`; `REMEMBER_HOME` does not move it. Edit settings and restart the agent for changes to take effect. Scalar fields can also use `REMEMBER_` plus the field name in uppercase snake case, for example `REMEMBER_API_PORT`. Maps such as `mapPathToBank`, `harnesses`, `banks` and `retainMetadata` are file-only.
 
 Useful settings include `disabled`, `retainSessions`, `autoInject`, `gitIngest`, `pages`, `bankId`, `bankIdTemplate`, `dynamicBankId`, `mapPathToBank` and per-bank `banks`. A `banks.<bankId>` entry can rename a bank with `bank`; explicit mappings override the default isolation. Do not use remote `apiUrl` or `serverMode` settings: Remember uses the local daemon.
 
@@ -83,4 +83,15 @@ The supported configuration fields and their definitions are in `src/core/config
 
 ## Troubleshooting
 
-Check `coding-agents/plugin.log` under the selected Remember home, ensure `uv` and the selected provider are available to the agent process, and verify that the configured checkout still exists. If another service uses the daemon port, stop or reconfigure it before retrying. Memory is best effort: an unavailable daemon can leave a session without recall or retention.
+Check `coding-agents/plugin.log` under the selected Remember home, ensure `uv` and the selected provider are available to the agent process, and verify that the configured checkout still exists. Diagnostic logs can contain prompt text and generated answers; protect them like the memory itself. If another service uses the daemon port, stop or reconfigure it before retrying. Memory is best effort: an unavailable daemon can leave a session without recall or retention.
+
+From the checkout, `uv run --project embed remember-embed daemon status` shows the daemon's URL, log and database location; use `daemon logs`, `daemon stop` or `daemon start` for its other lifecycle actions. Run these commands with the same home and Remember settings as the agent.
+
+To back up the embedded database consistently while it is running:
+
+```sh
+REMEMBER_API_DATABASE_URL=pg0://remember-embed-coding-agent \
+  uv run --project api remember-admin backup /path/to/remember-backup.zip
+```
+
+Keep the coding-agent configuration separately from the database backup. To restore, stop the daemon, ensure the target database has been initialized with the appropriate schema and embedding configuration, then use `remember-admin restore /path/to/remember-backup.zip` with the same database URL. **Restore replaces the target database's existing data.** Take a separate backup first and verify recall after restarting. Do not copy the files of a running PostgreSQL database as a backup.

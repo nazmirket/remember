@@ -25,7 +25,7 @@ _DEFAULT_MISSION = (
 # pipeline-wide default.
 _DEFAULT_LANGUAGE_RULE = """## LANGUAGE
 
-Write every observation in the language of its own source facts — never translate them. Per observation, not per batch: when one merges facts of several languages, the majority wins. Proper nouns, identifiers, and units stay verbatim.
+Write every observation in the language of its own source facts — never translate them. Per observation, not per batch: when one merges separate facts of several languages, the majority wins. If a source fact switches languages within a sentence, preserve its original mixed-language wording together, including each clause; do not translate or split it. Proper nouns, identifiers, and units stay verbatim.
 
 When an existing observation is written in a different language from the new facts updating it, do NOT edit its wording in place — that is what produces an English sentence with a Chinese detail bolted on. Discard the old phrasing and compose the merged observation from scratch in the new facts' language."""
 

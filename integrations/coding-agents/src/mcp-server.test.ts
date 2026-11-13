@@ -1,16 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { buildMcpServer, resolveHarness, resolveProjectCwd, selectTools } from "./mcp-server";
+import {
+  buildMcpServer,
+  isDirectExecution,
+  resolveHarness,
+  resolveProjectCwd,
+  selectTools,
+} from "./mcp-server";
 import { resolveConfig } from "./core/config";
 import type { RememberClient } from "./core/remember";
 
 // Plain stub — no SDK, no network. selectTools only needs a client reference to hand to
 // buildPageTools when enabled; it never calls any client method itself.
 const stubClient = {} as RememberClient;
+
+it("recognizes direct execution through a symlink without starting on import", () => {
+  const dir = mkdtempSync(join(tmpdir(), "remember-mcp-entry-"));
+  try {
+    const entry = join(dir, "server.js");
+    const alias = join(dir, "alias.js");
+    const other = join(dir, "other.js");
+    writeFileSync(entry, "");
+    writeFileSync(other, "");
+    symlinkSync(entry, alias);
+    expect(isDirectExecution(alias, pathToFileURL(entry).href)).toBe(true);
+    expect(isDirectExecution(other, pathToFileURL(entry).href)).toBe(false);
+    expect(isDirectExecution(undefined, pathToFileURL(entry).href)).toBe(false);
+    expect(isDirectExecution(join(dir, "missing"), pathToFileURL(entry).href)).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("selectTools", () => {
   it("returns [] when cfg.disabled is true — a disabled Remember exposes NO tools", () => {

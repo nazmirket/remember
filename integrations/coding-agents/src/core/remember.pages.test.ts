@@ -1333,6 +1333,27 @@ describe("RememberClient.captureInitiative", () => {
 });
 
 describe("RememberClient.configureBank template import", () => {
+  it("does not overwrite bank settings when a required config read fails", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RememberClient({ apiUrl: "http://x", bank: "repo-a" });
+    await expect(
+      client.configureBank({ seedPages: false, requireConfigRead: true })
+    ).rejects.toThrow("unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/config");
+  });
+
+  it("can apply the bank strategies without seeding pages", async () => {
+    const calls: any[] = [];
+    stubFetchRouted(calls, []);
+    const client = new RememberClient({ apiUrl: "http://x", bank: "repo-a" });
+    await client.configureBank({ seedPages: false });
+    const imported = calls.find((call) => call.method === "POST" && call.url.endsWith("/import"));
+    expect(imported.body.bank.retain_strategies).toHaveProperty("conversation");
+    expect(calls.some((call) => call.url.includes("/pages"))).toBe(false);
+  });
+
   it("POSTs the CODING_BANK_TEMPLATE manifest to /import, then seeds pages via the pages", async () => {
     const calls: any[] = [];
     stubFetchRouted(calls, [

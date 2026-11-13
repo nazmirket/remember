@@ -313,6 +313,15 @@ describe("codingBankManifest (#3927)", () => {
     }
   });
 
+  it("guides conversation extraction away from recall feedback without dropping new work", () => {
+    const strategy = (bankOf({})!.retain_strategies as typeof RETAIN_STRATEGIES).conversation;
+    expect(strategy.retain_mission).toContain("do not retain the search miss");
+    expect(strategy.retain_mission).toContain("Still capture new user statements, corrections");
+    expect(strategy.retain_mission).toContain(
+      "actual implementation work and independent findings"
+    );
+  });
+
   it("adds a strategy a newer plugin release introduced, keeping the ones already there", () => {
     // The reason the re-apply exists at all: a bank seeded before `survey` shipped must still get
     // it, or the survey's documents retain under a strategy the bank does not have.

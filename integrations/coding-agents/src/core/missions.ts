@@ -43,7 +43,12 @@ export const CONVERSATION_MISSION =
   "times keep only the LAST, and make unmistakably clear which choice WON. Do NOT emit one fact per " +
   "message, per intermediate proposal, or per action turn. Keep issue/PR references (#123, GH-123) " +
   "VERBATIM and emit each as an ENTITY. Preserve the 'REF-ID: <token>' marker " +
-  "verbatim in every fact. Do not invent; capture only what was actually settled.";
+  "verbatim in every fact. Do not invent; capture only what was actually settled. " +
+  "When the assistant only answers a question by repeating recalled project memory, " +
+  "do not extract the answer or the act of reporting it as a new fact. An unknown " +
+  "result from a memory search is not evidence that the value itself is unknown; " +
+  "do not retain the search miss. Still capture new user statements, corrections, " +
+  "actual implementation work and independent findings in the same conversation.";
 
 export const REFLECT_MISSION =
   "You are a debugging assistant with the project's past decisions in memory (git rationale and " +

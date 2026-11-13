@@ -782,6 +782,52 @@ describe("runRetainHook honors retainSessions", () => {
     expect(retain).toHaveBeenCalledTimes(1);
   });
 
+  it("configures the conversation strategy before retaining when history seeding is disabled", async () => {
+    rawConfig = { autoSeed: false, retainExtractionMode: "verbose" };
+    const configureBank = vi.fn().mockResolvedValue(undefined);
+    const retain = vi.fn().mockResolvedValue(undefined);
+    await runRetainHook(spec, () => ({
+      configureBank,
+      retain,
+      supportsAppendRetain: async () => false,
+    }));
+    expect(configureBank).toHaveBeenCalledWith({
+      seedPages: false,
+      extractionMode: "verbose",
+      defaults: {},
+      timeoutMs: expect.any(Number),
+      requireConfigRead: true,
+    });
+    expect(configureBank.mock.invocationCallOrder[0]).toBeLessThan(
+      retain.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("still retains if bank configuration fails", async () => {
+    rawConfig = { autoSeed: false };
+    const configureBank = vi.fn().mockRejectedValue(new Error("unavailable"));
+    const retain = vi.fn().mockResolvedValue(undefined);
+    await runRetainHook(spec, () => ({
+      configureBank,
+      retain,
+      supportsAppendRetain: async () => false,
+    }));
+    expect(retain).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not configure a bank when bank management is disabled", async () => {
+    rawConfig = { autoSeed: false, manageBankConfig: false };
+    const configureBank = vi.fn().mockResolvedValue(undefined);
+    const retain = vi.fn().mockResolvedValue(undefined);
+    await runRetainHook(spec, () => ({
+      configureBank,
+      retain,
+      supportsAppendRetain: async () => false,
+    }));
+    expect(configureBank).not.toHaveBeenCalled();
+    expect(retain).toHaveBeenCalledTimes(1);
+  });
+
   it("applies an event gate before building a client", async () => {
     const { retain, makeClient } = stubClient();
     const notificationSpec = {

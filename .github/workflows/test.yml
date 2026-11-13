@@ -31,7 +31,7 @@ jobs:
           python-version-file: .python-version
       - run: uv sync --frozen --all-packages --extra embedded-db --extra test
       - run: PYTHONPATH=embed .venv/bin/python -m pytest embed/tests -q
-      - run: .venv/bin/python -m pytest api/tests/test_health_probes.py api/tests/test_migration_shape.py -q -n 0
+      - run: .venv/bin/python -m pytest api/tests/test_health_probes.py api/tests/test_migration_shape.py api/tests/test_provider_auth.py api/tests/test_multilingual_bm25.py -q -n 0
   memory-system:
     runs-on: ubuntu-latest
     timeout-minutes: 30

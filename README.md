@@ -12,7 +12,7 @@ See [the coding-agent setup guide](integrations/coding-agents/README.md) for pre
 
 ## Configuration
 
-Remember stores its configuration and local state in `~/.remember` by default. Set `REMEMBER_HOME` to choose another location or `REMEMBER_CONFIG` to select the coding-agent configuration file. Command-line tools and environment settings use the `remember` and `REMEMBER_` prefixes.
+Remember stores its configuration and daemon state in `~/.remember` by default. Set `REMEMBER_HOME` to choose another location or `REMEMBER_CONFIG` to select the coding-agent configuration file. The embedded database is separate, under `~/.pg0/instances/remember-embed-coding-agent`; changing `REMEMBER_HOME` does not move it. Command-line tools and environment settings use the `remember` and `REMEMBER_` prefixes.
 
 ## Development
 

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from remember_api.engine.memories.pg import recall as recall_mod
 from remember_api.engine.prompt_utils import output_language_directive
 from remember_api.engine.reflect.prompts import (
     build_final_prompt,
@@ -26,7 +27,6 @@ from remember_api.engine.retain.fact_extraction import (
 )
 from remember_api.engine.retain.fact_extraction import _build_extraction_prompt_and_schema
 from remember_api.engine.search import bm25_term_selection as bm25_mod
-from remember_api.engine.memories.pg import recall as recall_mod
 from remember_api.engine.search.retrieval import tokenize_query
 from remember_api.engine.sql.postgresql import PostgreSQLDialect
 
@@ -142,6 +142,68 @@ def test_retain_unset_requires_source_language(mode):
     assert "Respond exclusively in" not in prompt
 
 
+def test_retain_default_preserves_mixed_language_sentence():
+    config = _baseline_config()
+    prompt = _build_extraction_prompt_and_schema(config).system_prompt
+
+    assert "If a sentence switches languages, preserve its original wording in the fact" in prompt
+    assert "including each clause" in prompt
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("mode", ["concise", "verbose"])
+def test_retain_reason_schema_and_prompt_avoid_repeating_the_fact(causal, mode):
+    config = _baseline_config()
+    config.retain_extract_causal_links = causal
+    config.retain_extraction_mode = mode
+    config.retain_optional_fact_dimensions = False
+    response = _build_extraction_prompt_and_schema(config)
+    fact_type = response.response_schema.model_fields["facts"].annotation.__args__[0]
+
+    assert (
+        "already in what" in response.system_prompt.lower()
+        or 'already included in "what"' in response.system_prompt.lower()
+    )
+    assert "not already in what" in fact_type.model_fields["why"].description
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_verbose_mixed_language_reminder_uses_configured_empty_value(optional):
+    config = _baseline_config()
+    config.retain_extraction_mode = "verbose"
+    config.retain_optional_fact_dimensions = optional
+    result = _build_extraction_prompt_and_schema(config)
+    prompt = result.system_prompt
+    expected = "set why to null" if optional else "set why to N/A"
+
+    assert expected in prompt
+    fact_type = result.response_schema.model_fields["facts"].annotation.__args__[0]
+    assert ("use null" if optional else "use 'N/A'") in fact_type.model_fields["why"].description
+
+
+def test_verbose_mixed_language_reminder_yields_to_explicit_output_language():
+    config = _baseline_config()
+    config.retain_extraction_mode = "verbose"
+    config.llm_output_language = "English"
+    prompt = _build_extraction_prompt_and_schema(config).system_prompt
+
+    assert "When a mixed-language sentence includes its own reason" not in prompt
+    assert "Respond exclusively in English" in prompt
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_verbose_time_and_location_require_source_evidence(optional):
+    config = _baseline_config()
+    config.retain_extraction_mode = "verbose"
+    config.retain_optional_fact_dimensions = optional
+    prompt = _build_extraction_prompt_and_schema(config).system_prompt
+    empty_value = "null" if optional else '"N/A"'
+
+    assert f"Otherwise write {empty_value} exactly; the Event Date is only a reference" in prompt
+    assert "Timestamps on conversation turns show when messages were sent" in prompt
+    assert f"Otherwise write {empty_value} exactly; an operational requirement is not a location" in prompt
+
+
 def test_retain_works_with_custom_mode():
     """Custom extraction mode + llm_output_language: directive must still appear."""
     config = _baseline_config()
@@ -180,6 +242,7 @@ def test_consolidation_unset_requires_source_language():
     assert "Per observation, not per batch" in prompt
     assert "compose the merged observation from scratch in the new facts' language" in prompt
     assert "Proper nouns, identifiers, and units stay verbatim" in prompt
+    assert "preserve its original mixed-language wording together" in prompt
 
 
 def test_consolidation_injects_directive():

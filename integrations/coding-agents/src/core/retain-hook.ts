@@ -76,6 +76,7 @@ export interface RetainHookSpec {
 interface RetainClient {
   retain: RememberClient["retain"];
   supportsAppendRetain: RememberClient["supportsAppendRetain"];
+  configureBank?: RememberClient["configureBank"];
 }
 
 /**
@@ -221,6 +222,21 @@ export async function runRetainHook(
       maxParallelRetains: cfg.maxParallelRetains,
       observationScopes: cfg.observationScopes,
     });
+    // With history seeding disabled, deepen never installs the conversation strategy. Configure
+    // the bank separately before retaining; failure must not prevent session capture.
+    if (!cfg.autoSeed && cfg.manageBankConfig && client.configureBank) {
+      try {
+        await client.configureBank({
+          seedPages: false,
+          extractionMode: cfg.retainExtractionMode,
+          defaults: cfg.defaultBankConfig,
+          timeoutMs: Math.max(1, Math.min(2500, Math.floor((hostDeadline - Date.now()) / 4))),
+          requireConfigRead: true,
+        });
+      } catch (e) {
+        log.warn(spec.harness, "bank configuration failed", { error: describeError(e) });
+      }
+    }
   }
 
   await buildRetain({

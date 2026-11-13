@@ -684,6 +684,12 @@ export class RememberClient {
       extractionMode?: RetainExtractionMode;
       /** Bank-config fields to add where the bank is silent — see RawConfig.defaultBankConfig. */
       defaults?: Record<string, unknown>;
+      /** Configure the bank without seeding pages. */
+      seedPages?: boolean;
+      /** Per-request deadline for time-limited hooks. */
+      timeoutMs?: number;
+      /** Do not apply a full template if existing overrides could not be read. */
+      requireConfigRead?: boolean;
     } = {}
   ): Promise<void> {
     if (opts.reset) {
@@ -698,18 +704,21 @@ export class RememberClient {
       // bank is silent (#3927) — bar the extraction mode of the plugin's own strategies, which is
       // re-synced to `extractionMode` (#4560). A reset just deleted the bank, so there is nothing to read.
       const manifest = codingBankManifest(
-        opts.reset ? undefined : await this.readBankOverrides(),
+        opts.reset
+          ? undefined
+          : await this.readBankOverrides(opts.timeoutMs, opts.requireConfigRead),
         opts.extractionMode,
         opts.defaults
       );
       if (!manifest) {
         this.log(`[bank] ${this.bank} already carries the coding structure — nothing to apply`);
       } else {
-        await this.req("POST", this.bankUrl("/import"), manifest);
+        await this.req("POST", this.bankUrl("/import"), manifest, [], opts.timeoutMs);
         this.log(`[bank] applied to ${this.bank}: ${Object.keys(manifest.bank).sort().join(", ")}`);
       }
     }
-    await this.seedPages(opts.pageTrigger, opts.pages, opts.customPages);
+    if (opts.seedPages !== false)
+      await this.seedPages(opts.pageTrigger, opts.pages, opts.customPages);
   }
 
   /**
@@ -720,13 +729,17 @@ export class RememberClient {
    * bank does not exist yet, or the deployment has the bank-config API switched off — in neither
    * case can anything have been customised, so the caller seeds the full template.
    */
-  private async readBankOverrides(): Promise<BankOverrides | undefined> {
+  private async readBankOverrides(
+    timeoutMs?: number,
+    requireRead = false
+  ): Promise<BankOverrides | undefined> {
     try {
-      const r = await this.req("GET", this.bankUrl("/config"));
+      const r = await this.req("GET", this.bankUrl("/config"), undefined, [], timeoutMs);
       if (!r.ok) return undefined;
       const j = (await r.json()) as { overrides?: BankOverrides };
       return j.overrides ?? {};
-    } catch {
+    } catch (error) {
+      if (requireRead) throw error;
       return undefined;
     }
   }
